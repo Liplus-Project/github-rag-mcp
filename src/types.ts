@@ -9,7 +9,6 @@ export interface IssueRecord {
   type: "issue" | "pull_request";
   state: "open" | "closed";
   title: string;
-  body: string;
   labels: string[];
   milestone: string;
   assignees: string[];

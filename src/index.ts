@@ -14,7 +14,10 @@
 
 import type { Env } from "./types.js";
 
-// Durable Object stubs — implementation in subsequent sub-issues
+// Durable Object: issue/PR state store (SQLite-backed)
+export { IssueStore } from "./store.js";
+
+// Durable Object stub — implementation in subsequent sub-issues
 export class RagMcpAgent implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
@@ -29,20 +32,6 @@ export class RagMcpAgent implements DurableObject {
   }
 }
 
-export class IssueStore implements DurableObject {
-  private state: DurableObjectState;
-  private env: Env;
-
-  constructor(state: DurableObjectState, env: Env) {
-    this.state = state;
-    this.env = env;
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    return new Response("IssueStore: not yet implemented", { status: 501 });
-  }
-}
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -53,12 +42,12 @@ export default {
     return new Response("github-rag-mcp: not yet implemented", { status: 404 });
   },
 
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // TODO: Cron poller implementation (sub-issue #3)
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // TODO: Cron poller implementation (sub-issue #6)
     // Poll GitHub API for issue/PR updates since last watermark
     // Generate embeddings via Workers AI (BGE-M3)
     // Upsert vectors into Vectorize
     // Update structured state in IssueStore DO
-    console.log("Cron trigger fired:", event.cron, new Date(event.scheduledTime).toISOString());
+    console.log("Cron trigger fired:", controller.cron, new Date(controller.scheduledTime).toISOString());
   },
 } satisfies ExportedHandler<Env>;
