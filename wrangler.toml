@@ -16,7 +16,7 @@ new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
 # KV namespace for OAuth provider (token, client, grant storage)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "placeholder-replace-after-kv-create"
+id = "67611ab57f734f1c9a0b5d5a96f65e78"
 
 # Vectorize index for semantic search
 [[vectorize]]
