@@ -1,0 +1,36 @@
+name = "github-rag-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-03-26"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "MCP_OBJECT", class_name = "RagMcpAgent" },
+  { name = "ISSUE_STORE", class_name = "IssueStore" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
+
+# KV namespace for OAuth provider (token, client, grant storage)
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "placeholder-replace-after-kv-create"
+
+# Vectorize index for semantic search
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "github-rag-issues"
+
+# Workers AI binding for embedding generation (BGE-M3)
+[ai]
+binding = "AI"
+
+# Cron Triggers — poll GitHub for issue/PR updates every 5 minutes
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Required secrets (set via `wrangler secret put <NAME>`):
+# GITHUB_CLIENT_ID      — GitHub App OAuth client ID
+# GITHUB_CLIENT_SECRET   — GitHub App OAuth client secret
