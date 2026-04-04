@@ -34,3 +34,7 @@ crons = ["*/5 * * * *"]
 # Required secrets (set via `wrangler secret put <NAME>`):
 # GITHUB_CLIENT_ID      — GitHub App OAuth client ID
 # GITHUB_CLIENT_SECRET   — GitHub App OAuth client secret
+# GITHUB_TOKEN           — GitHub token for API polling (PAT or installation token)
+
+# Environment variables (set via `wrangler secret put` or [vars] for non-secret):
+# POLL_REPOS             — Comma-separated repos to poll, e.g. "owner/repo1,owner/repo2"

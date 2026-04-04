@@ -46,4 +46,8 @@ export interface Env {
   GITHUB_CLIENT_ID: string;
   /** GitHub App OAuth client secret (set via `wrangler secret put`) */
   GITHUB_CLIENT_SECRET: string;
+  /** GitHub personal access token or installation token for API access (set via `wrangler secret put`) */
+  GITHUB_TOKEN: string;
+  /** Comma-separated list of repos to poll, e.g. "owner/repo1,owner/repo2" */
+  POLL_REPOS: string;
 }
