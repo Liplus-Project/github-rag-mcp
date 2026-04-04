@@ -145,13 +145,9 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         if (milestone) {
           filter["milestone"] = { $eq: milestone };
         }
-        if (assignee) {
-          // assignees is comma-separated in metadata; use $eq for single assignee match
-          filter["assignees"] = { $eq: assignee };
-        }
-        // Labels: Vectorize metadata stores labels as comma-separated string.
-        // For AND logic with multiple labels, we filter client-side after query.
-        // For single label, use $eq on the labels field (partial match not supported by Vectorize).
+        // Labels and assignees are stored as comma-separated strings in Vectorize metadata.
+        // Vectorize $eq only matches the full string, not substrings.
+        // Post-filter client-side after query for both.
 
         // 3. Query Vectorize
         const vectorizeFilter: VectorizeVectorMetadataFilter | undefined =
@@ -163,7 +159,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           returnMetadata: "all",
         });
 
-        // 4. Post-filter for labels (AND logic: all requested labels must be present)
+        // 4. Post-filter for labels (AND) and assignee (contains)
         let matches = results.matches;
         if (labels && labels.length > 0) {
           matches = matches.filter((m) => {
@@ -171,6 +167,14 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             if (!meta?.labels) return false;
             const itemLabels = meta.labels.split(",").map((l) => l.trim());
             return labels.every((l) => itemLabels.includes(l));
+          });
+        }
+        if (assignee) {
+          matches = matches.filter((m) => {
+            const meta = m.metadata as unknown as VectorMetadata | undefined;
+            if (!meta?.assignees) return false;
+            const itemAssignees = meta.assignees.split(",").map((a) => a.trim());
+            return itemAssignees.includes(assignee);
           });
         }
 
