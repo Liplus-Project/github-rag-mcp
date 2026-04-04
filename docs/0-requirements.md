@@ -1,0 +1,188 @@
+# github-rag-mcp Requirements Specification
+
+## Overview
+
+GitHub issue/PR structured search MCP server.
+Provides AI with ambient context about GitHub issue/PR state via semantic and structured search.
+
+Counterpart to github-webhook-mcp (push-based notifications).
+Together they give AI a complete view of GitHub project state.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Cloudflare Workers                                 │
+│                                                     │
+│  ┌───────────┐  ┌────────────┐  ┌───────────────┐  │
+│  │ MCP Server│  │ Cron Poller│  │ OAuth Provider│  │
+│  │ (tools)   │  │ (5min)     │  │ (GitHub App)  │  │
+│  └─────┬─────┘  └─────┬──────┘  └───────────────┘  │
+│        │              │                              │
+│  ┌─────▼──────────────▼──────┐                      │
+│  │     Durable Object        │                      │
+│  │  (issue/PR state store)   │                      │
+│  └─────┬──────────────┬──────┘                      │
+│        │              │                              │
+│  ┌─────▼─────┐  ┌────▼──────┐                      │
+│  │ Vectorize │  │Workers AI │                      │
+│  │ (search)  │  │ (BGE-M3)  │                      │
+│  └───────────┘  └───────────┘                      │
+└─────────────────────────────────────────────────────┘
+         ▲                    ▲
+         │ MCP protocol       │ GitHub API
+         │                    │
+    Claude Code /        GitHub App
+    liplus-desktop       Installation
+```
+
+## Components
+
+### 1. Cron Poller
+
+Runs every 5 minutes via Cloudflare Cron Triggers.
+
+Responsibilities:
+- Fetch issue/PR updates from GitHub API since last poll
+- Detect new, updated, and closed issues/PRs
+- Generate embeddings via Workers AI (BGE-M3)
+- Upsert vectors into Vectorize with metadata
+- Update structured state in Durable Object
+
+Polling strategy:
+- Use `since` parameter on GitHub Issues API to get only changed items
+- Track `updated_at` watermark per repository
+- Handle pagination for initial full sync
+
+### 2. Embedding Pipeline
+
+Model: `@cf/baai/bge-m3` (Workers AI)
+- Output: 1024 dimensions (fixed, not configurable)
+- Distance metric: cosine similarity
+- Input: concatenation of issue title + body (truncated to model context limit)
+
+Embedding triggers:
+- New issue/PR created
+- Existing issue/PR body or title updated
+- Skip re-embedding if title+body unchanged (hash comparison)
+
+Vector metadata (stored alongside embedding in Vectorize):
+- `repo` (string) — repository full name (owner/repo)
+- `number` (number) — issue/PR number
+- `type` (string) — "issue" or "pull_request"
+- `state` (string) — "open" or "closed"
+- `labels` (string) — comma-separated label names
+- `milestone` (string) — milestone title or empty
+- `assignees` (string) — comma-separated login names
+- `updated_at` (string) — ISO 8601 timestamp
+
+### 3. MCP Server
+
+Protocol: MCP (Model Context Protocol)
+Authentication: OAuth 2.1 via GitHub App (same pattern as github-webhook-mcp)
+
+#### Tool: `search_issues`
+
+Semantic search combined with structured filters.
+
+Parameters:
+- `query` (string, required) — natural language search query
+- `repo` (string, optional) — filter by repository (owner/repo)
+- `state` (string, optional) — "open" | "closed" | "all" (default: "all")
+- `labels` (string[], optional) — filter by label names (AND logic)
+- `milestone` (string, optional) — filter by milestone title
+- `assignee` (string, optional) — filter by assignee login
+- `type` (string, optional) — "issue" | "pull_request" | "all" (default: "all")
+- `top_k` (number, optional) — max results (default: 10, max: 50)
+
+Returns:
+- Array of matched issues/PRs with: number, title, state, labels, milestone, assignee, score, url, updated_at
+
+Flow:
+1. Generate embedding for `query` via Workers AI
+2. Build Vectorize metadata filter from structured params
+3. Query Vectorize with embedding + filter
+4. Return ranked results
+
+#### Tool: `get_issue_context`
+
+Aggregated view of a single issue with related context.
+
+Parameters:
+- `repo` (string, required) — repository (owner/repo)
+- `number` (number, required) — issue/PR number
+
+Returns:
+- Issue/PR details (title, body, state, labels, milestone, assignees)
+- Linked PRs (number, title, state, branch)
+- Branch status (name, ahead/behind)
+- Latest CI status (workflow name, conclusion, url)
+- Sub-issues (if parent issue)
+
+Flow:
+1. Read issue state from Durable Object cache
+2. Fetch related PRs, branch, CI via GitHub API (with caching)
+3. Aggregate and return
+
+#### Tool: `list_recent_activity`
+
+Recent changes across tracked repositories.
+
+Parameters:
+- `repo` (string, optional) — filter by repository
+- `since` (string, optional) — ISO 8601 timestamp (default: last 24 hours)
+- `limit` (number, optional) — max results (default: 20, max: 100)
+
+Returns:
+- Array of activity items: type (created/updated/closed), number, title, actor, timestamp, url
+
+Flow:
+1. Query Durable Object for issues/PRs with `updated_at >= since`
+2. Sort by updated_at descending
+3. Return with activity type classification
+
+### 4. Authentication
+
+GitHub App (same pattern as github-webhook-mcp):
+- OAuth 2.1 for user authentication
+- Installation ID for repository access
+- Reference: Liplus-Project/github-webhook-mcp implementation
+
+### 5. Storage
+
+#### Vectorize Index
+
+- Name: `github-rag-issues`
+- Dimensions: 1024
+- Metric: cosine
+- Metadata indexes: repo, type, state, labels, milestone, assignees
+
+#### Durable Object (Issue State Store)
+
+SQLite-backed structured storage:
+- Issue/PR metadata (number, title, state, labels, milestone, assignees, body hash, timestamps)
+- Polling watermarks (last polled timestamp per repo)
+- Used for `get_issue_context` and `list_recent_activity` without hitting Vectorize
+
+## Constraints
+
+- TypeScript (consistent with webhook-mcp stack)
+- Single repository per deployment in v0.1.0
+- Issue scale: hundreds per repository (Vectorize free tier sufficient)
+- No dependency on github-webhook-mcp
+
+## Platform Limits (Verified)
+
+| Resource | Free Tier Limit | Expected Usage |
+|---|---|---|
+| Vectorize stored dims | 5,000,000 | ~500 issues x 1024 = 512,000 |
+| Vectorize queried dims/mo | 30,000,000 | ~1000 queries x 1024 x 10 = 10,240,000 |
+| Vectorize metadata filter | $eq, $in, range | Sufficient for all structured filters |
+| Workers AI BGE-M3 | 1,500 req/min, 10K neurons/day | ~100 embeddings/day at 5min interval |
+| Cron Triggers | 5/account, min 1min interval | 1 trigger at 5min interval |
+| Durable Object SQLite | 10GB/DO | Hundreds of issues = negligible |
+
+## Future Scope
+
+- Real-time index update via github-webhook-mcp event forwarding
+- Multi-repository cross-search
