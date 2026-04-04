@@ -42,6 +42,8 @@ export interface Env {
   OAUTH_KV: KVNamespace;
   VECTORIZE: Vectorize;
   AI: Ai;
-  GITHUB_CLIENT_ID?: string;
-  GITHUB_CLIENT_SECRET?: string;
+  /** GitHub App OAuth client ID (set via `wrangler secret put`) */
+  GITHUB_CLIENT_ID: string;
+  /** GitHub App OAuth client secret (set via `wrangler secret put`) */
+  GITHUB_CLIENT_SECRET: string;
 }
