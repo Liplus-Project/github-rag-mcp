@@ -30,24 +30,17 @@ import {
   type GitHubUserProps,
 } from "./oauth.js";
 import { handleScheduled } from "./poller.js";
+import { RagMcpAgent } from "./mcp.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
 
-// Durable Object stub -- implementation in subsequent sub-issues
-export class RagMcpAgent implements DurableObject {
-  private state: DurableObjectState;
-  private env: Env;
+// Durable Object: MCP server (tools: search_issues, get_issue_context, list_recent_activity)
+export { RagMcpAgent } from "./mcp.js";
 
-  constructor(state: DurableObjectState, env: Env) {
-    this.state = state;
-    this.env = env;
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    return new Response("RagMcpAgent: not yet implemented", { status: 501 });
-  }
-}
+// McpAgent.serve() returns a fetch handler for MCP protocol.
+// It reads ctx.props (set by OAuthProvider) and passes them to the DO.
+const mcpHandler = RagMcpAgent.serve("/mcp");
 
 /**
  * Inner handler -- processes requests after OAuthProvider routing.
@@ -69,10 +62,15 @@ const innerHandler: ExportedHandler<Env> = {
         return new Response("Unauthorized", { status: 401 });
       }
 
-      // TODO: Route to RagMcpAgent DO (sub-issue #5)
-      const doId = env.MCP_OBJECT.idFromName(`user-${props.githubUserId}`);
-      const stub = env.MCP_OBJECT.get(doId);
-      return stub.fetch(request);
+      // Rewrite ctx.props to McpProps shape expected by RagMcpAgent.
+      // Pass the GitHub access token so the agent can make API calls.
+      (ctx as unknown as { props: { githubUserId: number; githubLogin: string; accessToken: string } }).props = {
+        githubUserId: props.githubUserId,
+        githubLogin: props.githubLogin,
+        accessToken: props.githubAccessToken,
+      };
+
+      return mcpHandler.fetch(request, env, ctx);
     }
 
     // -- OAuth authorize (redirect to GitHub) --
