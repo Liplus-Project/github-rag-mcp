@@ -35,6 +35,13 @@ const PER_PAGE = 100;
  *  Remaining issues are stored with empty bodyHash and retried next cron. */
 const MAX_EMBEDDINGS_PER_RUN = 50;
 
+/** Maximum number of API pages to fetch per single cron run.
+ *  Prevents Cloudflare Worker CPU time limit on large repos (e.g. 900+ issues initial sync).
+ *  At PER_PAGE=100, this caps a single run at 500 issues.
+ *  When capped, the watermark is set to the last fetched issue's updated_at
+ *  so the next cron continues from where it left off. */
+const MAX_PAGES_PER_RUN = 5;
+
 /**
  * Compute SHA-256 hash of title + body for change detection.
  * Returns hex-encoded hash string.
@@ -106,14 +113,17 @@ async function fetchIssuePage(
 }
 
 /**
- * Fetch all issues (with pagination) from GitHub API since a given timestamp.
- * For initial sync (no since), fetches all issues.
+ * Fetch issues (with pagination) from GitHub API since a given timestamp.
+ * When maxPages is provided, stops after that many pages to stay within
+ * Cloudflare Worker CPU time limits. Returns a `capped` flag indicating
+ * whether pagination was truncated before exhausting all results.
  */
 async function fetchAllIssues(
   repo: string,
   token: string,
   since?: string,
-): Promise<GitHubIssue[]> {
+  maxPages?: number,
+): Promise<{ issues: GitHubIssue[]; capped: boolean }> {
   const allIssues: GitHubIssue[] = [];
   let page = 1;
 
@@ -127,14 +137,23 @@ async function fetchAllIssues(
     if (!hasMore) break;
     page++;
 
-    // Safety: cap at 50 pages (5000 issues) to prevent runaway loops
+    // Stop if we've reached the per-run page cap
+    if (maxPages && page > maxPages) {
+      console.warn(
+        `Pagination capped at ${maxPages} pages (${allIssues.length} issues) for ${repo}. ` +
+        `Remaining issues will be fetched in subsequent cron runs.`,
+      );
+      return { issues: allIssues, capped: true };
+    }
+
+    // Safety: absolute cap to prevent runaway loops
     if (page > 50) {
-      console.warn(`Pagination cap reached for ${repo} at page ${page}`);
-      break;
+      console.warn(`Absolute pagination cap reached for ${repo} at page ${page}`);
+      return { issues: allIssues, capped: true };
     }
   }
 
-  return allIssues;
+  return { issues: allIssues, capped: false };
 }
 
 /**
@@ -311,8 +330,13 @@ async function pollRepo(
   // Record poll start time before fetching (to avoid missing updates during fetch)
   const pollStartTime = new Date().toISOString();
 
-  // Fetch issues from GitHub API
-  const issues = await fetchAllIssues(repo, env.GITHUB_TOKEN, since);
+  // Fetch issues from GitHub API (with per-run page cap)
+  const { issues, capped } = await fetchAllIssues(
+    repo,
+    env.GITHUB_TOKEN,
+    since,
+    MAX_PAGES_PER_RUN,
+  );
 
   if (issues.length === 0) {
     console.log(`No updates for ${repo}`);
@@ -330,12 +354,29 @@ async function pollRepo(
   // Process issues (embedding + store)
   const stats = await processIssues(issues, repo, env, storeStub);
 
+  // Watermark strategy:
+  // - If all pages were fetched (not capped): use pollStartTime so next run
+  //   picks up anything updated during this fetch.
+  // - If pagination was capped: use the updated_at of the last fetched issue
+  //   (sorted by updated asc) so the next cron continues from where we left off.
+  //   Using pollStartTime here would skip the remaining unfetched issues.
+  let nextWatermark: string;
+  if (capped) {
+    const lastIssue = issues[issues.length - 1];
+    nextWatermark = lastIssue.updated_at;
+    console.log(
+      `${repo}: pagination was capped — watermark set to last fetched issue updated_at: ${nextWatermark}`,
+    );
+  } else {
+    nextWatermark = pollStartTime;
+  }
+
   // Update watermark after successful processing
   await storeStub.fetch(
     new Request("http://store/watermark", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo, lastPolledAt: pollStartTime }),
+      body: JSON.stringify({ repo, lastPolledAt: nextWatermark }),
     }),
   );
 
