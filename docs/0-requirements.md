@@ -182,6 +182,34 @@ SQLite-backed structured storage:
 | Cron Triggers | 5/account, min 1min interval | 1 trigger at 5min interval |
 | Durable Object SQLite | 10GB/DO | Hundreds of issues = negligible |
 
+### Runtime Constraints
+
+Free Tier デプロイで発見された運用制約。有料プランへ移行後も設計パターンとして有用。
+
+#### 1. Worker 実行あたりの Workers AI 呼び出し制限
+
+1回の Worker 実行で大量の `ai.run()` を呼ぶと `Too many API requests by single Worker invocation` エラーが発生する。
+
+対策: `MAX_EMBEDDINGS_PER_RUN = 50` でバッチ制限（`src/poller.ts`）。制限超過分は空 bodyHash で保存し、次回 cron でリトライ。
+
+#### 2. Cron Trigger の CPU 時間制限
+
+900+ issue の初回同期で GitHub API 全件取得 + IssueStore upsert だけで CPU 制限超過が発生する。
+
+対策: `MAX_PAGES_PER_RUN = 2`（`PER_PAGE=100` x 2 = 最大200件/回）でページネーション制限（`src/poller.ts`）。制限到達時は最後に取得した issue の `updated_at` を watermark に設定し、次回 cron で続行。
+
+#### 3. デプロイ時の Durable Object リセット
+
+Workers Builds デプロイで DO がリセットされ、watermark（ポーリング進捗）が消失する。結果として初回同期に戻り、上記 1・2 の制限に再度引っかかる。
+
+対策: バッチ制限により数回の cron 実行で自然回復する設計。明示的なリカバリ処理は不要。
+
+#### 4. エンベディング失敗時のリトライ設計
+
+失敗時に bodyHash を保存すると、次回 cron でハッシュ一致により永久にリトライされない構造バグが存在した。
+
+対策: エンベディング失敗時は空文字列の bodyHash を保存し、次回 cron でハッシュ不一致を検出してリトライ（`src/poller.ts`）。
+
 ## Future Scope
 
 - Real-time index update via github-webhook-mcp event forwarding
