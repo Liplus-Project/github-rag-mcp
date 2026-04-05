@@ -17,6 +17,7 @@
   "documentation": "https://github.com/Liplus-Project/github-rag-mcp#readme",
   "support": "https://github.com/Liplus-Project/github-rag-mcp/discussions",
   "license": "MIT",
+  "icon": "icon.png",
   "server": {
     "type": "node",
     "entry_point": "server/index.js",
