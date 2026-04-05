@@ -105,7 +105,8 @@ const oauthWrapped = createOAuthProvider(
 );
 
 export default {
-  fetch: oauthWrapped.fetch,
+  fetch: (req: Request, env: Env, ctx: ExecutionContext) =>
+    oauthWrapped.fetch(req, env as unknown as OAuthEnv & Record<string, unknown>, ctx),
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     await handleScheduled(controller, env, ctx);
   },
