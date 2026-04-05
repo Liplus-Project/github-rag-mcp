@@ -38,11 +38,13 @@ jobs:
         with:
           name: mcpb
           path: dist
-      - name: Upload mcpb to release
+      - name: Rename and upload mcpb to release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG_NAME" dist/*.mcpb --clobber --repo "${{ github.repository }}"
+        run: |
+          mv dist/mcp-server.mcpb dist/github-rag-mcp.mcpb
+          gh release upload "$TAG_NAME" dist/github-rag-mcp.mcpb --clobber --repo "${{ github.repository }}"
 
   npm-publish:
     runs-on: ubuntu-latest
