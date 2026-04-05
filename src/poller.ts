@@ -30,6 +30,11 @@ const MAX_EMBEDDING_INPUT_CHARS = 8000;
 /** GitHub API page size */
 const PER_PAGE = 100;
 
+/** Maximum number of embeddings to generate per single cron run.
+ *  Prevents Workers AI rate-limit errors on large repos.
+ *  Remaining issues are stored with empty bodyHash and retried next cron. */
+const MAX_EMBEDDINGS_PER_RUN = 50;
+
 /**
  * Compute SHA-256 hash of title + body for change detection.
  * Returns hex-encoded hash string.
@@ -196,8 +201,20 @@ async function processIssues(
     // Track whether embedding succeeded — determines whether bodyHash is saved
     let embeddingSucceeded = false;
 
-    // Generate embedding if content changed
-    if (needsEmbedding) {
+    // Enforce per-run embedding limit to avoid Workers AI rate limits
+    if (needsEmbedding && embedded >= MAX_EMBEDDINGS_PER_RUN) {
+      if (embedded === MAX_EMBEDDINGS_PER_RUN) {
+        console.warn(
+          `Embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
+          `Remaining issues will be retried next cron run.`,
+        );
+      }
+      // Skip embedding — store with empty bodyHash so next poll retries
+      needsEmbedding = true; // keep flag for bodyHash logic below
+    }
+
+    // Generate embedding if content changed and within batch limit
+    if (needsEmbedding && embedded < MAX_EMBEDDINGS_PER_RUN) {
       try {
         const embeddingInput = prepareEmbeddingInput(title, issue.body);
         const embedding = await generateEmbedding(env.AI, embeddingInput);
