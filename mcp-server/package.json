@@ -1,0 +1,43 @@
+{
+  "name": "github-rag-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for semantic search of GitHub issues/PRs via Cloudflare Worker",
+  "type": "module",
+  "bin": {
+    "github-rag-mcp": "server/index.js"
+  },
+  "main": "./server/index.js",
+  "files": [
+    "server/",
+    "manifest.json",
+    "server.json"
+  ],
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --check server/index.js",
+    "pack:mcpb": "mcpb pack"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "github",
+    "issues",
+    "search",
+    "rag",
+    "cloudflare"
+  ],
+  "mcpName": "io.github.Liplus-Project/github-rag-mcp",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Liplus-Project/github-rag-mcp.git"
+  }
+}
