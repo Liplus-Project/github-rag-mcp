@@ -161,10 +161,11 @@ async function processIssues(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
-): Promise<{ processed: number; embedded: number; skipped: number }> {
+): Promise<{ processed: number; embedded: number; skipped: number; failed: number }> {
   let processed = 0;
   let embedded = 0;
   let skipped = 0;
+  let failed = 0;
 
   // Process in batches to manage memory and rate limits
   for (const issue of issues) {
@@ -175,20 +176,6 @@ async function processIssues(
     const type: IssueRecord["type"] = issue.pull_request
       ? "pull_request"
       : "issue";
-
-    const record: IssueRecord = {
-      repo,
-      number: issue.number,
-      type,
-      state: issue.state,
-      title,
-      labels: issue.labels.map((l) => l.name),
-      milestone: issue.milestone?.title ?? "",
-      assignees: issue.assignees.map((a) => a.login),
-      bodyHash,
-      createdAt: issue.created_at,
-      updatedAt: issue.updated_at,
-    };
 
     // Check if body has changed by comparing hash with stored value
     const existingResp = await storeStub.fetch(
@@ -206,6 +193,9 @@ async function processIssues(
       }
     }
 
+    // Track whether embedding succeeded — determines whether bodyHash is saved
+    let embeddingSucceeded = false;
+
     // Generate embedding if content changed
     if (needsEmbedding) {
       try {
@@ -217,9 +207,9 @@ async function processIssues(
           number: issue.number,
           type,
           state: issue.state,
-          labels: record.labels.join(","),
-          milestone: record.milestone,
-          assignees: record.assignees.join(","),
+          labels: issue.labels.map((l) => l.name).join(","),
+          milestone: issue.milestone?.title ?? "",
+          assignees: issue.assignees.map((a) => a.login).join(","),
           updated_at: issue.updated_at,
         };
 
@@ -232,15 +222,34 @@ async function processIssues(
           },
         ]);
 
+        embeddingSucceeded = true;
         embedded++;
       } catch (err) {
         console.error(
           `Failed to embed ${repo}#${issue.number}:`,
           err instanceof Error ? err.message : String(err),
         );
+        failed++;
         // Continue processing other issues even if one fails
       }
     }
+
+    // Build record — save bodyHash only when embedding succeeded (or was skipped
+    // because it already exists). When embedding fails, store empty bodyHash so
+    // the next poll will detect a mismatch and retry embedding.
+    const record: IssueRecord = {
+      repo,
+      number: issue.number,
+      type,
+      state: issue.state,
+      title,
+      labels: issue.labels.map((l) => l.name),
+      milestone: issue.milestone?.title ?? "",
+      assignees: issue.assignees.map((a) => a.login),
+      bodyHash: needsEmbedding && !embeddingSucceeded ? "" : bodyHash,
+      createdAt: issue.created_at,
+      updatedAt: issue.updated_at,
+    };
 
     // Upsert structured data into IssueStore (always, even if embedding skipped)
     await storeStub.fetch(
@@ -254,7 +263,7 @@ async function processIssues(
     processed++;
   }
 
-  return { processed, embedded, skipped };
+  return { processed, embedded, skipped, failed };
 }
 
 /**
@@ -314,7 +323,7 @@ async function pollRepo(
   );
 
   console.log(
-    `${repo}: ${stats.processed} processed, ${stats.embedded} embedded, ${stats.skipped} unchanged`,
+    `${repo}: ${stats.processed} processed, ${stats.embedded} embedded, ${stats.skipped} unchanged, ${stats.failed} failed`,
   );
 }
 

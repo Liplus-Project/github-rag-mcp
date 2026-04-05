@@ -179,6 +179,21 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToIssueRecord);
   }
 
+  // ---- Hash reset for re-sync ----
+
+  /**
+   * Reset all bodyHashes for a given repo so that the next poll
+   * will regenerate embeddings for every issue.
+   * Returns the number of rows affected.
+   */
+  resetBodyHashes(repo: string): number {
+    const cursor = this.sql.exec(
+      `UPDATE issues SET body_hash = '' WHERE repo = ? AND body_hash != ''`,
+      repo,
+    );
+    return cursor.rowsWritten;
+  }
+
   // ---- Watermark management ----
 
   getWatermark(repo: string): PollWatermark | null {
@@ -256,6 +271,14 @@ export class IssueStore implements DurableObject {
           repo,
         });
         return Response.json(items);
+      }
+
+      // POST /reset-hashes?repo=... — reset all bodyHashes for a repo to force re-embedding
+      if (request.method === "POST" && path === "/reset-hashes") {
+        const repo = url.searchParams.get("repo");
+        if (!repo) return new Response("missing repo", { status: 400 });
+        const count = this.resetBodyHashes(repo);
+        return Response.json({ repo, reset: count });
       }
 
       // GET /watermark?repo=... — get poll watermark
