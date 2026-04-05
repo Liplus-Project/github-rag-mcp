@@ -1,0 +1,75 @@
+name: CD
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-mcpb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm ci
+        working-directory: mcp-server
+      - name: Sync manifest.json version from release tag
+        working-directory: mcp-server
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: jq --arg v "${TAG_NAME#v}" '.version = $v' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+      - run: npx mcpb pack
+        working-directory: mcp-server
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcpb
+          path: mcp-server/*.mcpb
+
+  attach-mcpb:
+    runs-on: ubuntu-latest
+    needs: build-mcpb
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcpb
+          path: dist
+      - name: Upload mcpb to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG_NAME" dist/*.mcpb --clobber --repo "${{ github.repository }}"
+
+  npm-publish:
+    runs-on: ubuntu-latest
+    needs: build-mcpb
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+        working-directory: mcp-server
+      - name: Sync version from release tag
+        working-directory: mcp-server
+        run: npm version "${TAG_NAME#v}" --no-git-tag-version --allow-same-version
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+      - name: Publish to npm
+        working-directory: mcp-server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="latest"
+          if echo "${TAG_NAME}" | grep -qE '[-]'; then
+            TAG="next"
+          fi
+          npm publish --access public --tag "$TAG"

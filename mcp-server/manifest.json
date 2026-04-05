@@ -1,0 +1,79 @@
+{
+  "manifest_version": "0.3",
+  "name": "github-rag-mcp",
+  "display_name": "GitHub RAG MCP",
+  "version": "0.1.0",
+  "description": "Semantic search for GitHub issues and PRs via Cloudflare Worker + Vectorize.",
+  "long_description": "GitHub RAG MCP provides AI with ambient context about GitHub issue/PR state via semantic and structured search. Issues and PRs are indexed into Cloudflare Vectorize with BGE-M3 embeddings, enabling natural language search with optional metadata filters. Counterpart to github-webhook-mcp (push-based notifications) — together they give AI a complete view of GitHub project state.",
+  "author": {
+    "name": "Liplus Project",
+    "url": "https://github.com/Liplus-Project"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Liplus-Project/github-rag-mcp.git"
+  },
+  "homepage": "https://github.com/Liplus-Project/github-rag-mcp",
+  "documentation": "https://github.com/Liplus-Project/github-rag-mcp#readme",
+  "support": "https://github.com/Liplus-Project/github-rag-mcp/discussions",
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {
+        "RAG_WORKER_URL": "${user_config.worker_url}"
+      }
+    }
+  },
+  "user_config": {
+    "worker_url": {
+      "description": "URL of the Cloudflare Worker endpoint (e.g. https://github-rag-mcp.liplus.workers.dev). Authentication is handled automatically via OAuth.",
+      "type": "string",
+      "required": true,
+      "title": "Worker URL"
+    }
+  },
+  "tools": [
+    {
+      "name": "search_issues",
+      "description": "Semantic search for GitHub issues and PRs combined with structured filters."
+    },
+    {
+      "name": "get_issue_context",
+      "description": "Get aggregated context for a single issue/PR including related PRs, branch status, and CI status."
+    },
+    {
+      "name": "list_recent_activity",
+      "description": "List recent issue/PR activity across tracked repositories."
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.11.0",
+    "platforms": [
+      "win32",
+      "darwin",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "keywords": [
+    "github",
+    "issues",
+    "search",
+    "rag",
+    "vectorize",
+    "cloudflare",
+    "mcp",
+    "claude"
+  ],
+  "privacy_policies": [
+    "https://smgjp.com/privacy-policy-github-rag-mcp/"
+  ]
+}

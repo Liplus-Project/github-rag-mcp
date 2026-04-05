@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Liplus-Project/github-rag-mcp",
+  "description": "Semantic search for GitHub issues and PRs via Cloudflare Worker + Vectorize embeddings",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/Liplus-Project/github-rag-mcp",
+    "source": "github",
+    "subfolder": "mcp-server"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "github-rag-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "RAG_WORKER_URL",
+          "description": "URL of your deployed Cloudflare Worker endpoint (default: https://github-rag-mcp.liplus.workers.dev)",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
