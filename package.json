@@ -2,6 +2,7 @@
   "name": "github-rag-mcp",
   "version": "0.0.1",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
