@@ -37,10 +37,10 @@ const MAX_EMBEDDINGS_PER_RUN = 50;
 
 /** Maximum number of API pages to fetch per single cron run.
  *  Prevents Cloudflare Worker CPU time limit on large repos (e.g. 900+ issues initial sync).
- *  At PER_PAGE=100, this caps a single run at 500 issues.
+ *  At PER_PAGE=100, this caps a single run at 200 issues.
  *  When capped, the watermark is set to the last fetched issue's updated_at
  *  so the next cron continues from where it left off. */
-const MAX_PAGES_PER_RUN = 5;
+const MAX_PAGES_PER_RUN = 2;
 
 /**
  * Compute SHA-256 hash of title + body for change detection.
