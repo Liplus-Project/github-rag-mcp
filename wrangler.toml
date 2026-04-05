@@ -36,5 +36,6 @@ crons = ["*/5 * * * *"]
 # GITHUB_CLIENT_SECRET   — GitHub App OAuth client secret
 # GITHUB_TOKEN           — GitHub token for API polling (PAT or installation token)
 
-# Environment variables (set via `wrangler secret put` or [vars] for non-secret):
-# POLL_REPOS             — Comma-separated repos to poll, e.g. "owner/repo1,owner/repo2"
+# Environment variables
+[vars]
+POLL_REPOS = "Liplus-Project/github-webhook-mcp,Liplus-Project/github-rag-mcp,Liplus-Project/liplus-desktop,Liplus-Project/liplus-language"

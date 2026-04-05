@@ -99,6 +99,14 @@ const innerHandler: ExportedHandler<Env> = {
 
 // OAuthProvider wraps the inner handler, adding OAuth endpoints
 // and protecting /mcp route with access token validation.
-export default createOAuthProvider(
+// Note: OAuthProvider only wraps fetch. We re-export scheduled separately.
+const oauthWrapped = createOAuthProvider(
   innerHandler as unknown as ExportedHandler<OAuthEnv & Record<string, unknown>>,
 );
+
+export default {
+  fetch: oauthWrapped.fetch,
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    await handleScheduled(controller, env, ctx);
+  },
+};
