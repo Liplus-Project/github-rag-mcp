@@ -1,0 +1,87 @@
+# github-rag-mcp
+
+GitHub issue/PR semantic search MCP server on Cloudflare Workers + Vectorize.
+
+Counterpart to [github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp) (push-based notifications). Together they give AI a complete view of GitHub project state.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Cloudflare Workers                                 │
+│                                                     │
+│  ┌───────────┐  ┌────────────┐  ┌───────────────┐  │
+│  │ MCP Server│  │ Cron Poller│  │ OAuth Provider│  │
+│  │ (tools)   │  │ (5min)     │  │ (GitHub App)  │  │
+│  └─────┬─────┘  └─────┬──────┘  └───────────────┘  │
+│        │              │                              │
+│  ┌─────▼──────────────▼──────┐                      │
+│  │     Durable Object        │                      │
+│  │  (issue/PR state store)   │                      │
+│  └─────┬──────────────┬──────┘                      │
+│        │              │                              │
+│  ┌─────▼─────┐  ┌────▼──────┐                      │
+│  │ Vectorize │  │Workers AI │                      │
+│  │ (search)  │  │ (BGE-M3)  │                      │
+│  └───────────┘  └───────────┘                      │
+└─────────────────────────────────────────────────────┘
+         ▲                    ▲
+         │ MCP protocol       │ GitHub API
+         │                    │
+    Claude Code /        GitHub App
+    liplus-desktop       Installation
+```
+
+- **Cron Poller** fetches issue/PR updates from GitHub API every 5 minutes, generates embeddings via Workers AI (BGE-M3), and upserts vectors into Vectorize.
+- **MCP Server** exposes semantic search and structured queries over MCP protocol with OAuth 2.1 authentication.
+- **Durable Object** stores issue/PR metadata in SQLite for fast structured lookups.
+
+## Prerequisites
+
+| Component | Required |
+|-----------|----------|
+| **Node.js 18+** | Build and deploy |
+| **Cloudflare account** | Worker deployment (Free plan sufficient) |
+| **GitHub App** | OAuth authentication and API access |
+| **wrangler CLI** | Cloudflare Workers deployment |
+
+## Getting Started
+
+See the [Installation guide](docs/installation.md) for the full setup, including:
+
+- Cloning and installing dependencies
+- Creating Cloudflare resources (Vectorize index, KV namespace)
+- Registering a GitHub App
+- Deploying the Worker
+- Configuring secrets
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `search_issues` | Semantic search for issues and PRs combined with structured filters (repo, state, labels, milestone, assignee, type) |
+| `get_issue_context` | Aggregated context for a single issue/PR including linked PRs, branch status, and CI status |
+| `list_recent_activity` | Recent issue/PR activity across tracked repositories, classified as created, updated, or closed |
+
+## Repository Structure
+
+```
+src/
+  index.ts        — Worker entrypoint (routing, cron, OAuth)
+  mcp.ts          — MCP server and tool definitions
+  oauth.ts        — OAuth 2.1 provider setup
+  poller.ts       — Cron-triggered GitHub API poller
+  store.ts        — Durable Object issue state store
+  types.ts        — Shared type definitions
+docs/
+  0-requirements.md — Requirements specification
+  installation.md   — Deployment and setup guide
+mcp-server/       — .mcpb client package for Claude Desktop
+wrangler.toml     — Cloudflare Workers configuration
+```
+
+## Related
+
+- [Liplus-Project/github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp) — Real-time GitHub webhook notifications
+- [Liplus-Project/liplus-language](https://github.com/Liplus-Project/liplus-language) — Li+ language specification
+- Requirements: [docs/0-requirements.md](docs/0-requirements.md)
