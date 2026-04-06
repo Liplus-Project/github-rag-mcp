@@ -191,14 +191,29 @@ Flow:
 2. Sort by updated_at descending
 3. Return with activity type classification
 
-### 4. Authentication
+### 4. Admin API
+
+認証なし公開エンドポイントではなく、`GITHUB_TOKEN` ヘッダーによる認証付き管理用エンドポイント。
+
+#### `POST /admin/reset-hashes?repo=owner/repo`
+
+指定リポジトリの全 issue/PR の bodyHash を空文字にリセットする。
+次回 cron 実行時にハッシュ不一致を検出して全件再 embedding が行われる。
+
+認証: `GITHUB_TOKEN` ヘッダーの値が Worker の `GITHUB_TOKEN` シークレットと一致すること。
+
+用途: Vectorize メタデータインデックス作成後の既存ベクトル再 upsert トリガー。
+
+レスポンス: `{ "repo": "owner/repo", "reset": N }` (N = リセットされた行数)
+
+### 5. Authentication
 
 GitHub App (same pattern as github-webhook-mcp):
 - OAuth 2.1 for user authentication
 - Installation ID for repository access
 - Reference: Liplus-Project/github-webhook-mcp implementation
 
-### 5. Storage
+### 6. Storage
 
 #### Vectorize Index
 
@@ -206,6 +221,25 @@ GitHub App (same pattern as github-webhook-mcp):
 - Dimensions: 1024
 - Metric: cosine
 - Metadata indexes: repo, type, state, labels, milestone, assignees
+
+**前提条件: メタデータインデックスの事前作成が必須**
+
+Vectorize のメタデータフィルタリング（`$eq` など）は、ベクトル挿入前にメタデータインデックスを作成しておく必要がある。
+インデックスなしで upsert されたベクトルはフィルタ対象外となり、構造化フィルタが常に0件を返す。
+
+インデックス作成コマンド（Workers コードからは不可、CLI のみ）:
+
+```sh
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name repo
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name type
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name state
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name milestone
+```
+
+インデックス作成後、既存ベクトルを再 upsert する必要がある。
+admin エンドポイント（`POST /admin/reset-hashes?repo=owner/repo`、`GITHUB_TOKEN` ヘッダー認証）で bodyHash をリセットすると、次回 cron 実行時に全件が再 embedding される。
+
+参照: https://developers.cloudflare.com/vectorize/reference/metadata-filtering/
 
 #### Durable Object (Issue State Store)
 

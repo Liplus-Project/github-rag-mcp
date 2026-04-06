@@ -12,6 +12,7 @@
  * Routes (defaultHandler, no OAuth token required):
  *   GET /oauth/authorize  -- Start GitHub OAuth flow
  *   GET /oauth/callback   -- GitHub OAuth callback
+ *   POST /admin/reset-hashes?repo=owner/repo  -- Reset bodyHashes to trigger re-embedding (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgent  -- MCP server (tools: search_issues, get_issue_context, list_recent_activity)
@@ -54,6 +55,37 @@ const mcpHandler = RagMcpAgent.serve("/mcp");
 const innerHandler: ExportedHandler<Env> = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // -- Admin: reset body hashes to trigger re-embedding on next cron --
+    // POST /admin/reset-hashes?repo=owner/repo
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/reset-hashes") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      // Proxy to IssueStore Durable Object POST /reset-hashes
+      const storeId = env.ISSUE_STORE.idFromName("global");
+      const storeStub = env.ISSUE_STORE.get(storeId);
+      const storeResp = await storeStub.fetch(
+        new Request(
+          `http://store/reset-hashes?repo=${encodeURIComponent(repo)}`,
+          { method: "POST" },
+        ),
+      );
+
+      const body = await storeResp.text();
+      return new Response(body, {
+        status: storeResp.status,
+        headers: { "Content-Type": storeResp.headers.get("Content-Type") ?? "text/plain" },
+      });
+    }
 
     // -- MCP endpoint (OAuth-protected, ctx.props set by OAuthProvider) --
     if (url.pathname.startsWith("/mcp")) {
