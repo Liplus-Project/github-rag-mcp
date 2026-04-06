@@ -5,7 +5,7 @@
  * Body text is NOT stored (only body_hash for embedding change detection).
  */
 
-import type { Env, IssueRecord, ReleaseRecord, PollWatermark } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord, DocRecord, PollWatermark } from "./types.js";
 
 /** Row shape returned by SQLite for the issues table */
 type IssueRow = {
@@ -34,6 +34,15 @@ type ReleaseRow = {
   body_hash: string;
   created_at: string;
   published_at: string;
+};
+
+/** Row shape returned by SQLite for the docs table */
+type DocRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  path: string;
+  blob_sha: string;
+  updated_at: string;
 };
 
 /** Row shape returned by SQLite for the watermarks table */
@@ -69,6 +78,15 @@ function rowToIssueRecord(row: IssueRow): IssueRecord {
     assignees: row.assignees ? row.assignees.split(",") : [],
     bodyHash: row.body_hash,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToDocRecord(row: DocRow): DocRecord {
+  return {
+    repo: row.repo,
+    path: row.path,
+    blobSha: row.blob_sha,
     updatedAt: row.updated_at,
   };
 }
@@ -134,6 +152,21 @@ export class IssueStore implements DurableObject {
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_releases_repo
         ON releases (repo, published_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS docs (
+        repo       TEXT NOT NULL,
+        path       TEXT NOT NULL,
+        blob_sha   TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo, path)
+      );
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_docs_repo
+        ON docs (repo, updated_at DESC);
     `);
 
     // Migration: add etag column if missing (existing deployments)
@@ -321,6 +354,73 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToReleaseRecord);
   }
 
+  // ---- Doc CRUD ----
+
+  upsertDoc(record: DocRecord): void {
+    this.sql.exec(
+      `INSERT INTO docs (repo, path, blob_sha, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (repo, path) DO UPDATE SET
+         blob_sha   = excluded.blob_sha,
+         updated_at = excluded.updated_at`,
+      record.repo,
+      record.path,
+      record.blobSha,
+      record.updatedAt,
+    );
+  }
+
+  getDoc(repo: string, path: string): DocRecord | null {
+    const cursor = this.sql.exec<DocRow>(
+      `SELECT * FROM docs WHERE repo = ? AND path = ?`,
+      repo,
+      path,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToDocRecord(rows[0]);
+  }
+
+  listDocsByRepo(repo: string): DocRecord[] {
+    const cursor = this.sql.exec<DocRow>(
+      `SELECT * FROM docs WHERE repo = ? ORDER BY path ASC`,
+      repo,
+    );
+    return [...cursor].map(rowToDocRecord);
+  }
+
+  getRecentDocs(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): DocRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM docs WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM docs WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<DocRow>(query, ...params);
+    return [...cursor].map(rowToDocRecord);
+  }
+
+  /**
+   * Delete a doc record (e.g., when a file is removed from the repo).
+   */
+  deleteDoc(repo: string, path: string): void {
+    this.sql.exec(
+      `DELETE FROM docs WHERE repo = ? AND path = ?`,
+      repo,
+      path,
+    );
+  }
+
   // ---- Hash reset for re-sync ----
 
   /**
@@ -499,6 +599,57 @@ export class IssueStore implements DurableObject {
       if (request.method === "POST" && path === "/watermark") {
         const { repo, lastPolledAt, etag } = (await request.json()) as PollWatermark;
         this.setWatermark(repo, lastPolledAt, etag);
+        return new Response("ok", { status: 200 });
+      }
+
+      // POST /upsert-doc — upsert a single doc record
+      if (request.method === "POST" && path === "/upsert-doc") {
+        const record = (await request.json()) as DocRecord;
+        this.upsertDoc(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /doc?repo=...&path=... — get a single doc record
+      if (request.method === "GET" && path === "/doc") {
+        const repo = url.searchParams.get("repo");
+        const docPath = url.searchParams.get("path");
+        if (!repo || !docPath) {
+          return new Response("missing repo or path", { status: 400 });
+        }
+        const doc = this.getDoc(repo, docPath);
+        if (!doc) return new Response("not found", { status: 404 });
+        return Response.json(doc);
+      }
+
+      // GET /docs?repo=... — list docs by repo
+      if (request.method === "GET" && path === "/docs") {
+        const repo = url.searchParams.get("repo");
+        if (!repo) return new Response("missing repo", { status: 400 });
+        const docs = this.listDocsByRepo(repo);
+        return Response.json(docs);
+      }
+
+      // GET /recent-docs?since=...&limit=...&repo=... — recent doc activity
+      if (request.method === "GET" && path === "/recent-docs") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentDocs({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
+      }
+
+      // DELETE /doc?repo=...&path=... — delete a doc record
+      if (request.method === "DELETE" && path === "/doc") {
+        const repo = url.searchParams.get("repo");
+        const docPath = url.searchParams.get("path");
+        if (!repo || !docPath) {
+          return new Response("missing repo or path", { status: 400 });
+        }
+        this.deleteDoc(repo, docPath);
         return new Response("ok", { status: 200 });
       }
 
