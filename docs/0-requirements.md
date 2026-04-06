@@ -59,6 +59,24 @@ Polling strategy:
   - `cache: "no-store"` on fetch() to bypass Cloudflare cache layer
   - ETag stored alongside watermark in Durable Object
 
+### 1b. Release Poller
+
+Runs as part of the cron poller, after issue/PR polling for each repository.
+
+Responsibilities:
+- Fetch release updates from GitHub Releases API
+- Detect new and updated releases
+- Generate embeddings for release name + body (release notes)
+- Upsert vectors into Vectorize with release-specific metadata
+- Store structured release data in Durable Object (releases table)
+
+Polling strategy:
+- Use ETag conditional requests (`If-None-Match`) to skip processing when no changes
+  - Same pattern as issue/PR polling (#38)
+  - 304 Not Modified skips all downstream processing
+- Separate watermark namespace: `releases:{repo}` in watermarks table
+- Vector ID format: `{repo}#release-{tag_name}` (no collision with `{repo}#{number}`)
+
 ### 2. Embedding Pipeline
 
 Model: `@cf/baai/bge-m3` (Workers AI)
@@ -73,13 +91,14 @@ Embedding triggers:
 
 Vector metadata (stored alongside embedding in Vectorize):
 - `repo` (string) — repository full name (owner/repo)
-- `number` (number) — issue/PR number
-- `type` (string) — "issue" or "pull_request"
-- `state` (string) — "open" or "closed"
-- `labels` (string) — comma-separated label names
-- `milestone` (string) — milestone title or empty
-- `assignees` (string) — comma-separated login names
+- `number` (number) — issue/PR number (0 for releases)
+- `type` (string) — "issue", "pull_request", or "release"
+- `state` (string) — "open" or "closed" (releases: always "published")
+- `labels` (string) — comma-separated label names (releases: empty)
+- `milestone` (string) — milestone title or empty (releases: empty)
+- `assignees` (string) — comma-separated login names (releases: empty)
 - `updated_at` (string) — ISO 8601 timestamp
+- `tag_name` (string) — release tag name (releases only, empty for issues/PRs)
 
 ### 3. MCP Server
 
@@ -97,11 +116,12 @@ Parameters:
 - `labels` (string[], optional) — filter by label names (AND logic)
 - `milestone` (string, optional) — filter by milestone title
 - `assignee` (string, optional) — filter by assignee login
-- `type` (string, optional) — "issue" | "pull_request" | "all" (default: "all")
+- `type` (string, optional) — "issue" | "pull_request" | "release" | "all" (default: "all")
 - `top_k` (number, optional) — max results (default: 10, max: 50)
 
 Returns:
-- Array of matched issues/PRs with: number, title, state, labels, milestone, assignee, score, url, updated_at
+- Array of matched issues/PRs/releases with: number, title, state, labels, milestone, assignee, score, url, updated_at
+- Releases include: tag_name, prerelease flag
 
 Flow:
 1. Generate embedding for `query` via Workers AI
@@ -123,6 +143,7 @@ Returns:
 - Branch status (name, ahead/behind)
 - Latest CI status (workflow name, conclusion, url)
 - Sub-issues (if parent issue)
+- Related releases (releases published after issue was closed, linking issue to release)
 
 Flow:
 1. Read issue state from Durable Object cache
@@ -140,6 +161,7 @@ Parameters:
 
 Returns:
 - Array of activity items: type (created/updated/closed), number, title, actor, timestamp, url
+- Includes release activity (type: "release", activity_type: "created")
 
 Flow:
 1. Query Durable Object for issues/PRs with `updated_at >= since`
@@ -166,8 +188,9 @@ GitHub App (same pattern as github-webhook-mcp):
 
 SQLite-backed structured storage:
 - Issue/PR metadata (number, title, state, labels, milestone, assignees, body hash, timestamps)
-- Polling watermarks (last polled timestamp per repo)
-- Used for `get_issue_context` and `list_recent_activity` without hitting Vectorize
+- Release metadata (tag_name, name, prerelease, body hash, timestamps)
+- Polling watermarks (last polled timestamp per repo; releases use `releases:{repo}` key)
+- Used for `get_issue_context`, `list_recent_activity`, and release queries without hitting Vectorize
 
 ## Constraints
 

@@ -17,6 +17,18 @@ export interface IssueRecord {
   updatedAt: string;
 }
 
+/** Stored release record in Durable Object SQLite */
+export interface ReleaseRecord {
+  repo: string;
+  tagName: string;
+  name: string;
+  body: string;
+  prerelease: boolean;
+  bodyHash: string;
+  createdAt: string;
+  publishedAt: string;
+}
+
 /** Polling watermark per repository */
 export interface PollWatermark {
   repo: string;
@@ -29,12 +41,14 @@ export interface PollWatermark {
 export interface VectorMetadata {
   repo: string;
   number: number;
-  type: "issue" | "pull_request";
-  state: "open" | "closed";
+  type: "issue" | "pull_request" | "release";
+  state: "open" | "closed" | "published";
   labels: string;
   milestone: string;
   assignees: string;
   updated_at: string;
+  /** Release tag name (releases only) */
+  tag_name?: string;
 }
 
 /** Env bindings for the Worker */

@@ -5,7 +5,7 @@
  * Body text is NOT stored (only body_hash for embedding change detection).
  */
 
-import type { Env, IssueRecord, PollWatermark } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord, PollWatermark } from "./types.js";
 
 /** Row shape returned by SQLite for the issues table */
 type IssueRow = {
@@ -23,6 +23,19 @@ type IssueRow = {
   updated_at: string;
 };
 
+/** Row shape returned by SQLite for the releases table */
+type ReleaseRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  tag_name: string;
+  name: string;
+  body: string;
+  prerelease: number;
+  body_hash: string;
+  created_at: string;
+  published_at: string;
+};
+
 /** Row shape returned by SQLite for the watermarks table */
 type WatermarkRow = {
   [key: string]: SqlStorageValue;
@@ -30,6 +43,19 @@ type WatermarkRow = {
   last_polled_at: string;
   etag: string;
 };
+
+function rowToReleaseRecord(row: ReleaseRow): ReleaseRecord {
+  return {
+    repo: row.repo,
+    tagName: row.tag_name,
+    name: row.name,
+    body: row.body,
+    prerelease: row.prerelease === 1,
+    bodyHash: row.body_hash,
+    createdAt: row.created_at,
+    publishedAt: row.published_at,
+  };
+}
 
 function rowToIssueRecord(row: IssueRow): IssueRecord {
   return {
@@ -83,6 +109,31 @@ export class IssueStore implements DurableObject {
         last_polled_at TEXT NOT NULL,
         etag           TEXT NOT NULL DEFAULT ''
       );
+    `);
+
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS releases (
+        repo         TEXT    NOT NULL,
+        tag_name     TEXT    NOT NULL,
+        name         TEXT    NOT NULL DEFAULT '',
+        body         TEXT    NOT NULL DEFAULT '',
+        prerelease   INTEGER NOT NULL DEFAULT 0,
+        body_hash    TEXT    NOT NULL DEFAULT '',
+        created_at   TEXT    NOT NULL,
+        published_at TEXT    NOT NULL,
+        PRIMARY KEY (repo, tag_name)
+      );
+    `);
+
+    // Index for recent release queries
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_releases_published
+        ON releases (published_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_releases_repo
+        ON releases (repo, published_at DESC);
     `);
 
     // Migration: add etag column if missing (existing deployments)
@@ -188,6 +239,88 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToIssueRecord);
   }
 
+  // ---- Release CRUD ----
+
+  upsertRelease(record: ReleaseRecord): void {
+    this.sql.exec(
+      `INSERT INTO releases (repo, tag_name, name, body, prerelease, body_hash, created_at, published_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo, tag_name) DO UPDATE SET
+         name         = excluded.name,
+         body         = excluded.body,
+         prerelease   = excluded.prerelease,
+         body_hash    = excluded.body_hash,
+         published_at = excluded.published_at`,
+      record.repo,
+      record.tagName,
+      record.name,
+      record.body,
+      record.prerelease ? 1 : 0,
+      record.bodyHash,
+      record.createdAt,
+      record.publishedAt,
+    );
+  }
+
+  getRelease(repo: string, tagName: string): ReleaseRecord | null {
+    const cursor = this.sql.exec<ReleaseRow>(
+      `SELECT * FROM releases WHERE repo = ? AND tag_name = ?`,
+      repo,
+      tagName,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToReleaseRecord(rows[0]);
+  }
+
+  listReleasesByRepo(
+    repo: string,
+    opts?: { limit?: number },
+  ): ReleaseRecord[] {
+    const limit = opts?.limit ?? 50;
+    const cursor = this.sql.exec<ReleaseRow>(
+      `SELECT * FROM releases WHERE repo = ? ORDER BY published_at DESC LIMIT ?`,
+      repo,
+      limit,
+    );
+    return [...cursor].map(rowToReleaseRecord);
+  }
+
+  getRecentReleases(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): ReleaseRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM releases WHERE repo = ? AND published_at >= ? ORDER BY published_at DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM releases WHERE published_at >= ? ORDER BY published_at DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<ReleaseRow>(query, ...params);
+    return [...cursor].map(rowToReleaseRecord);
+  }
+
+  /**
+   * Find releases published after a given timestamp (e.g., issue close time).
+   * Used by get_issue_context to find which release an issue was included in.
+   */
+  getReleasesAfter(repo: string, afterTimestamp: string, limit = 5): ReleaseRecord[] {
+    const cursor = this.sql.exec<ReleaseRow>(
+      `SELECT * FROM releases WHERE repo = ? AND published_at >= ? ORDER BY published_at ASC LIMIT ?`,
+      repo,
+      afterTimestamp,
+      limit,
+    );
+    return [...cursor].map(rowToReleaseRecord);
+  }
+
   // ---- Hash reset for re-sync ----
 
   /**
@@ -279,6 +412,65 @@ export class IssueStore implements DurableObject {
         const limit = url.searchParams.get("limit");
         const repo = url.searchParams.get("repo") ?? undefined;
         const items = this.getRecentActivity({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
+      }
+
+      // POST /upsert-release — upsert a single release record
+      if (request.method === "POST" && path === "/upsert-release") {
+        const record = (await request.json()) as ReleaseRecord;
+        this.upsertRelease(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /release?repo=...&tag_name=... — get a single release
+      if (request.method === "GET" && path === "/release") {
+        const repo = url.searchParams.get("repo");
+        const tagName = url.searchParams.get("tag_name");
+        if (!repo || !tagName) {
+          return new Response("missing repo or tag_name", { status: 400 });
+        }
+        const release = this.getRelease(repo, tagName);
+        if (!release) return new Response("not found", { status: 404 });
+        return Response.json(release);
+      }
+
+      // GET /releases?repo=...&limit=... — list releases by repo
+      if (request.method === "GET" && path === "/releases") {
+        const repo = url.searchParams.get("repo");
+        if (!repo) return new Response("missing repo", { status: 400 });
+        const limit = url.searchParams.get("limit");
+        const releases = this.listReleasesByRepo(repo, {
+          limit: limit ? parseInt(limit, 10) : undefined,
+        });
+        return Response.json(releases);
+      }
+
+      // GET /releases-after?repo=...&after=...&limit=... — releases published after timestamp
+      if (request.method === "GET" && path === "/releases-after") {
+        const repo = url.searchParams.get("repo");
+        const after = url.searchParams.get("after");
+        if (!repo || !after) {
+          return new Response("missing repo or after", { status: 400 });
+        }
+        const limit = url.searchParams.get("limit");
+        const releases = this.getReleasesAfter(
+          repo,
+          after,
+          limit ? parseInt(limit, 10) : undefined,
+        );
+        return Response.json(releases);
+      }
+
+      // GET /recent-releases?since=...&limit=...&repo=... — recent release activity
+      if (request.method === "GET" && path === "/recent-releases") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentReleases({
           since,
           limit: limit ? parseInt(limit, 10) : undefined,
           repo,
