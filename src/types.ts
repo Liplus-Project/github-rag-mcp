@@ -21,6 +21,8 @@ export interface IssueRecord {
 export interface PollWatermark {
   repo: string;
   lastPolledAt: string;
+  /** ETag from GitHub API for conditional requests (page 1 only) */
+  etag?: string;
 }
 
 /** Metadata stored alongside vectors in Vectorize */
