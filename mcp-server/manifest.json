@@ -16,7 +16,7 @@
   "homepage": "https://github.com/Liplus-Project/github-rag-mcp",
   "documentation": "https://github.com/Liplus-Project/github-rag-mcp#readme",
   "support": "https://github.com/Liplus-Project/github-rag-mcp/discussions",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "icon": "icon.png",
   "server": {
     "type": "node",
