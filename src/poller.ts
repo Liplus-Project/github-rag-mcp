@@ -7,7 +7,7 @@
  * Stores structured metadata in IssueStore Durable Object.
  */
 
-import type { Env, IssueRecord } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord } from "./types.js";
 
 /** GitHub API issue/PR response shape (subset of fields we need) */
 interface GitHubIssue {
@@ -444,6 +444,223 @@ async function pollRepo(
   );
 }
 
+// ── Release Polling ────────────────────────────────────────
+
+/** GitHub API release response shape (subset of fields we need) */
+interface GitHubRelease {
+  id: number;
+  tag_name: string;
+  name: string | null;
+  body: string | null;
+  prerelease: boolean;
+  created_at: string;
+  published_at: string | null;
+  html_url: string;
+}
+
+/**
+ * Fetch releases from GitHub API with ETag conditional request support.
+ * Returns the releases array and the response ETag.
+ * When `etag` is provided, sends `If-None-Match` header.
+ * If GitHub responds 304 Not Modified, returns NOT_MODIFIED sentinel.
+ */
+async function fetchReleases(
+  repo: string,
+  token: string,
+  etag?: string,
+): Promise<{ releases: GitHubRelease[]; etag?: string } | typeof NOT_MODIFIED> {
+  const url = new URL(`https://api.github.com/repos/${repo}/releases`);
+  url.searchParams.set("per_page", "100");
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "github-rag-mcp/0.1.0",
+  };
+
+  if (etag) {
+    headers["If-None-Match"] = etag;
+  }
+
+  const resp = await fetch(url.toString(), {
+    headers,
+    cache: "no-store",
+  } as RequestInit);
+
+  if (resp.status === 304) {
+    return NOT_MODIFIED;
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`GitHub Releases API error ${resp.status}: ${text}`);
+  }
+
+  const releases = (await resp.json()) as GitHubRelease[];
+  const responseEtag = resp.headers.get("etag") ?? undefined;
+  return { releases, etag: responseEtag };
+}
+
+/**
+ * Build Vectorize vector ID for a release.
+ * Format: "owner/repo#release-v1.0.0"
+ */
+function releaseVectorId(repo: string, tagName: string): string {
+  return `${repo}#release-${tagName}`;
+}
+
+/**
+ * Poll a single repository for release updates.
+ */
+async function pollReleases(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  // Use a separate watermark namespace for releases
+  const watermarkKey = `releases:${repo}`;
+  const wmResp = await storeStub.fetch(
+    new Request(
+      `http://store/watermark?repo=${encodeURIComponent(watermarkKey)}`,
+    ),
+  );
+
+  let storedEtag: string | undefined;
+  if (wmResp.ok) {
+    const wm = (await wmResp.json()) as { repo: string; lastPolledAt: string; etag?: string };
+    storedEtag = wm.etag;
+  }
+
+  console.log(
+    `Polling releases for ${repo}${storedEtag ? " (with ETag)" : ""}`,
+  );
+
+  const result = await fetchReleases(repo, env.GITHUB_TOKEN, storedEtag);
+
+  if (result === NOT_MODIFIED) {
+    console.log(`${repo} releases: 304 Not Modified — no changes`);
+    return;
+  }
+
+  const { releases, etag: responseEtag } = result;
+
+  if (releases.length === 0) {
+    console.log(`No releases for ${repo}`);
+    // Update watermark with new ETag
+    await storeStub.fetch(
+      new Request("http://store/watermark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: watermarkKey, lastPolledAt: new Date().toISOString(), etag: responseEtag }),
+      }),
+    );
+    return;
+  }
+
+  let embedded = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const release of releases) {
+    const body = release.body ?? "";
+    const name = release.name ?? release.tag_name;
+    const bodyHash = await computeBodyHash(name, body);
+
+    // Check if release body has changed
+    const existingResp = await storeStub.fetch(
+      new Request(
+        `http://store/release?repo=${encodeURIComponent(repo)}&tag_name=${encodeURIComponent(release.tag_name)}`,
+      ),
+    );
+
+    let needsEmbedding = true;
+    if (existingResp.ok) {
+      const existing = (await existingResp.json()) as ReleaseRecord;
+      if (existing.bodyHash === bodyHash) {
+        needsEmbedding = false;
+        skipped++;
+      }
+    }
+
+    let embeddingSucceeded = false;
+
+    if (needsEmbedding && embedded >= MAX_EMBEDDINGS_PER_RUN) {
+      // Skip — will retry next cron
+      needsEmbedding = true;
+    }
+
+    if (needsEmbedding && embedded < MAX_EMBEDDINGS_PER_RUN) {
+      try {
+        const embeddingInput = prepareEmbeddingInput(name, body);
+        const embedding = await generateEmbedding(env.AI, embeddingInput);
+
+        const metadata: Record<string, string | number> = {
+          repo,
+          number: 0,
+          type: "release",
+          state: "published",
+          labels: "",
+          milestone: "",
+          assignees: "",
+          updated_at: release.published_at ?? release.created_at,
+          tag_name: release.tag_name,
+        };
+
+        await env.VECTORIZE.upsert([
+          {
+            id: releaseVectorId(repo, release.tag_name),
+            values: embedding,
+            metadata,
+          },
+        ]);
+
+        embeddingSucceeded = true;
+        embedded++;
+      } catch (err) {
+        console.error(
+          `Failed to embed release ${repo}#${release.tag_name}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        failed++;
+      }
+    }
+
+    // Upsert release record into store
+    const record: ReleaseRecord = {
+      repo,
+      tagName: release.tag_name,
+      name,
+      body,
+      prerelease: release.prerelease,
+      bodyHash: needsEmbedding && !embeddingSucceeded ? "" : bodyHash,
+      createdAt: release.created_at,
+      publishedAt: release.published_at ?? release.created_at,
+    };
+
+    await storeStub.fetch(
+      new Request("http://store/upsert-release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(record),
+      }),
+    );
+  }
+
+  // Update watermark with ETag
+  await storeStub.fetch(
+    new Request("http://store/watermark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: watermarkKey, lastPolledAt: new Date().toISOString(), etag: responseEtag }),
+    }),
+  );
+
+  console.log(
+    `${repo} releases: ${releases.length} total, ${embedded} embedded, ${skipped} unchanged, ${failed} failed`,
+  );
+}
+
 /**
  * Main scheduled handler — called by Cron Trigger every 5 minutes.
  * Polls all configured repositories for issue/PR updates.
@@ -490,6 +707,15 @@ export async function handleScheduled(
         err instanceof Error ? err.message : String(err),
       );
       // Continue polling other repos even if one fails
+    }
+
+    try {
+      await pollReleases(repo, env, storeStub);
+    } catch (err) {
+      console.error(
+        `Failed to poll releases for ${repo}:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 }

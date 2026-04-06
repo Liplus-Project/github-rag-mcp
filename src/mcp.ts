@@ -14,7 +14,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Env, IssueRecord, VectorMetadata } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord, VectorMetadata } from "./types.js";
 import type { GitHubUserProps } from "./oauth.js";
 
 /** User context passed via props from OAuth layer */
@@ -77,7 +77,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Semantic search for GitHub issues and PRs combined with structured filters. " +
+      "Semantic search for GitHub issues, PRs, and releases combined with structured filters. " +
         "Uses embedding similarity (BGE-M3) with optional metadata filters.",
       {
         query: z.string().describe("Natural language search query"),
@@ -103,10 +103,10 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           .optional()
           .describe("Filter by assignee login"),
         type: z
-          .enum(["issue", "pull_request", "all"])
+          .enum(["issue", "pull_request", "release", "all"])
           .optional()
           .default("all")
-          .describe("Filter by type"),
+          .describe("Filter by type (default: all)"),
         top_k: z
           .number()
           .min(1)
@@ -183,27 +183,53 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           const meta = m.metadata as unknown as VectorMetadata | undefined;
           const itemRepo = meta?.repo ?? "";
           const number = meta?.number ?? 0;
+          const itemType = meta?.type ?? "";
+          const tagName = meta?.tag_name ?? "";
+
+          // Build URL based on type
+          let url: string;
+          if (itemType === "release" && tagName) {
+            url = `https://github.com/${itemRepo}/releases/tag/${tagName}`;
+          } else {
+            url = `https://github.com/${itemRepo}/issues/${number}`;
+          }
+
           return {
             number,
-            title: "", // Title not stored in Vectorize metadata; enriched below
+            title: "", // Enriched below
             state: meta?.state ?? "",
-            type: meta?.type ?? "",
+            type: itemType,
             labels: meta?.labels ? meta.labels.split(",").filter(Boolean) : [],
             milestone: meta?.milestone ?? "",
             assignees: meta?.assignees
               ? meta.assignees.split(",").filter(Boolean)
               : [],
             score: m.score,
-            url: `https://github.com/${itemRepo}/issues/${number}`,
+            url,
             updated_at: meta?.updated_at ?? "",
             repo: itemRepo,
+            ...(itemType === "release" ? { tag_name: tagName } : {}),
           };
         });
 
-        // Enrich with titles from IssueStore
+        // Enrich with titles from IssueStore / release store
         const store = this.getStore();
         for (const item of items) {
-          if (item.repo && item.number) {
+          if (item.type === "release" && item.repo && (item as Record<string, unknown>).tag_name) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/release?repo=${encodeURIComponent(item.repo)}&tag_name=${encodeURIComponent((item as Record<string, unknown>).tag_name as string)}`,
+                ),
+              );
+              if (res.ok) {
+                const record = (await res.json()) as ReleaseRecord;
+                item.title = record.name || record.tagName;
+              }
+            } catch {
+              // Best-effort enrichment
+            }
+          } else if (item.repo && item.number) {
             try {
               const res = await store.fetch(
                 new Request(
@@ -403,7 +429,43 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           // Sub-issues API may not be available
         }
 
-        // 6. Aggregate result
+        // 6. Find related releases (for closed issues, find releases published after close)
+        let relatedReleases: Array<{
+          tag_name: string;
+          name: string;
+          prerelease: boolean;
+          published_at: string;
+          url: string;
+        }> = [];
+
+        const issueState = issueData?.state ?? (ghIssue as Record<string, unknown> | null)?.state ?? "";
+        if (issueState === "closed") {
+          // Use updated_at as proxy for close time
+          const closeTime = issueData?.updatedAt ?? "";
+          if (closeTime) {
+            try {
+              const releasesRes = await store.fetch(
+                new Request(
+                  `http://store/releases-after?repo=${encodeURIComponent(repo)}&after=${encodeURIComponent(closeTime)}&limit=3`,
+                ),
+              );
+              if (releasesRes.ok) {
+                const releases = (await releasesRes.json()) as ReleaseRecord[];
+                relatedReleases = releases.map((r) => ({
+                  tag_name: r.tagName,
+                  name: r.name,
+                  prerelease: r.prerelease,
+                  published_at: r.publishedAt,
+                  url: `https://github.com/${repo}/releases/tag/${r.tagName}`,
+                }));
+              }
+            } catch {
+              // Non-critical
+            }
+          }
+        }
+
+        // 7. Aggregate result
         const result = {
           repo,
           number,
@@ -421,6 +483,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           branch: branchStatus,
           ci: ciStatus,
           sub_issues: subIssues,
+          releases: relatedReleases,
         };
 
         return {
@@ -434,7 +497,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── list_recent_activity ───────────────────────────────────
     this.server.tool(
       "list_recent_activity",
-      "List recent issue/PR activity across tracked repositories. " +
+      "List recent issue/PR/release activity across tracked repositories. " +
         "Returns changes classified as created, updated, or closed.",
       {
         repo: z
@@ -488,7 +551,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         const records = (await res.json()) as IssueRecord[];
 
         // Classify activity and format results
-        const activities = records.map((record) => ({
+        const activities: Array<Record<string, unknown>> = records.map((record) => ({
           activity_type: classifyActivity(record, effectiveSince),
           number: record.number,
           title: record.title,
@@ -501,15 +564,55 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           created_at: record.createdAt,
         }));
 
+        // Fetch recent releases too
+        const releaseParams = new URLSearchParams();
+        releaseParams.set("since", effectiveSince);
+        releaseParams.set("limit", String(effectiveLimit));
+        if (repo) {
+          releaseParams.set("repo", repo);
+        }
+
+        const releaseRes = await store.fetch(
+          new Request(`http://store/recent-releases?${releaseParams.toString()}`),
+        );
+
+        if (releaseRes.ok) {
+          const releases = (await releaseRes.json()) as ReleaseRecord[];
+          for (const release of releases) {
+            activities.push({
+              activity_type: "created",
+              number: 0,
+              title: release.name || release.tagName,
+              type: "release",
+              state: "published",
+              labels: [],
+              repo: release.repo,
+              tag_name: release.tagName,
+              prerelease: release.prerelease,
+              url: `https://github.com/${release.repo}/releases/tag/${release.tagName}`,
+              updated_at: release.publishedAt,
+              created_at: release.createdAt,
+            });
+          }
+        }
+
+        // Sort combined activities by updated_at descending and apply limit
+        activities.sort((a, b) => {
+          const aTime = (a.updated_at as string) ?? "";
+          const bTime = (b.updated_at as string) ?? "";
+          return bTime.localeCompare(aTime);
+        });
+        const limitedActivities = activities.slice(0, effectiveLimit);
+
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify(
                 {
-                  count: activities.length,
+                  count: limitedActivities.length,
                   since: effectiveSince,
-                  activities,
+                  activities: limitedActivities,
                 },
                 null,
                 2,
