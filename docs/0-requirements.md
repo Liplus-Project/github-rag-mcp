@@ -197,14 +197,29 @@ Flow:
 
 #### `POST /admin/reset-hashes?repo=owner/repo`
 
-指定リポジトリの全 issue/PR の bodyHash を空文字にリセットする。
-次回 cron 実行時にハッシュ不一致を検出して全件再 embedding が行われる。
+指定リポジトリの全データを re-embedding 対象にリセットする。次回 cron 実行時に全件が再取得・再 embedding される。
+
+リセット対象:
+- `issues` テーブルの `body_hash` を空文字にリセット（ポーラーがハッシュ不一致を検出して再 embedding）
+- `releases` テーブルの `body_hash` を空文字にリセット（同上）
+- `docs` テーブルの全行を削除（ポーラーが全ファイルを再取得・再 embedding）
+- `watermarks` テーブルから当該リポジトリの全エントリを削除（issues 用 `{repo}`、releases 用 `releases:{repo}`、docs 用 `docs:{repo}`）
+  - watermark 削除により、ETag / `since` パラメータによるスキップが無効化され、ポーラーが全件を再取得する
 
 認証: `GITHUB_TOKEN` ヘッダーの値が Worker の `GITHUB_TOKEN` シークレットと一致すること。
 
 用途: Vectorize メタデータインデックス作成後の既存ベクトル再 upsert トリガー。
 
-レスポンス: `{ "repo": "owner/repo", "reset": N }` (N = リセットされた行数)
+レスポンス:
+```json
+{
+  "repo": "owner/repo",
+  "issueHashesReset": N,
+  "releaseHashesReset": M,
+  "docsDeleted": K,
+  "watermarksDeleted": W
+}
+```
 
 ### 5. Authentication
 
@@ -237,7 +252,7 @@ wrangler vectorize create-metadata-index github-rag-issues --type string --prope
 ```
 
 インデックス作成後、既存ベクトルを再 upsert する必要がある。
-admin エンドポイント（`POST /admin/reset-hashes?repo=owner/repo`、`GITHUB_TOKEN` ヘッダー認証）で bodyHash をリセットすると、次回 cron 実行時に全件が再 embedding される。
+admin エンドポイント（`POST /admin/reset-hashes?repo=owner/repo`、`GITHUB_TOKEN` ヘッダー認証）で bodyHash・watermark をリセットすると、次回 cron 実行時に全件が再取得・再 embedding される。
 
 参照: https://developers.cloudflare.com/vectorize/reference/metadata-filtering/
 
