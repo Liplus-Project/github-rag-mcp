@@ -28,6 +28,7 @@ type WatermarkRow = {
   [key: string]: SqlStorageValue;
   repo: string;
   last_polled_at: string;
+  etag: string;
 };
 
 function rowToIssueRecord(row: IssueRow): IssueRecord {
@@ -79,9 +80,17 @@ export class IssueStore implements DurableObject {
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS watermarks (
         repo           TEXT NOT NULL PRIMARY KEY,
-        last_polled_at TEXT NOT NULL
+        last_polled_at TEXT NOT NULL,
+        etag           TEXT NOT NULL DEFAULT ''
       );
     `);
+
+    // Migration: add etag column if missing (existing deployments)
+    try {
+      this.sql.exec(`ALTER TABLE watermarks ADD COLUMN etag TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      // Column already exists — ignore
+    }
 
     // Index for recent-activity queries (updated_at descending scan)
     this.sql.exec(`
@@ -206,16 +215,20 @@ export class IssueStore implements DurableObject {
     return {
       repo: rows[0].repo,
       lastPolledAt: rows[0].last_polled_at,
+      etag: rows[0].etag || undefined,
     };
   }
 
-  setWatermark(repo: string, lastPolledAt: string): void {
+  setWatermark(repo: string, lastPolledAt: string, etag?: string): void {
     this.sql.exec(
-      `INSERT INTO watermarks (repo, last_polled_at)
-       VALUES (?, ?)
-       ON CONFLICT (repo) DO UPDATE SET last_polled_at = excluded.last_polled_at`,
+      `INSERT INTO watermarks (repo, last_polled_at, etag)
+       VALUES (?, ?, ?)
+       ON CONFLICT (repo) DO UPDATE SET
+         last_polled_at = excluded.last_polled_at,
+         etag = excluded.etag`,
       repo,
       lastPolledAt,
+      etag ?? "",
     );
   }
 
@@ -290,10 +303,10 @@ export class IssueStore implements DurableObject {
         return Response.json(wm);
       }
 
-      // POST /watermark — set poll watermark { repo, lastPolledAt }
+      // POST /watermark — set poll watermark { repo, lastPolledAt, etag? }
       if (request.method === "POST" && path === "/watermark") {
-        const { repo, lastPolledAt } = (await request.json()) as PollWatermark;
-        this.setWatermark(repo, lastPolledAt);
+        const { repo, lastPolledAt, etag } = (await request.json()) as PollWatermark;
+        this.setWatermark(repo, lastPolledAt, etag);
         return new Response("ok", { status: 200 });
       }
 

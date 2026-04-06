@@ -74,15 +74,22 @@ function vectorId(repo: string, number: number): string {
   return `${repo}#${number}`;
 }
 
+/** Sentinel value indicating GitHub returned 304 Not Modified */
+const NOT_MODIFIED = Symbol("NOT_MODIFIED");
+
 /**
  * Fetch a single page of issues from GitHub API.
- * Returns the issues array and a flag indicating whether more pages exist.
+ * Returns the issues array and a flag indicating whether more pages exist,
+ * plus the ETag header from the response for conditional request support.
+ *
+ * When `etag` is provided (page 1 only), sends `If-None-Match` header.
+ * If GitHub responds 304 Not Modified, returns NOT_MODIFIED sentinel.
  */
 async function fetchIssuePage(
   repo: string,
   token: string,
-  opts: { since?: string; page: number; state?: string },
-): Promise<{ issues: GitHubIssue[]; hasMore: boolean }> {
+  opts: { since?: string; page: number; state?: string; etag?: string },
+): Promise<{ issues: GitHubIssue[]; hasMore: boolean; etag?: string } | typeof NOT_MODIFIED> {
   const url = new URL(`https://api.github.com/repos/${repo}/issues`);
   url.searchParams.set("state", opts.state ?? "all");
   url.searchParams.set("sort", "updated");
@@ -93,14 +100,30 @@ async function fetchIssuePage(
     url.searchParams.set("since", opts.since);
   }
 
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "github-rag-mcp/0.1.0",
+  };
+
+  // Send conditional request header for page 1 when ETag is available
+  if (opts.etag) {
+    headers["If-None-Match"] = opts.etag;
+  }
+
+  // Bypass Cloudflare cache layer to ensure If-None-Match reaches GitHub origin.
+  // Workers fetch() supports standard `cache` option at runtime even though
+  // @cloudflare/workers-types omits it from RequestInit. Type assertion required.
   const resp = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "github-rag-mcp/0.1.0",
-    },
-  });
+    headers,
+    cache: "no-store",
+  } as RequestInit);
+
+  // 304 Not Modified — no changes since last poll
+  if (resp.status === 304) {
+    return NOT_MODIFIED;
+  }
 
   if (!resp.ok) {
     const text = await resp.text();
@@ -109,7 +132,8 @@ async function fetchIssuePage(
 
   const issues = (await resp.json()) as GitHubIssue[];
   const hasMore = issues.length === PER_PAGE;
-  return { issues, hasMore };
+  const responseEtag = resp.headers.get("etag") ?? undefined;
+  return { issues, hasMore, etag: responseEtag };
 }
 
 /**
@@ -117,22 +141,42 @@ async function fetchIssuePage(
  * When maxPages is provided, stops after that many pages to stay within
  * Cloudflare Worker CPU time limits. Returns a `capped` flag indicating
  * whether pagination was truncated before exhausting all results.
+ *
+ * When `etag` is provided, page 1 uses a conditional request. If GitHub
+ * returns 304 Not Modified, `notModified` is true and issues array is empty.
+ * The response ETag from page 1 is returned in `responseEtag` for storage.
  */
 async function fetchAllIssues(
   repo: string,
   token: string,
   since?: string,
   maxPages?: number,
-): Promise<{ issues: GitHubIssue[]; capped: boolean }> {
+  etag?: string,
+): Promise<{ issues: GitHubIssue[]; capped: boolean; notModified: boolean; responseEtag?: string }> {
   const allIssues: GitHubIssue[] = [];
   let page = 1;
+  let responseEtag: string | undefined;
 
   while (true) {
-    const { issues, hasMore } = await fetchIssuePage(repo, token, {
+    // Send ETag only for page 1
+    const result = await fetchIssuePage(repo, token, {
       since,
       page,
+      etag: page === 1 ? etag : undefined,
     });
+
+    // 304 Not Modified on page 1 — no changes
+    if (result === NOT_MODIFIED) {
+      return { issues: [], capped: false, notModified: true };
+    }
+
+    const { issues, hasMore, etag: pageEtag } = result;
     allIssues.push(...issues);
+
+    // Capture ETag from page 1 response
+    if (page === 1) {
+      responseEtag = pageEtag;
+    }
 
     if (!hasMore) break;
     page++;
@@ -143,17 +187,17 @@ async function fetchAllIssues(
         `Pagination capped at ${maxPages} pages (${allIssues.length} issues) for ${repo}. ` +
         `Remaining issues will be fetched in subsequent cron runs.`,
       );
-      return { issues: allIssues, capped: true };
+      return { issues: allIssues, capped: true, notModified: false, responseEtag };
     }
 
     // Safety: absolute cap to prevent runaway loops
     if (page > 50) {
       console.warn(`Absolute pagination cap reached for ${repo} at page ${page}`);
-      return { issues: allIssues, capped: true };
+      return { issues: allIssues, capped: true, notModified: false, responseEtag };
     }
   }
 
-  return { issues: allIssues, capped: false };
+  return { issues: allIssues, capped: false, notModified: false, responseEtag };
 }
 
 /**
@@ -310,7 +354,7 @@ async function pollRepo(
   env: Env,
   storeStub: DurableObjectStub,
 ): Promise<void> {
-  // Get watermark (last poll timestamp)
+  // Get watermark (last poll timestamp + ETag)
   const wmResp = await storeStub.fetch(
     new Request(
       `http://store/watermark?repo=${encodeURIComponent(repo)}`,
@@ -318,34 +362,43 @@ async function pollRepo(
   );
 
   let since: string | undefined;
+  let storedEtag: string | undefined;
   if (wmResp.ok) {
-    const wm = (await wmResp.json()) as { repo: string; lastPolledAt: string };
+    const wm = (await wmResp.json()) as { repo: string; lastPolledAt: string; etag?: string };
     since = wm.lastPolledAt;
+    storedEtag = wm.etag;
   }
 
   console.log(
-    `Polling ${repo}${since ? ` since ${since}` : " (initial sync)"}`,
+    `Polling ${repo}${since ? ` since ${since}` : " (initial sync)"}${storedEtag ? " (with ETag)" : ""}`,
   );
 
   // Record poll start time before fetching (to avoid missing updates during fetch)
   const pollStartTime = new Date().toISOString();
 
-  // Fetch issues from GitHub API (with per-run page cap)
-  const { issues, capped } = await fetchAllIssues(
+  // Fetch issues from GitHub API (with per-run page cap and conditional request)
+  const { issues, capped, notModified, responseEtag } = await fetchAllIssues(
     repo,
     env.GITHUB_TOKEN,
     since,
     MAX_PAGES_PER_RUN,
+    storedEtag,
   );
+
+  // 304 Not Modified — no changes since last poll, skip watermark update too
+  if (notModified) {
+    console.log(`${repo}: 304 Not Modified — no changes`);
+    return;
+  }
 
   if (issues.length === 0) {
     console.log(`No updates for ${repo}`);
-    // Still update watermark to move forward
+    // Still update watermark to move forward (preserve new ETag if available)
     await storeStub.fetch(
       new Request("http://store/watermark", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo, lastPolledAt: pollStartTime }),
+        body: JSON.stringify({ repo, lastPolledAt: pollStartTime, etag: responseEtag }),
       }),
     );
     return;
@@ -371,12 +424,18 @@ async function pollRepo(
     nextWatermark = pollStartTime;
   }
 
-  // Update watermark after successful processing
+  // Update watermark after successful processing (with new ETag for next conditional request)
+  // When pagination is capped, don't store ETag — the partial fetch means the ETag
+  // wouldn't match the next request which starts from a different watermark position.
   await storeStub.fetch(
     new Request("http://store/watermark", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo, lastPolledAt: nextWatermark }),
+      body: JSON.stringify({
+        repo,
+        lastPolledAt: nextWatermark,
+        etag: capped ? undefined : responseEtag,
+      }),
     }),
   );
 

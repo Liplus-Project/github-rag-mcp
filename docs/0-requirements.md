@@ -53,6 +53,11 @@ Polling strategy:
 - Use `since` parameter on GitHub Issues API to get only changed items
 - Track `updated_at` watermark per repository
 - Handle pagination for initial full sync
+- Use ETag conditional requests (`If-None-Match`) on page 1 to skip processing when no changes
+  - 304 Not Modified skips watermark update and all downstream processing
+  - Reduces idle polling from 3 subrequests (GET watermark + GET API + POST watermark) to 2 (GET watermark + GET API with 304)
+  - `cache: "no-store"` on fetch() to bypass Cloudflare cache layer
+  - ETag stored alongside watermark in Durable Object
 
 ### 2. Embedding Pipeline
 
