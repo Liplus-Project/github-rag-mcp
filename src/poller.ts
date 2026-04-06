@@ -7,7 +7,7 @@
  * Stores structured metadata in IssueStore Durable Object.
  */
 
-import type { Env, IssueRecord, ReleaseRecord } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord, DocRecord } from "./types.js";
 
 /** GitHub API issue/PR response shape (subset of fields we need) */
 interface GitHubIssue {
@@ -661,6 +661,301 @@ async function pollReleases(
   );
 }
 
+// ── Documentation Polling ────────────────────────────────────────
+
+/** Entry in the Git Trees API response */
+interface GitTreeEntry {
+  path: string;
+  mode: string;
+  type: string;
+  sha: string;
+  size?: number;
+}
+
+/** Git Trees API response shape */
+interface GitTreeResponse {
+  sha: string;
+  tree: GitTreeEntry[];
+  truncated: boolean;
+}
+
+/** Pattern to match target documentation files */
+function isDocFile(path: string): boolean {
+  // Match docs/**/*.md and README.md at root
+  if (path === "README.md") return true;
+  if (path.startsWith("docs/") && path.endsWith(".md")) return true;
+  return false;
+}
+
+/**
+ * Build Vectorize vector ID for a document.
+ * Format: "owner/repo#doc-docs/0-requirements.md"
+ */
+function docVectorId(repo: string, path: string): string {
+  return `${repo}#doc-${path}`;
+}
+
+/**
+ * Fetch the repository tree via Git Trees API with ETag conditional request support.
+ * Returns the tree entries and the response ETag.
+ * When `etag` is provided, sends `If-None-Match` header.
+ * If GitHub responds 304 Not Modified, returns NOT_MODIFIED sentinel.
+ */
+async function fetchRepoTree(
+  repo: string,
+  token: string,
+  ref: string,
+  etag?: string,
+): Promise<{ tree: GitTreeEntry[]; treeSha: string; etag?: string } | typeof NOT_MODIFIED> {
+  const url = `https://api.github.com/repos/${repo}/git/trees/${ref}?recursive=1`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "github-rag-mcp/0.1.0",
+  };
+
+  if (etag) {
+    headers["If-None-Match"] = etag;
+  }
+
+  const resp = await fetch(url, {
+    headers,
+    cache: "no-store",
+  } as RequestInit);
+
+  if (resp.status === 304) {
+    return NOT_MODIFIED;
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`GitHub Trees API error ${resp.status}: ${text}`);
+  }
+
+  const data = (await resp.json()) as GitTreeResponse;
+  const responseEtag = resp.headers.get("etag") ?? undefined;
+  return { tree: data.tree, treeSha: data.sha, etag: responseEtag };
+}
+
+/**
+ * Fetch file content via GitHub Contents API.
+ * Returns the decoded UTF-8 text content.
+ */
+async function fetchFileContent(
+  repo: string,
+  path: string,
+  token: string,
+): Promise<string> {
+  const url = `https://api.github.com/repos/${repo}/contents/${path}`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "github-rag-mcp/0.1.0",
+  };
+
+  const resp = await fetch(url, {
+    headers,
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`GitHub Contents API error ${resp.status} for ${path}: ${text}`);
+  }
+
+  const data = (await resp.json()) as { content: string; encoding: string };
+  if (data.encoding !== "base64") {
+    throw new Error(`Unexpected encoding ${data.encoding} for ${path}`);
+  }
+
+  // Decode base64 content
+  const binary = atob(data.content.replace(/\n/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+/**
+ * Poll a single repository for documentation file updates.
+ * Uses Git Trees API for change detection and Contents API for fetching changed files.
+ */
+async function pollDocs(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  // Use a separate watermark namespace for docs
+  const watermarkKey = `docs:${repo}`;
+  const wmResp = await storeStub.fetch(
+    new Request(
+      `http://store/watermark?repo=${encodeURIComponent(watermarkKey)}`,
+    ),
+  );
+
+  let storedEtag: string | undefined;
+  if (wmResp.ok) {
+    const wm = (await wmResp.json()) as { repo: string; lastPolledAt: string; etag?: string };
+    storedEtag = wm.etag;
+  }
+
+  console.log(
+    `Polling docs for ${repo}${storedEtag ? " (with ETag)" : ""}`,
+  );
+
+  // Fetch repo tree via Trees API with conditional request
+  const result = await fetchRepoTree(repo, env.GITHUB_TOKEN, "HEAD", storedEtag);
+
+  if (result === NOT_MODIFIED) {
+    console.log(`${repo} docs: 304 Not Modified — no changes`);
+    return;
+  }
+
+  const { tree, etag: responseEtag } = result;
+
+  // Filter to doc files only
+  const docEntries = tree.filter(
+    (entry) => entry.type === "blob" && isDocFile(entry.path),
+  );
+
+  if (docEntries.length === 0) {
+    console.log(`No doc files found in ${repo}`);
+    // Still update watermark with new ETag
+    await storeStub.fetch(
+      new Request("http://store/watermark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: watermarkKey, lastPolledAt: new Date().toISOString(), etag: responseEtag }),
+      }),
+    );
+    return;
+  }
+
+  // Get existing doc records to detect changes via blob SHA comparison
+  const existingDocsResp = await storeStub.fetch(
+    new Request(`http://store/docs?repo=${encodeURIComponent(repo)}`),
+  );
+  const existingDocs: DocRecord[] = existingDocsResp.ok
+    ? (await existingDocsResp.json()) as DocRecord[]
+    : [];
+  const existingDocMap = new Map(existingDocs.map((d) => [d.path, d]));
+
+  // Detect which files changed (blob SHA mismatch) or are new
+  const changedEntries = docEntries.filter((entry) => {
+    const existing = existingDocMap.get(entry.path);
+    return !existing || existing.blobSha !== entry.sha;
+  });
+
+  // Detect deleted files (in store but not in current tree)
+  const currentPaths = new Set(docEntries.map((e) => e.path));
+  const deletedDocs = existingDocs.filter((d) => !currentPaths.has(d.path));
+
+  let embedded = 0;
+  let skipped = docEntries.length - changedEntries.length;
+  let failed = 0;
+  const now = new Date().toISOString();
+
+  // Process changed/new doc files
+  for (const entry of changedEntries) {
+    if (embedded >= MAX_EMBEDDINGS_PER_RUN) {
+      console.warn(
+        `Doc embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
+        `Remaining docs will be retried next cron run.`,
+      );
+      // Store with empty blobSha so next poll retries
+      break;
+    }
+
+    try {
+      // Fetch file content
+      const content = await fetchFileContent(repo, entry.path, env.GITHUB_TOKEN);
+
+      // Generate embedding (use path as title, content as body)
+      const embeddingInput = prepareEmbeddingInput(entry.path, content);
+      const embedding = await generateEmbedding(env.AI, embeddingInput);
+
+      const metadata: Record<string, string | number> = {
+        repo,
+        number: 0,
+        type: "doc",
+        state: "active",
+        labels: "",
+        milestone: "",
+        assignees: "",
+        updated_at: now,
+        doc_path: entry.path,
+      };
+
+      // Upsert vector into Vectorize
+      await env.VECTORIZE.upsert([
+        {
+          id: docVectorId(repo, entry.path),
+          values: embedding,
+          metadata,
+        },
+      ]);
+
+      // Upsert doc record into store
+      await storeStub.fetch(
+        new Request("http://store/upsert-doc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            repo,
+            path: entry.path,
+            blobSha: entry.sha,
+            updatedAt: now,
+          }),
+        }),
+      );
+
+      embedded++;
+    } catch (err) {
+      console.error(
+        `Failed to embed doc ${repo}/${entry.path}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      failed++;
+    }
+  }
+
+  // Handle deleted files: remove from Vectorize and store
+  for (const doc of deletedDocs) {
+    try {
+      await env.VECTORIZE.deleteByIds([docVectorId(repo, doc.path)]);
+      await storeStub.fetch(
+        new Request(
+          `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(doc.path)}`,
+          { method: "DELETE" },
+        ),
+      );
+    } catch (err) {
+      console.error(
+        `Failed to delete doc vector ${repo}/${doc.path}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  // Update watermark with ETag
+  await storeStub.fetch(
+    new Request("http://store/watermark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: watermarkKey, lastPolledAt: now, etag: responseEtag }),
+    }),
+  );
+
+  console.log(
+    `${repo} docs: ${docEntries.length} found, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${deletedDocs.length} deleted`,
+  );
+}
+
 /**
  * Main scheduled handler — called by Cron Trigger every 5 minutes.
  * Polls all configured repositories for issue/PR updates.
@@ -714,6 +1009,15 @@ export async function handleScheduled(
     } catch (err) {
       console.error(
         `Failed to poll releases for ${repo}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    try {
+      await pollDocs(repo, env, storeStub);
+    } catch (err) {
+      console.error(
+        `Failed to poll docs for ${repo}:`,
         err instanceof Error ? err.message : String(err),
       );
     }

@@ -77,6 +77,26 @@ Polling strategy:
 - Separate watermark namespace: `releases:{repo}` in watermarks table
 - Vector ID format: `{repo}#release-{tag_name}` (no collision with `{repo}#{number}`)
 
+### 1c. Documentation Poller
+
+Runs as part of the cron poller, after release polling for each repository.
+
+Responsibilities:
+- Fetch repository documentation files (`docs/**/*.md` + `README.md`) and index for semantic search
+- Detect new, updated, and deleted documentation files
+- Generate embeddings for file content (path as title, content as body)
+- Upsert vectors into Vectorize with doc-specific metadata
+- Store individual file blob SHAs in Durable Object (docs table) for per-file change detection
+- Remove vectors for deleted files
+
+Change detection strategy:
+- Use Git Trees API (`/repos/{owner}/{repo}/git/trees/{ref}?recursive=1`) to get full file list with blob SHAs in 1 request
+- ETag conditional requests on Trees API (304 Not Modified skips all processing)
+- Compare blob SHAs against stored values to detect per-file changes (Git guarantees SHA = content identity)
+- Fetch changed files via Contents API (`/repos/{owner}/{repo}/contents/{path}`, base64-encoded)
+- Separate watermark namespace: `docs:{repo}` in watermarks table
+- Vector ID format: `{repo}#doc-{path}` (e.g., `owner/repo#doc-docs/0-requirements.md`)
+
 ### 2. Embedding Pipeline
 
 Model: `@cf/baai/bge-m3` (Workers AI)
@@ -91,14 +111,15 @@ Embedding triggers:
 
 Vector metadata (stored alongside embedding in Vectorize):
 - `repo` (string) — repository full name (owner/repo)
-- `number` (number) — issue/PR number (0 for releases)
-- `type` (string) — "issue", "pull_request", or "release"
-- `state` (string) — "open" or "closed" (releases: always "published")
-- `labels` (string) — comma-separated label names (releases: empty)
-- `milestone` (string) — milestone title or empty (releases: empty)
-- `assignees` (string) — comma-separated login names (releases: empty)
+- `number` (number) — issue/PR number (0 for releases and docs)
+- `type` (string) — "issue", "pull_request", "release", or "doc"
+- `state` (string) — "open" or "closed" (releases: "published", docs: "active")
+- `labels` (string) — comma-separated label names (releases/docs: empty)
+- `milestone` (string) — milestone title or empty (releases/docs: empty)
+- `assignees` (string) — comma-separated login names (releases/docs: empty)
 - `updated_at` (string) — ISO 8601 timestamp
-- `tag_name` (string) — release tag name (releases only, empty for issues/PRs)
+- `tag_name` (string) — release tag name (releases only, empty for others)
+- `doc_path` (string) — file path relative to repo root (docs only, empty for others)
 
 ### 3. MCP Server
 
@@ -116,12 +137,13 @@ Parameters:
 - `labels` (string[], optional) — filter by label names (AND logic)
 - `milestone` (string, optional) — filter by milestone title
 - `assignee` (string, optional) — filter by assignee login
-- `type` (string, optional) — "issue" | "pull_request" | "release" | "all" (default: "all")
+- `type` (string, optional) — "issue" | "pull_request" | "release" | "doc" | "all" (default: "all")
 - `top_k` (number, optional) — max results (default: 10, max: 50)
 
 Returns:
-- Array of matched issues/PRs/releases with: number, title, state, labels, milestone, assignee, score, url, updated_at
+- Array of matched issues/PRs/releases/docs with: number, title, state, labels, milestone, assignee, score, url, updated_at
 - Releases include: tag_name, prerelease flag
+- Docs include: doc_path
 
 Flow:
 1. Generate embedding for `query` via Workers AI
@@ -162,6 +184,7 @@ Parameters:
 Returns:
 - Array of activity items: type (created/updated/closed), number, title, actor, timestamp, url
 - Includes release activity (type: "release", activity_type: "created")
+- Includes documentation updates (type: "doc", activity_type: "updated")
 
 Flow:
 1. Query Durable Object for issues/PRs with `updated_at >= since`
@@ -189,8 +212,9 @@ GitHub App (same pattern as github-webhook-mcp):
 SQLite-backed structured storage:
 - Issue/PR metadata (number, title, state, labels, milestone, assignees, body hash, timestamps)
 - Release metadata (tag_name, name, prerelease, body hash, timestamps)
-- Polling watermarks (last polled timestamp per repo; releases use `releases:{repo}` key)
-- Used for `get_issue_context`, `list_recent_activity`, and release queries without hitting Vectorize
+- Documentation metadata (path, blob SHA, timestamps) — per-file change detection via blob SHA comparison
+- Polling watermarks (last polled timestamp per repo; releases use `releases:{repo}` key, docs use `docs:{repo}` key)
+- Used for `get_issue_context`, `list_recent_activity`, and release/doc queries without hitting Vectorize
 
 ## Constraints
 

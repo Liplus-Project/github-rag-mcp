@@ -14,7 +14,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Env, IssueRecord, ReleaseRecord, VectorMetadata } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord, DocRecord, VectorMetadata } from "./types.js";
 import type { GitHubUserProps } from "./oauth.js";
 
 /** User context passed via props from OAuth layer */
@@ -77,7 +77,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Semantic search for GitHub issues, PRs, and releases combined with structured filters. " +
+      "Semantic search for GitHub issues, PRs, releases, and repository documentation combined with structured filters. " +
         "Uses embedding similarity (BGE-M3) with optional metadata filters.",
       {
         query: z.string().describe("Natural language search query"),
@@ -103,7 +103,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           .optional()
           .describe("Filter by assignee login"),
         type: z
-          .enum(["issue", "pull_request", "release", "all"])
+          .enum(["issue", "pull_request", "release", "doc", "all"])
           .optional()
           .default("all")
           .describe("Filter by type (default: all)"),
@@ -185,11 +185,14 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           const number = meta?.number ?? 0;
           const itemType = meta?.type ?? "";
           const tagName = meta?.tag_name ?? "";
+          const docPath = meta?.doc_path ?? "";
 
           // Build URL based on type
           let url: string;
           if (itemType === "release" && tagName) {
             url = `https://github.com/${itemRepo}/releases/tag/${tagName}`;
+          } else if (itemType === "doc" && docPath) {
+            url = `https://github.com/${itemRepo}/blob/main/${docPath}`;
           } else {
             url = `https://github.com/${itemRepo}/issues/${number}`;
           }
@@ -209,10 +212,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             updated_at: meta?.updated_at ?? "",
             repo: itemRepo,
             ...(itemType === "release" ? { tag_name: tagName } : {}),
+            ...(itemType === "doc" ? { doc_path: docPath } : {}),
           };
         });
 
-        // Enrich with titles from IssueStore / release store
+        // Enrich with titles from IssueStore / release store / doc store
         const store = this.getStore();
         for (const item of items) {
           if (item.type === "release" && item.repo && (item as Record<string, unknown>).tag_name) {
@@ -229,6 +233,9 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             } catch {
               // Best-effort enrichment
             }
+          } else if (item.type === "doc" && item.repo && (item as Record<string, unknown>).doc_path) {
+            // Use the file path as the title for docs
+            item.title = (item as Record<string, unknown>).doc_path as string;
           } else if (item.repo && item.number) {
             try {
               const res = await store.fetch(
@@ -497,7 +504,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── list_recent_activity ───────────────────────────────────
     this.server.tool(
       "list_recent_activity",
-      "List recent issue/PR/release activity across tracked repositories. " +
+      "List recent issue/PR/release/documentation activity across tracked repositories. " +
         "Returns changes classified as created, updated, or closed.",
       {
         repo: z
@@ -592,6 +599,37 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
               url: `https://github.com/${release.repo}/releases/tag/${release.tagName}`,
               updated_at: release.publishedAt,
               created_at: release.createdAt,
+            });
+          }
+        }
+
+        // Fetch recent docs too
+        const docParams = new URLSearchParams();
+        docParams.set("since", effectiveSince);
+        docParams.set("limit", String(effectiveLimit));
+        if (repo) {
+          docParams.set("repo", repo);
+        }
+
+        const docRes = await store.fetch(
+          new Request(`http://store/recent-docs?${docParams.toString()}`),
+        );
+
+        if (docRes.ok) {
+          const docs = (await docRes.json()) as DocRecord[];
+          for (const doc of docs) {
+            activities.push({
+              activity_type: "updated",
+              number: 0,
+              title: doc.path,
+              type: "doc",
+              state: "active",
+              labels: [],
+              repo: doc.repo,
+              doc_path: doc.path,
+              url: `https://github.com/${doc.repo}/blob/main/${doc.path}`,
+              updated_at: doc.updatedAt,
+              created_at: doc.updatedAt,
             });
           }
         }

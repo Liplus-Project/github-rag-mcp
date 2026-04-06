@@ -29,6 +29,14 @@ export interface ReleaseRecord {
   publishedAt: string;
 }
 
+/** Stored document record in Durable Object SQLite */
+export interface DocRecord {
+  repo: string;
+  path: string;
+  blobSha: string;
+  updatedAt: string;
+}
+
 /** Polling watermark per repository */
 export interface PollWatermark {
   repo: string;
@@ -41,14 +49,16 @@ export interface PollWatermark {
 export interface VectorMetadata {
   repo: string;
   number: number;
-  type: "issue" | "pull_request" | "release";
-  state: "open" | "closed" | "published";
+  type: "issue" | "pull_request" | "release" | "doc";
+  state: "open" | "closed" | "published" | "active";
   labels: string;
   milestone: string;
   assignees: string;
   updated_at: string;
   /** Release tag name (releases only) */
   tag_name?: string;
+  /** Document file path (docs only) */
+  doc_path?: string;
 }
 
 /** Env bindings for the Worker */
