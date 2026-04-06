@@ -421,19 +421,56 @@ export class IssueStore implements DurableObject {
     );
   }
 
-  // ---- Hash reset for re-sync ----
+  // ---- Full re-embed reset ----
 
   /**
-   * Reset all bodyHashes for a given repo so that the next poll
-   * will regenerate embeddings for every issue.
-   * Returns the number of rows affected.
+   * Reset all state that controls re-embedding so that the next poll
+   * will regenerate embeddings for every issue, release, and doc in the repo.
+   *
+   * Resets:
+   * - body_hash in issues table (cleared to '' so poller detects change)
+   * - body_hash in releases table (cleared to '' so poller detects change)
+   * - blob_sha in docs table (deleted rows so poller re-fetches all files)
+   * - Watermark entries for issues, releases, and docs (deleted so poller
+   *   re-fetches from the beginning, bypassing ETag / since skipping)
+   *
+   * Returns a summary object with counts of what was reset.
    */
-  resetBodyHashes(repo: string): number {
-    const cursor = this.sql.exec(
+  resetForReEmbed(repo: string): {
+    issueHashesReset: number;
+    releaseHashesReset: number;
+    docsDeleted: number;
+    watermarksDeleted: number;
+  } {
+    const issuesCursor = this.sql.exec(
       `UPDATE issues SET body_hash = '' WHERE repo = ? AND body_hash != ''`,
       repo,
     );
-    return cursor.rowsWritten;
+
+    const releasesCursor = this.sql.exec(
+      `UPDATE releases SET body_hash = '' WHERE repo = ? AND body_hash != ''`,
+      repo,
+    );
+
+    const docsCursor = this.sql.exec(
+      `DELETE FROM docs WHERE repo = ?`,
+      repo,
+    );
+
+    // Delete all three watermark namespaces: issues (repo), releases (releases:{repo}), docs (docs:{repo})
+    const watermarksCursor = this.sql.exec(
+      `DELETE FROM watermarks WHERE repo IN (?, ?, ?)`,
+      repo,
+      `releases:${repo}`,
+      `docs:${repo}`,
+    );
+
+    return {
+      issueHashesReset: issuesCursor.rowsWritten,
+      releaseHashesReset: releasesCursor.rowsWritten,
+      docsDeleted: docsCursor.rowsWritten,
+      watermarksDeleted: watermarksCursor.rowsWritten,
+    };
   }
 
   // ---- Watermark management ----
@@ -578,12 +615,12 @@ export class IssueStore implements DurableObject {
         return Response.json(items);
       }
 
-      // POST /reset-hashes?repo=... — reset all bodyHashes for a repo to force re-embedding
+      // POST /reset-hashes?repo=... — reset all hashes and watermarks for a repo to force re-embedding
       if (request.method === "POST" && path === "/reset-hashes") {
         const repo = url.searchParams.get("repo");
         if (!repo) return new Response("missing repo", { status: 400 });
-        const count = this.resetBodyHashes(repo);
-        return Response.json({ repo, reset: count });
+        const summary = this.resetForReEmbed(repo);
+        return Response.json({ repo, ...summary });
       }
 
       // GET /watermark?repo=... — get poll watermark

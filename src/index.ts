@@ -12,7 +12,7 @@
  * Routes (defaultHandler, no OAuth token required):
  *   GET /oauth/authorize  -- Start GitHub OAuth flow
  *   GET /oauth/callback   -- GitHub OAuth callback
- *   POST /admin/reset-hashes?repo=owner/repo  -- Reset bodyHashes to trigger re-embedding (requires GITHUB_TOKEN header)
+ *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgent  -- MCP server (tools: search_issues, get_issue_context, list_recent_activity)
@@ -56,8 +56,9 @@ const innerHandler: ExportedHandler<Env> = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // -- Admin: reset body hashes to trigger re-embedding on next cron --
+    // -- Admin: reset hashes and watermarks to trigger full re-embedding on next cron --
     // POST /admin/reset-hashes?repo=owner/repo
+    // Resets: issue body_hash, release body_hash, docs (deleted), and all watermarks for the repo.
     // Requires GITHUB_TOKEN header for authentication.
     if (request.method === "POST" && url.pathname === "/admin/reset-hashes") {
       const authHeader = request.headers.get("GITHUB_TOKEN");
