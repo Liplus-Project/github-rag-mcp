@@ -20,7 +20,7 @@
  *   IssueStore   -- Issue/PR state store (SQLite-backed)
  *
  * Cron Trigger:
- *   Every 5 minutes -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
+ *   Hourly (fallback) -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
  */
 
 import type { Env } from "./types.js";
