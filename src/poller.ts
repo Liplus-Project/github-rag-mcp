@@ -8,24 +8,14 @@
  */
 
 import type { Env, IssueRecord, ReleaseRecord, DocRecord } from "./types.js";
-
-/** GitHub API issue/PR response shape (subset of fields we need) */
-interface GitHubIssue {
-  number: number;
-  title: string;
-  body: string | null;
-  state: "open" | "closed";
-  labels: Array<{ name: string }>;
-  milestone: { title: string } | null;
-  assignees: Array<{ login: string }>;
-  created_at: string;
-  updated_at: string;
-  pull_request?: { url: string };
-  html_url: string;
-}
-
-/** Maximum characters for embedding input (BGE-M3 context limit ~8192 tokens, conservative char limit) */
-const MAX_EMBEDDING_INPUT_CHARS = 8000;
+import {
+  docVectorId,
+  processAndUpsertIssue,
+  processAndUpsertRelease,
+  processAndUpsertDoc,
+  type GitHubIssueData,
+  type GitHubReleaseData,
+} from "./pipeline.js";
 
 /** GitHub API page size */
 const PER_PAGE = 100;
@@ -42,38 +32,6 @@ const MAX_EMBEDDINGS_PER_RUN = 50;
  *  so the next cron continues from where it left off. */
 const MAX_PAGES_PER_RUN = 2;
 
-/**
- * Compute SHA-256 hash of title + body for change detection.
- * Returns hex-encoded hash string.
- */
-async function computeBodyHash(title: string, body: string): Promise<string> {
-  const input = title + "\n\n" + body;
-  const data = new TextEncoder().encode(input);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = new Uint8Array(hashBuffer);
-  return Array.from(hashArray)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/**
- * Prepare embedding input text from issue title and body.
- * Concatenates title + "\n\n" + body, truncated to MAX_EMBEDDING_INPUT_CHARS.
- */
-function prepareEmbeddingInput(title: string, body: string | null): string {
-  const text = title + "\n\n" + (body ?? "");
-  if (text.length <= MAX_EMBEDDING_INPUT_CHARS) return text;
-  return text.slice(0, MAX_EMBEDDING_INPUT_CHARS);
-}
-
-/**
- * Build Vectorize vector ID from repo and issue number.
- * Format: "owner/repo#123"
- */
-function vectorId(repo: string, number: number): string {
-  return `${repo}#${number}`;
-}
-
 /** Sentinel value indicating GitHub returned 304 Not Modified */
 const NOT_MODIFIED = Symbol("NOT_MODIFIED");
 
@@ -89,7 +47,7 @@ async function fetchIssuePage(
   repo: string,
   token: string,
   opts: { since?: string; page: number; state?: string; etag?: string },
-): Promise<{ issues: GitHubIssue[]; hasMore: boolean; etag?: string } | typeof NOT_MODIFIED> {
+): Promise<{ issues: GitHubIssueData[]; hasMore: boolean; etag?: string } | typeof NOT_MODIFIED> {
   const url = new URL(`https://api.github.com/repos/${repo}/issues`);
   url.searchParams.set("state", opts.state ?? "all");
   url.searchParams.set("sort", "updated");
@@ -130,7 +88,7 @@ async function fetchIssuePage(
     throw new Error(`GitHub API error ${resp.status}: ${text}`);
   }
 
-  const issues = (await resp.json()) as GitHubIssue[];
+  const issues = (await resp.json()) as GitHubIssueData[];
   const hasMore = issues.length === PER_PAGE;
   const responseEtag = resp.headers.get("etag") ?? undefined;
   return { issues, hasMore, etag: responseEtag };
@@ -152,8 +110,8 @@ async function fetchAllIssues(
   since?: string,
   maxPages?: number,
   etag?: string,
-): Promise<{ issues: GitHubIssue[]; capped: boolean; notModified: boolean; responseEtag?: string }> {
-  const allIssues: GitHubIssue[] = [];
+): Promise<{ issues: GitHubIssueData[]; capped: boolean; notModified: boolean; responseEtag?: string }> {
+  const allIssues: GitHubIssueData[] = [];
   let page = 1;
   let responseEtag: string | undefined;
 
@@ -201,31 +159,14 @@ async function fetchAllIssues(
 }
 
 /**
- * Generate embedding for a text input using Workers AI BGE-M3.
- * Returns 1024-dimensional float array.
- */
-async function generateEmbedding(
-  ai: Ai,
-  text: string,
-): Promise<number[]> {
-  const result = await ai.run("@cf/baai/bge-m3", {
-    text: [text],
-  });
-
-  // Workers AI returns { data: [{ values: number[] }] } or similar
-  const vectors = (result as { data: Array<number[]> }).data;
-  if (!vectors || vectors.length === 0) {
-    throw new Error("Workers AI returned no embedding vectors");
-  }
-  return vectors[0];
-}
-
-/**
  * Process a batch of issues: compute hashes, generate embeddings for changed items,
  * upsert into Vectorize and IssueStore.
+ *
+ * Delegates per-item embedding+upsert to the shared pipeline, but manages
+ * batch-level concerns: embedding count cap and stats tracking.
  */
 async function processIssues(
-  issues: GitHubIssue[],
+  issues: GitHubIssueData[],
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
@@ -235,110 +176,54 @@ async function processIssues(
   let skipped = 0;
   let failed = 0;
 
-  // Process in batches to manage memory and rate limits
   for (const issue of issues) {
-    const body = issue.body ?? "";
-    const title = issue.title;
-    const bodyHash = await computeBodyHash(title, body);
-
-    const type: IssueRecord["type"] = issue.pull_request
-      ? "pull_request"
-      : "issue";
-
-    // Check if body has changed by comparing hash with stored value
-    const existingResp = await storeStub.fetch(
-      new Request(
-        `http://store/issue?repo=${encodeURIComponent(repo)}&number=${issue.number}`,
-      ),
-    );
-
-    let needsEmbedding = true;
-    if (existingResp.ok) {
-      const existing = (await existingResp.json()) as IssueRecord;
-      if (existing.bodyHash === bodyHash) {
-        needsEmbedding = false;
-        skipped++;
-      }
-    }
-
-    // Track whether embedding succeeded — determines whether bodyHash is saved
-    let embeddingSucceeded = false;
-
-    // Enforce per-run embedding limit to avoid Workers AI rate limits
-    if (needsEmbedding && embedded >= MAX_EMBEDDINGS_PER_RUN) {
+    // Enforce per-run embedding limit to avoid Workers AI rate limits.
+    // When the limit is reached, store with empty bodyHash so next poll retries.
+    if (embedded >= MAX_EMBEDDINGS_PER_RUN) {
       if (embedded === MAX_EMBEDDINGS_PER_RUN) {
         console.warn(
           `Embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
           `Remaining issues will be retried next cron run.`,
         );
       }
-      // Skip embedding — store with empty bodyHash so next poll retries
-      needsEmbedding = true; // keep flag for bodyHash logic below
+      // Store record with empty bodyHash to trigger retry on next poll
+      const body = issue.body ?? "";
+      const type: IssueRecord["type"] = issue.pull_request
+        ? "pull_request"
+        : "issue";
+      const record: IssueRecord = {
+        repo,
+        number: issue.number,
+        type,
+        state: issue.state,
+        title: issue.title,
+        labels: issue.labels.map((l) => l.name),
+        milestone: issue.milestone?.title ?? "",
+        assignees: issue.assignees.map((a) => a.login),
+        bodyHash: "",
+        createdAt: issue.created_at,
+        updatedAt: issue.updated_at,
+      };
+      await storeStub.fetch(
+        new Request("http://store/upsert", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(record),
+        }),
+      );
+      processed++;
+      continue;
     }
 
-    // Generate embedding if content changed and within batch limit
-    if (needsEmbedding && embedded < MAX_EMBEDDINGS_PER_RUN) {
-      try {
-        const embeddingInput = prepareEmbeddingInput(title, issue.body);
-        const embedding = await generateEmbedding(env.AI, embeddingInput);
+    const result = await processAndUpsertIssue(env, storeStub, repo, issue);
 
-        const metadata: Record<string, string | number> = {
-          repo,
-          number: issue.number,
-          type,
-          state: issue.state,
-          labels: issue.labels.map((l) => l.name).join(","),
-          milestone: issue.milestone?.title ?? "",
-          assignees: issue.assignees.map((a) => a.login).join(","),
-          updated_at: issue.updated_at,
-        };
-
-        // Upsert vector into Vectorize
-        await env.VECTORIZE.upsert([
-          {
-            id: vectorId(repo, issue.number),
-            values: embedding,
-            metadata,
-          },
-        ]);
-
-        embeddingSucceeded = true;
-        embedded++;
-      } catch (err) {
-        console.error(
-          `Failed to embed ${repo}#${issue.number}:`,
-          err instanceof Error ? err.message : String(err),
-        );
-        failed++;
-        // Continue processing other issues even if one fails
-      }
+    if (result.skippedUnchanged) {
+      skipped++;
+    } else if (result.embedded) {
+      embedded++;
+    } else if (result.failed) {
+      failed++;
     }
-
-    // Build record — save bodyHash only when embedding succeeded (or was skipped
-    // because it already exists). When embedding fails, store empty bodyHash so
-    // the next poll will detect a mismatch and retry embedding.
-    const record: IssueRecord = {
-      repo,
-      number: issue.number,
-      type,
-      state: issue.state,
-      title,
-      labels: issue.labels.map((l) => l.name),
-      milestone: issue.milestone?.title ?? "",
-      assignees: issue.assignees.map((a) => a.login),
-      bodyHash: needsEmbedding && !embeddingSucceeded ? "" : bodyHash,
-      createdAt: issue.created_at,
-      updatedAt: issue.updated_at,
-    };
-
-    // Upsert structured data into IssueStore (always, even if embedding skipped)
-    await storeStub.fetch(
-      new Request("http://store/upsert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(record),
-      }),
-    );
 
     processed++;
   }
@@ -446,18 +331,6 @@ async function pollRepo(
 
 // ── Release Polling ────────────────────────────────────────
 
-/** GitHub API release response shape (subset of fields we need) */
-interface GitHubRelease {
-  id: number;
-  tag_name: string;
-  name: string | null;
-  body: string | null;
-  prerelease: boolean;
-  created_at: string;
-  published_at: string | null;
-  html_url: string;
-}
-
 /**
  * Fetch releases from GitHub API with ETag conditional request support.
  * Returns the releases array and the response ETag.
@@ -468,7 +341,7 @@ async function fetchReleases(
   repo: string,
   token: string,
   etag?: string,
-): Promise<{ releases: GitHubRelease[]; etag?: string } | typeof NOT_MODIFIED> {
+): Promise<{ releases: GitHubReleaseData[]; etag?: string } | typeof NOT_MODIFIED> {
   const url = new URL(`https://api.github.com/repos/${repo}/releases`);
   url.searchParams.set("per_page", "100");
 
@@ -497,17 +370,9 @@ async function fetchReleases(
     throw new Error(`GitHub Releases API error ${resp.status}: ${text}`);
   }
 
-  const releases = (await resp.json()) as GitHubRelease[];
+  const releases = (await resp.json()) as GitHubReleaseData[];
   const responseEtag = resp.headers.get("etag") ?? undefined;
   return { releases, etag: responseEtag };
-}
-
-/**
- * Build Vectorize vector ID for a release.
- * Format: "owner/repo#release-v1.0.0"
- */
-function releaseVectorId(repo: string, tagName: string): string {
-  return `${repo}#release-${tagName}`;
 }
 
 /**
@@ -563,88 +428,45 @@ async function pollReleases(
   let failed = 0;
 
   for (const release of releases) {
-    const body = release.body ?? "";
-    const name = release.name ?? release.tag_name;
-    const bodyHash = await computeBodyHash(name, body);
-
-    // Check if release body has changed
-    const existingResp = await storeStub.fetch(
-      new Request(
-        `http://store/release?repo=${encodeURIComponent(repo)}&tag_name=${encodeURIComponent(release.tag_name)}`,
-      ),
-    );
-
-    let needsEmbedding = true;
-    if (existingResp.ok) {
-      const existing = (await existingResp.json()) as ReleaseRecord;
-      if (existing.bodyHash === bodyHash) {
-        needsEmbedding = false;
-        skipped++;
-      }
-    }
-
-    let embeddingSucceeded = false;
-
-    if (needsEmbedding && embedded >= MAX_EMBEDDINGS_PER_RUN) {
-      // Skip — will retry next cron
-      needsEmbedding = true;
-    }
-
-    if (needsEmbedding && embedded < MAX_EMBEDDINGS_PER_RUN) {
-      try {
-        const embeddingInput = prepareEmbeddingInput(name, body);
-        const embedding = await generateEmbedding(env.AI, embeddingInput);
-
-        const metadata: Record<string, string | number> = {
-          repo,
-          number: 0,
-          type: "release",
-          state: "published",
-          labels: "",
-          milestone: "",
-          assignees: "",
-          updated_at: release.published_at ?? release.created_at,
-          tag_name: release.tag_name,
-        };
-
-        await env.VECTORIZE.upsert([
-          {
-            id: releaseVectorId(repo, release.tag_name),
-            values: embedding,
-            metadata,
-          },
-        ]);
-
-        embeddingSucceeded = true;
-        embedded++;
-      } catch (err) {
-        console.error(
-          `Failed to embed release ${repo}#${release.tag_name}:`,
-          err instanceof Error ? err.message : String(err),
+    // Enforce per-run embedding limit
+    if (embedded >= MAX_EMBEDDINGS_PER_RUN) {
+      if (embedded === MAX_EMBEDDINGS_PER_RUN) {
+        console.warn(
+          `Release embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
+          `Remaining releases will be retried next cron run.`,
         );
-        failed++;
       }
+      // Store record with empty bodyHash to trigger retry on next poll
+      const name = release.name ?? release.tag_name;
+      const record: ReleaseRecord = {
+        repo,
+        tagName: release.tag_name,
+        name,
+        body: release.body ?? "",
+        prerelease: release.prerelease,
+        bodyHash: "",
+        createdAt: release.created_at,
+        publishedAt: release.published_at ?? release.created_at,
+      };
+      await storeStub.fetch(
+        new Request("http://store/upsert-release", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(record),
+        }),
+      );
+      continue;
     }
 
-    // Upsert release record into store
-    const record: ReleaseRecord = {
-      repo,
-      tagName: release.tag_name,
-      name,
-      body,
-      prerelease: release.prerelease,
-      bodyHash: needsEmbedding && !embeddingSucceeded ? "" : bodyHash,
-      createdAt: release.created_at,
-      publishedAt: release.published_at ?? release.created_at,
-    };
+    const result = await processAndUpsertRelease(env, storeStub, repo, release);
 
-    await storeStub.fetch(
-      new Request("http://store/upsert-release", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(record),
-      }),
-    );
+    if (result.skippedUnchanged) {
+      skipped++;
+    } else if (result.embedded) {
+      embedded++;
+    } else if (result.failed) {
+      failed++;
+    }
   }
 
   // Update watermark with ETag
@@ -685,14 +507,6 @@ function isDocFile(path: string): boolean {
   if (path === "README.md") return true;
   if (path.startsWith("docs/") && path.endsWith(".md")) return true;
   return false;
-}
-
-/**
- * Build Vectorize vector ID for a document.
- * Format: "owner/repo#doc-docs/0-requirements.md"
- */
-function docVectorId(repo: string, path: string): string {
-  return `${repo}#doc-${path}`;
 }
 
 /**
@@ -867,7 +681,7 @@ async function pollDocs(
         `Doc embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
         `Remaining docs will be retried next cron run.`,
       );
-      // Store with empty blobSha so next poll retries
+      // Stop processing — unchanged blobSha in store means next poll retries
       break;
     }
 
@@ -875,46 +689,13 @@ async function pollDocs(
       // Fetch file content
       const content = await fetchFileContent(repo, entry.path, env.GITHUB_TOKEN);
 
-      // Generate embedding (use path as title, content as body)
-      const embeddingInput = prepareEmbeddingInput(entry.path, content);
-      const embedding = await generateEmbedding(env.AI, embeddingInput);
+      const result = await processAndUpsertDoc(env, storeStub, repo, entry.path, content, entry.sha);
 
-      const metadata: Record<string, string | number> = {
-        repo,
-        number: 0,
-        type: "doc",
-        state: "active",
-        labels: "",
-        milestone: "",
-        assignees: "",
-        updated_at: now,
-        doc_path: entry.path,
-      };
-
-      // Upsert vector into Vectorize
-      await env.VECTORIZE.upsert([
-        {
-          id: docVectorId(repo, entry.path),
-          values: embedding,
-          metadata,
-        },
-      ]);
-
-      // Upsert doc record into store
-      await storeStub.fetch(
-        new Request("http://store/upsert-doc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            repo,
-            path: entry.path,
-            blobSha: entry.sha,
-            updatedAt: now,
-          }),
-        }),
-      );
-
-      embedded++;
+      if (result.embedded) {
+        embedded++;
+      } else if (result.failed) {
+        failed++;
+      }
     } catch (err) {
       console.error(
         `Failed to embed doc ${repo}/${entry.path}:`,
