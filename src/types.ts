@@ -76,4 +76,6 @@ export interface Env {
   GITHUB_TOKEN: string;
   /** Comma-separated list of repos to poll, e.g. "owner/repo1,owner/repo2" */
   POLL_REPOS: string;
+  /** GitHub webhook secret for HMAC-SHA256 signature verification (set via `wrangler secret put`) */
+  GITHUB_WEBHOOK_SECRET: string;
 }
