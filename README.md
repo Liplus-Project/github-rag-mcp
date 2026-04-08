@@ -1,97 +1,112 @@
 # github-rag-mcp
 
-GitHub issue/PR semantic search MCP server on Cloudflare Workers + Vectorize.
+Language: English | [Japanese](README.ja.md)
 
-Counterpart to [github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp) (push-based notifications). Together they give AI a complete view of GitHub project state.
+GitHub issue, pull request, release, and documentation search for MCP clients on Cloudflare Workers.
+
+`github-rag-mcp` is designed as a shared working memory over GitHub. It does not try to remember every conversation. Instead, it helps agents recover the current project state from durable artifacts that humans can also inspect: issues, pull requests, docs, and releases.
+
+It is the search-oriented counterpart to [github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp). Together they provide both:
+
+- push-based awareness of what just happened
+- retrieval of the state that matters for the next step
+
+## Memory Model
+
+The project treats GitHub as a visible state store for AI work.
+
+- Do not aim for complete memory.
+- Do not add unnecessary material.
+- Do not omit information required for the next correct action.
+- Preserve state in human-readable, reviewable artifacts.
+- Recover context by search instead of replaying full chat history.
+
+For a fuller explanation, see:
+
+- [docs/1-memory-philosophy.md](docs/1-memory-philosophy.md)
+- [docs/1-memory-philosophy.ja.md](docs/1-memory-philosophy.ja.md)
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Cloudflare Workers                                          │
-│                                                              │
-│  ┌───────────┐  ┌──────────────────┐  ┌───────────────┐     │
-│  │ MCP Server│  │ Webhook Receiver │  │ OAuth Provider│     │
-│  │ (tools)   │  │ (real-time)      │  │ (GitHub App)  │     │
-│  └─────┬─────┘  └────────┬─────────┘  └───────────────┘     │
-│        │                 │                                    │
-│        │        ┌────────▼─────────┐  ┌────────────┐        │
-│        │        │ Embedding        │  │ Cron Poller│        │
-│        │        │ Pipeline         │  │ (hourly    │        │
-│        │        │                  │  │  fallback) │        │
-│        │        └────────┬─────────┘  └─────┬──────┘        │
-│        │                 │                  │                │
-│  ┌─────▼─────────────────▼──────────────────▼──────┐        │
-│  │              Durable Object                     │        │
-│  │           (issue/PR state store)                │        │
-│  └─────┬──────────────┬───────────────────────────┘        │
-│        │              │                                      │
-│  ┌─────▼─────┐  ┌────▼──────┐                              │
-│  │ Vectorize │  │Workers AI │                              │
-│  │ (search)  │  │ (BGE-M3)  │                              │
-│  └───────────┘  └───────────┘                              │
-└──────────────────────────────────────────────────────────────┘
-         ▲               ▲                    ▲
-         │ MCP protocol  │ Webhook POST       │ GitHub API
-         │               │                    │
-    Claude Code /   GitHub webhook       GitHub App
-    liplus-desktop  delivery             Installation
+```text
+GitHub webhooks + GitHub API
+            |
+            v
+     Cloudflare Worker
+     + MCP HTTP surface
+     + webhook receiver
+     + cron poller (fallback)
+     + embedding pipeline
+            |
+            +--> Vectorize (semantic search index)
+            +--> Durable Object / SQLite (structured state store)
+            +--> Workers AI BGE-M3 (embeddings)
 ```
 
-- **Webhook Receiver** は GitHub からの webhook イベントをリアルタイムで受信し、即座にエンベディングパイプラインを通じてインデックスを更新する。GitHub IP アドレス検証によりリクエストの正当性を担保する。
-- **Cron Poller** は 1 時間ごとのフォールバックとして動作し、webhook 配信漏れや一時障害時のデータ整合性を保証する。
-- **MCP Server** は MCP プロトコル上でセマンティック検索と構造化クエリを OAuth 2.1 認証付きで提供する。
-- **Durable Object** は issue/PR メタデータを SQLite に格納し、高速な構造化検索を実現する。
+- The MCP surface exposes semantic search and context tools to AI clients.
+- The webhook receiver updates memory in near real time when GitHub changes.
+- The cron poller repairs missed updates and supports backfill.
+- Vectorize stores semantic embeddings.
+- Durable Object keeps structured state for fast lookups and activity views.
 
-## Prerequisites
+## Why GitHub
 
-| Component | Required |
-|-----------|----------|
-| **Node.js 18+** | Build and deploy |
-| **Cloudflare account** | Worker deployment (Free plan sufficient) |
-| **GitHub App** | OAuth authentication and API access |
-| **wrangler CLI** | Cloudflare Workers deployment |
+GitHub already contains the artifacts that matter for software work:
 
-## Getting Started
+- issues for requirements and open decisions
+- pull requests for implementation history and review state
+- documentation for stabilized understanding
+- releases for shipped checkpoints
 
-See the [Installation guide](docs/installation.md) for the full setup, including:
+Using those artifacts as memory makes handoff and auditing easier than keeping state inside a private chat transcript.
 
-- Cloning and installing dependencies
-- Creating Cloudflare resources (Vectorize index, KV namespace)
-- Registering a GitHub App
-- Deploying the Worker
-- Configuring secrets
+## Installation
+
+See:
+
+- [docs/installation.md](docs/installation.md)
+- [docs/installation.ja.md](docs/installation.ja.md)
+
+## Requirements
+
+See:
+
+- [docs/0-requirements.md](docs/0-requirements.md)
+- [docs/0-requirements.ja.md](docs/0-requirements.ja.md)
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `search_issues` | Semantic search for issues and PRs combined with structured filters (repo, state, labels, milestone, assignee, type) |
-| `get_issue_context` | Aggregated context for a single issue/PR including linked PRs, branch status, and CI status |
-| `list_recent_activity` | Recent issue/PR activity across tracked repositories, classified as created, updated, or closed |
+| `search_issues` | Semantic search across issues, pull requests, releases, and documentation with structured filters. |
+| `get_issue_context` | Aggregated state for one issue or pull request, including linked PRs, branch information, CI state, sub-issues, and related releases. |
+| `list_recent_activity` | Recent activity across tracked repositories, including issue, PR, release, and documentation updates. |
 
 ## Repository Structure
 
-```
+```text
 src/
-  index.ts        — Worker entrypoint (routing, cron, webhook, OAuth)
-  mcp.ts          — MCP server and tool definitions
-  oauth.ts        — OAuth 2.1 provider setup
-  webhook.ts      — Webhook event handler (real-time ingest)
-  pipeline.ts     — Embedding pipeline (shared by webhook and poller)
-  github-ip.ts    — GitHub IP address validation for webhook verification
-  poller.ts       — Cron-triggered GitHub API poller (hourly fallback)
-  store.ts        — Durable Object issue state store
-  types.ts        — Shared type definitions
+  index.ts
+  mcp.ts
+  oauth.ts
+  webhook.ts
+  pipeline.ts
+  github-ip.ts
+  poller.ts
+  store.ts
+  types.ts
 docs/
-  0-requirements.md — Requirements specification
-  installation.md   — Deployment and setup guide
-mcp-server/       — .mcpb client package for Claude Desktop
-wrangler.toml     — Cloudflare Workers configuration
+  0-requirements.md
+  0-requirements.ja.md
+  1-memory-philosophy.md
+  1-memory-philosophy.ja.md
+  installation.md
+  installation.ja.md
+mcp-server/
+wrangler.toml
 ```
 
 ## Related
 
-- [Liplus-Project/github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp) — Real-time GitHub webhook notifications
-- [Liplus-Project/liplus-language](https://github.com/Liplus-Project/liplus-language) — Li+ language specification
-- Requirements: [docs/0-requirements.md](docs/0-requirements.md)
+- [Liplus-Project/github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp)
+- [Liplus-Project/liplus-language](https://github.com/Liplus-Project/liplus-language)
