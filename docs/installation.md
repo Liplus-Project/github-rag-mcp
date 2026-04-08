@@ -146,7 +146,7 @@ openssl rand -hex 32
 生成した値を Cloudflare Workers のシークレットとして設定する。
 
 ```bash
-echo "<generated-secret>" | wrangler secret put WEBHOOK_SECRET
+echo "<generated-secret>" | wrangler secret put GITHUB_WEBHOOK_SECRET
 ```
 
 ### 6.2 GitHub リポジトリに Webhook を登録
@@ -158,7 +158,7 @@ echo "<generated-secret>" | wrangler secret put WEBHOOK_SECRET
 
 | Field | Value |
 |---|---|
-| Payload URL | `https://<your-worker>.workers.dev/webhook` |
+| Payload URL | `https://<your-worker>.workers.dev/webhooks/github` |
 | Content type | `application/json` |
 | Secret | 6.1 で生成したシークレット |
 
@@ -213,4 +213,4 @@ GitHub App 設定のコールバック URL が `https://<your-worker>.workers.de
 
 ### Webhook 403 errors
 
-`WEBHOOK_SECRET` が正しく設定されていないか、GitHub の Webhook 設定と一致していない。両方の値が同一であることを確認する。
+`GITHUB_WEBHOOK_SECRET` が正しく設定されていないか、GitHub の Webhook 設定と一致していない。両方の値が同一であることを確認する。
