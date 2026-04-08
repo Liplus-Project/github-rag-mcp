@@ -1,22 +1,22 @@
-# github-rag-mcp Installation Guide
+# github-rag-mcp インストールガイド
 
-Language: English | [Japanese](installation.ja.md)
+言語: [English](installation.md) | 日本語
 
 ## Prerequisites
 
 - Cloudflare account
-- GitHub account with access to the target repositories
+- 対象 repository に access できる GitHub account
 - Node.js 18+
 - npm
 - Wrangler CLI
 
-Install Wrangler if needed:
+Wrangler が未導入なら:
 
 ```bash
 npm install -g wrangler
 ```
 
-## 1. Clone and install dependencies
+## 1. Clone と dependency install
 
 ```bash
 git clone https://github.com/Liplus-Project/github-rag-mcp.git
@@ -24,13 +24,13 @@ cd github-rag-mcp
 npm install
 ```
 
-## 2. Log in to Cloudflare
+## 2. Cloudflare に login
 
 ```bash
 wrangler login
 ```
 
-## 3. Create Cloudflare resources
+## 3. Cloudflare resource を作成
 
 ### 3.1 Vectorize index
 
@@ -38,9 +38,9 @@ wrangler login
 wrangler vectorize create github-rag-issues --dimensions 1024 --metric cosine
 ```
 
-### 3.2 Metadata indexes
+### 3.2 Metadata index
 
-Create metadata indexes before relying on structured filters.
+structured filter を使う前に metadata index を作る。
 
 ```bash
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name repo
@@ -55,13 +55,13 @@ wrangler vectorize create-metadata-index github-rag-issues --type string --prope
 wrangler kv namespace create OAUTH_KV
 ```
 
-Update `wrangler.toml` with the returned namespace ID.
+返された namespace ID を `wrangler.toml` に反映する。
 
-## 4. Create the GitHub App
+## 4. GitHub App を作成
 
-Create a GitHub App for OAuth and repository access.
+OAuth と repository access 用の GitHub App を作成する。
 
-Recommended settings:
+推奨設定:
 
 | Field | Value |
 |---|---|
@@ -70,7 +70,7 @@ Recommended settings:
 | Webhook URL | `https://<your-worker>.workers.dev/webhooks/github` |
 | Webhook active | enabled |
 
-Recommended repository permissions:
+推奨 repository permission:
 
 - Issues: read
 - Pull requests: read
@@ -79,25 +79,25 @@ Recommended repository permissions:
 - Contents: read
 - Metadata: read
 
-Subscribe to these events:
+購読 event:
 
 - Issues
 - Pull requests
 - Push
 - Release
 
-Install the app on the repositories you want to track.
+追跡したい repository に App を install する。
 
-## 5. Configure secrets
+## 5. Secret を設定
 
-Set these secrets in Cloudflare:
+Cloudflare に次の secret を設定する。
 
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
 - `GITHUB_TOKEN`
 - `GITHUB_WEBHOOK_SECRET`
 
-Example:
+例:
 
 ```bash
 echo "<client-id>" | wrangler secret put GITHUB_CLIENT_ID
@@ -106,42 +106,42 @@ echo "<github-token>" | wrangler secret put GITHUB_TOKEN
 echo "<webhook-secret>" | wrangler secret put GITHUB_WEBHOOK_SECRET
 ```
 
-## 6. Configure variables
+## 6. Variable を設定
 
-Set `POLL_REPOS` to a comma-separated list of repositories.
+`POLL_REPOS` に comma-separated list で repository を設定する。
 
-Example:
+例:
 
 ```toml
 [vars]
 POLL_REPOS = "owner/repo1,owner/repo2"
 ```
 
-## 7. Deploy the worker
+## 7. Worker を deploy
 
 ```bash
 wrangler deploy
 ```
 
-## 8. Verify the deployment
+## 8. Deploy 後の確認
 
-Check the following:
+次を確認する。
 
-- OAuth callback works
-- webhook deliveries return success
-- cron runs appear in Cloudflare logs
-- the MCP endpoint is reachable
+- OAuth callback が通る
+- webhook delivery が成功する
+- Cloudflare log に cron run が出る
+- MCP endpoint へ到達できる
 
-Recommended verification flow:
+推奨確認フロー:
 
-1. Open the worker URL and complete OAuth.
-2. Edit an issue in a tracked repository.
-3. Confirm a webhook delivery reaches the worker.
-4. Confirm the record appears in search results.
+1. Worker URL を開いて OAuth を完了する
+2. 追跡対象 repository の issue を更新する
+3. webhook delivery が Worker に届くことを確認する
+4. search result に反映されることを確認する
 
-## 9. Re-index if metadata filtering was added later
+## 9. 後から metadata filtering を有効化した場合の再 index
 
-If metadata indexes were created after vectors already existed, reset stored hashes so the next cron run re-embeds everything.
+vector 作成後に metadata index を追加した場合、stored hash を reset して次回 cron で全件 re-embed させる。
 
 Admin endpoint:
 
@@ -149,28 +149,28 @@ Admin endpoint:
 POST /admin/reset-hashes?repo=owner/repo
 ```
 
-Authentication:
+認証:
 
-- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+- `GITHUB_TOKEN` header に worker secret と同じ `GITHUB_TOKEN` を送る
 
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`
 
-The worker secret is missing or misconfigured.
+worker secret が未設定、または値が誤っている。
 
 ### `POLL_REPOS not configured`
 
-The plain-text variable is missing.
+plain-text variable が未設定である。
 
-### GitHub API 401 or 403
+### GitHub API 401 / 403
 
-The token is expired or missing required scopes.
+token が失効しているか、必要な scope が不足している。
 
 ### OAuth callback fails
 
-The GitHub App callback URL does not exactly match the worker callback URL.
+GitHub App の callback URL が worker 側 URL と完全一致していない。
 
 ### Webhook verification fails
 
-`GITHUB_WEBHOOK_SECRET` does not match the value configured in the GitHub App.
+`GITHUB_WEBHOOK_SECRET` が GitHub App 側設定と一致していない。
