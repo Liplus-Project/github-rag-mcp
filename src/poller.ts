@@ -1,7 +1,7 @@
 /**
  * Cron Poller — scheduled handler for GitHub issue/PR polling and embedding pipeline.
  *
- * Runs every 5 minutes via Cloudflare Cron Triggers.
+ * Runs hourly as a fallback sync (primary updates arrive via webhook).
  * Fetches issue/PR updates from GitHub API using `since` parameter for incremental updates.
  * Generates embeddings via Workers AI BGE-M3 and upserts into Vectorize.
  * Stores structured metadata in IssueStore Durable Object.
@@ -738,7 +738,7 @@ async function pollDocs(
 }
 
 /**
- * Main scheduled handler — called by Cron Trigger every 5 minutes.
+ * Main scheduled handler — called by Cron Trigger hourly as fallback.
  * Polls all configured repositories for issue/PR updates.
  */
 export async function handleScheduled(
@@ -746,6 +746,7 @@ export async function handleScheduled(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<void> {
+  console.log("[poller] Running hourly fallback sync");
   console.log(
     "Cron trigger fired:",
     controller.cron,

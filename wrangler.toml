@@ -27,9 +27,9 @@ index_name = "github-rag-issues"
 [ai]
 binding = "AI"
 
-# Cron Triggers — poll GitHub for issue/PR updates every 5 minutes
+# Cron Triggers — hourly fallback poll (primary updates via webhook)
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["0 * * * *"]
 
 # Required secrets (set via `wrangler secret put <NAME>`):
 # GITHUB_CLIENT_ID      — GitHub App OAuth client ID
