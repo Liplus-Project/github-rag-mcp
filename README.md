@@ -7,34 +7,41 @@ Counterpart to [github-webhook-mcp](https://github.com/Liplus-Project/github-web
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Cloudflare Workers                                 │
-│                                                     │
-│  ┌───────────┐  ┌────────────┐  ┌───────────────┐  │
-│  │ MCP Server│  │ Cron Poller│  │ OAuth Provider│  │
-│  │ (tools)   │  │ (5min)     │  │ (GitHub App)  │  │
-│  └─────┬─────┘  └─────┬──────┘  └───────────────┘  │
-│        │              │                              │
-│  ┌─────▼──────────────▼──────┐                      │
-│  │     Durable Object        │                      │
-│  │  (issue/PR state store)   │                      │
-│  └─────┬──────────────┬──────┘                      │
-│        │              │                              │
-│  ┌─────▼─────┐  ┌────▼──────┐                      │
-│  │ Vectorize │  │Workers AI │                      │
-│  │ (search)  │  │ (BGE-M3)  │                      │
-│  └───────────┘  └───────────┘                      │
-└─────────────────────────────────────────────────────┘
-         ▲                    ▲
-         │ MCP protocol       │ GitHub API
-         │                    │
-    Claude Code /        GitHub App
-    liplus-desktop       Installation
+┌──────────────────────────────────────────────────────────────┐
+│  Cloudflare Workers                                          │
+│                                                              │
+│  ┌───────────┐  ┌──────────────────┐  ┌───────────────┐     │
+│  │ MCP Server│  │ Webhook Receiver │  │ OAuth Provider│     │
+│  │ (tools)   │  │ (real-time)      │  │ (GitHub App)  │     │
+│  └─────┬─────┘  └────────┬─────────┘  └───────────────┘     │
+│        │                 │                                    │
+│        │        ┌────────▼─────────┐  ┌────────────┐        │
+│        │        │ Embedding        │  │ Cron Poller│        │
+│        │        │ Pipeline         │  │ (hourly    │        │
+│        │        │                  │  │  fallback) │        │
+│        │        └────────┬─────────┘  └─────┬──────┘        │
+│        │                 │                  │                │
+│  ┌─────▼─────────────────▼──────────────────▼──────┐        │
+│  │              Durable Object                     │        │
+│  │           (issue/PR state store)                │        │
+│  └─────┬──────────────┬───────────────────────────┘        │
+│        │              │                                      │
+│  ┌─────▼─────┐  ┌────▼──────┐                              │
+│  │ Vectorize │  │Workers AI │                              │
+│  │ (search)  │  │ (BGE-M3)  │                              │
+│  └───────────┘  └───────────┘                              │
+└──────────────────────────────────────────────────────────────┘
+         ▲               ▲                    ▲
+         │ MCP protocol  │ Webhook POST       │ GitHub API
+         │               │                    │
+    Claude Code /   GitHub webhook       GitHub App
+    liplus-desktop  delivery             Installation
 ```
 
-- **Cron Poller** fetches issue/PR updates from GitHub API every 5 minutes, generates embeddings via Workers AI (BGE-M3), and upserts vectors into Vectorize.
-- **MCP Server** exposes semantic search and structured queries over MCP protocol with OAuth 2.1 authentication.
-- **Durable Object** stores issue/PR metadata in SQLite for fast structured lookups.
+- **Webhook Receiver** は GitHub からの webhook イベントをリアルタイムで受信し、即座にエンベディングパイプラインを通じてインデックスを更新する。GitHub IP アドレス検証によりリクエストの正当性を担保する。
+- **Cron Poller** は 1 時間ごとのフォールバックとして動作し、webhook 配信漏れや一時障害時のデータ整合性を保証する。
+- **MCP Server** は MCP プロトコル上でセマンティック検索と構造化クエリを OAuth 2.1 認証付きで提供する。
+- **Durable Object** は issue/PR メタデータを SQLite に格納し、高速な構造化検索を実現する。
 
 ## Prerequisites
 
@@ -67,10 +74,13 @@ See the [Installation guide](docs/installation.md) for the full setup, including
 
 ```
 src/
-  index.ts        — Worker entrypoint (routing, cron, OAuth)
+  index.ts        — Worker entrypoint (routing, cron, webhook, OAuth)
   mcp.ts          — MCP server and tool definitions
   oauth.ts        — OAuth 2.1 provider setup
-  poller.ts       — Cron-triggered GitHub API poller
+  webhook.ts      — Webhook event handler (real-time ingest)
+  pipeline.ts     — Embedding pipeline (shared by webhook and poller)
+  github-ip.ts    — GitHub IP address validation for webhook verification
+  poller.ts       — Cron-triggered GitHub API poller (hourly fallback)
   store.ts        — Durable Object issue state store
   types.ts        — Shared type definitions
 docs/

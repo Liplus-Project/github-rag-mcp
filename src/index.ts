@@ -10,6 +10,7 @@
  *   POST /mcp  -- MCP server (Streamable HTTP MCP protocol)
  *
  * Routes (defaultHandler, no OAuth token required):
+ *   POST /webhooks/github -- GitHub webhook receiver (IP allowlist + signature verification)
  *   GET /oauth/authorize  -- Start GitHub OAuth flow
  *   GET /oauth/callback   -- GitHub OAuth callback
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
@@ -19,7 +20,7 @@
  *   IssueStore   -- Issue/PR state store (SQLite-backed)
  *
  * Cron Trigger:
- *   Every 5 minutes -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
+ *   Hourly (fallback) -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
  */
 
 import type { Env } from "./types.js";
@@ -31,6 +32,7 @@ import {
   type GitHubUserProps,
 } from "./oauth.js";
 import { handleScheduled } from "./poller.js";
+import { handleWebhook } from "./webhook.js";
 import { RagMcpAgent } from "./mcp.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
@@ -55,6 +57,11 @@ const mcpHandler = RagMcpAgent.serve("/mcp");
 const innerHandler: ExportedHandler<Env> = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // -- GitHub webhook receiver (IP allowlist + signature verification) --
+    if (request.method === "POST" && url.pathname === "/webhooks/github") {
+      return handleWebhook(request, env);
+    }
 
     // -- Admin: reset hashes and watermarks to trigger full re-embedding on next cron --
     // POST /admin/reset-hashes?repo=owner/repo

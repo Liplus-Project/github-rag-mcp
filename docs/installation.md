@@ -131,35 +131,86 @@ echo "<github-pat>" | wrangler secret put GITHUB_TOKEN
 echo "owner/repo1,owner/repo2" | wrangler secret put POLL_REPOS
 ```
 
-## 6. Verify Deployment
+## 6. Webhook セットアップ
+
+Webhook を設定すると、issue/PR/release の変更がリアルタイムでインデックスに反映される。Cron Poller は 1 時間ごとのフォールバックとして引き続き動作する。
+
+### 6.1 Webhook シークレットの生成
+
+ランダムな文字列を生成し、webhook リクエストの署名検証に使用する。
+
+```bash
+openssl rand -hex 32
+```
+
+生成した値を Cloudflare Workers のシークレットとして設定する。
+
+```bash
+echo "<generated-secret>" | wrangler secret put WEBHOOK_SECRET
+```
+
+### 6.2 GitHub リポジトリに Webhook を登録
+
+対象リポジトリごとに以下の手順で Webhook を登録する。
+
+1. **GitHub > リポジトリ > Settings > Webhooks > Add webhook**
+2. 以下を設定:
+
+| Field | Value |
+|---|---|
+| Payload URL | `https://<your-worker>.workers.dev/webhook` |
+| Content type | `application/json` |
+| Secret | 6.1 で生成したシークレット |
+
+3. **Which events would you like to trigger this webhook?** で **Let me select individual events** を選択し、以下を有効にする:
+   - **Issues** — issue の作成・更新・クローズ
+   - **Pull requests** — PR の作成・更新・マージ
+   - **Releases** — リリースの公開・更新
+   - **Pushes** — ドキュメントファイルの変更検出
+
+4. **Active** にチェックが入っていることを確認し、**Add webhook** をクリック
+
+### 6.3 動作確認
+
+Webhook 登録後、対象リポジトリで issue を更新すると、Worker ログにリアルタイムでイベント処理のログが表示される。
+
+## 7. Verify Deployment
 
 ### Check Cron Trigger
 
-The Worker polls GitHub every 5 minutes via Cron Triggers. After deployment:
+Cron Poller は 1 時間ごとのフォールバックとして動作する。デプロイ後:
 
-1. Wait up to 5 minutes for the first cron execution
-2. Check Worker logs in Cloudflare Dashboard:
-   - Go to **Workers & Pages > github-rag-mcp > Logs > Real-time Logs**
-   - Look for messages like `Polling Liplus-Project/... (initial sync)`
+1. 最大 1 時間で最初の cron 実行が行われる
+2. Cloudflare Dashboard で Worker ログを確認:
+   - **Workers & Pages > github-rag-mcp > Logs > Real-time Logs** を開く
+   - `Polling Liplus-Project/... (initial sync)` のようなメッセージを確認
+
+### Check Webhook
+
+Webhook が正しく設定されている場合、対象リポジトリの **Settings > Webhooks** で最近の配信履歴と応答ステータスを確認できる。
 
 ### Check MCP Endpoint
 
-Visit `https://<your-worker>.workers.dev/` in a browser - it should respond (may redirect to OAuth).
+`https://<your-worker>.workers.dev/` にブラウザでアクセスし、応答があることを確認する（OAuth にリダイレクトされる場合がある）。
 
 ## Troubleshooting
 
 ### Cron errors: "GITHUB_TOKEN not configured"
 
-The `GITHUB_TOKEN` secret is not set or was set incorrectly. Re-check the secret in Cloudflare Dashboard.
+`GITHUB_TOKEN` シークレットが未設定または設定が正しくない。Cloudflare Dashboard でシークレットを再確認する。
 
 ### Cron errors: "POLL_REPOS not configured"
 
-The `POLL_REPOS` variable is missing. Add it as a plain text variable.
+`POLL_REPOS` 変数が未設定。プレーンテキスト変数として追加する。
 
 ### GitHub API 401/403 errors
 
-The PAT may have expired or lacks the required scopes. Generate a new PAT with `repo` scope (for private repos) or `public_repo` scope (for public repos only).
+PAT の有効期限が切れているか、必要なスコープが不足している。`repo`（プライベートリポジトリ用）または `public_repo`（パブリックリポジトリ用）スコープで新しい PAT を生成する。
 
 ### OAuth callback errors
 
-Ensure the callback URL in the GitHub App settings exactly matches `https://<your-worker>.workers.dev/oauth/callback`.
+GitHub App 設定のコールバック URL が `https://<your-worker>.workers.dev/oauth/callback` と完全に一致していることを確認する。
+
+### Webhook 403 errors
+
+`WEBHOOK_SECRET` が正しく設定されていないか、GitHub の Webhook 設定と一致していない。両方の値が同一であることを確認する。
