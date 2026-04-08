@@ -149,9 +149,40 @@ openssl rand -hex 32
 echo "<generated-secret>" | wrangler secret put GITHUB_WEBHOOK_SECRET
 ```
 
-### 6.2 GitHub リポジトリに Webhook を登録
+### 6.2 GitHub App で Webhook を設定（推奨）
 
-対象リポジトリごとに以下の手順で Webhook を登録する。
+GitHub App を使用している場合、App 単位で Webhook を一括設定できる。
+
+1. **GitHub > Settings > Developer settings > GitHub Apps > \<your-app\>**
+2. **General** タブの Webhook セクションで以下を設定:
+
+| Field | Value |
+|---|---|
+| Webhook URL | `https://<your-worker>.workers.dev/webhooks/github` |
+| Webhook secret | 6.1 で生成したシークレット |
+| Active | ✅ チェック |
+
+3. **Permissions & events** タブで以下の権限を設定:
+
+   **Repository permissions:**
+   - **Issues** — Read-only
+   - **Contents** — Read-only（Push / Release イベントの受信に必要）
+
+   **Subscribe to events:**
+   - **Issues** — issue の作成・更新・クローズ
+   - **Pull requests** — PR の作成・更新・マージ
+   - **Push** — ドキュメントファイルの変更検出
+   - **Release** — リリースの公開・更新
+
+4. **Save changes** をクリック
+
+> **Note:** 権限を追加した場合、Organization インストールではオーナーが新しい権限を承認する必要がある。Organization の **Settings > GitHub Apps** で承認リクエストを確認すること。
+
+### 6.3 リポジトリごとに Webhook を登録（代替方式）
+
+> **⚠️ 未検証:** この方式は動作するはずだが、本番環境での検証は行っていない。
+
+GitHub App を使用せず、リポジトリ単位で直接 Webhook を登録する方式。対象リポジトリごとに以下の手順で登録する。
 
 1. **GitHub > リポジトリ > Settings > Webhooks > Add webhook**
 2. 以下を設定:
@@ -170,9 +201,9 @@ echo "<generated-secret>" | wrangler secret put GITHUB_WEBHOOK_SECRET
 
 4. **Active** にチェックが入っていることを確認し、**Add webhook** をクリック
 
-### 6.3 動作確認
+### 6.4 動作確認
 
-Webhook 登録後、対象リポジトリで issue を更新すると、Worker ログにリアルタイムでイベント処理のログが表示される。
+Webhook 設定後、対象リポジトリで issue を更新すると、Worker ログにリアルタイムでイベント処理のログが表示される。GitHub App の場合は **Developer settings > GitHub Apps > \<your-app\> > Advanced** で配信履歴を確認できる。
 
 ## 7. Verify Deployment
 
