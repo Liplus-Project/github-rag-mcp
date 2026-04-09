@@ -96,7 +96,7 @@ Responsibilities:
 - event を embedding pipeline に渡す
 - semantic store と structured store の両方を更新する
 
-`push` は `docs/**/*.md` や `README.md` の変更検出に使う。
+`push` はリポジトリ内の全 `.md` ファイルの変更検出に使う。
 
 ### 3. Cron Poller
 
