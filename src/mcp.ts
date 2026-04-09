@@ -4,6 +4,7 @@
  * Tools:
  *   search_issues       — semantic + structured search via Vectorize + Workers AI
  *   get_issue_context   — aggregated issue view with related PRs, branch, CI
+ *   get_doc_content     — retrieve .md document content from a repository
  *   list_recent_activity — recent changes across tracked repositories
  *
  * Extends McpAgent from "agents/mcp" (same pattern as github-webhook-mcp).
@@ -523,6 +524,118 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           ci: ciStatus,
           sub_issues: subIssues,
           releases: relatedReleases,
+        };
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(result, null, 2) },
+          ],
+        };
+      },
+    );
+
+    // ── get_doc_content ─────────────────────────────────────────
+    this.server.tool(
+      "get_doc_content",
+      "Retrieve the content of a document file (.md) from a GitHub repository. " +
+        "Use this to read documents found via search_issues with type: \"doc\". " +
+        "Returns the raw file content fetched from the repository.",
+      {
+        repo: z
+          .string()
+          .describe("Repository (owner/repo)"),
+        path: z
+          .string()
+          .describe(
+            "File path in the repository (e.g. \"docs/0-requirements.md\")",
+          ),
+        ref: z
+          .string()
+          .optional()
+          .describe(
+            "Git ref (branch, tag, or commit SHA) to fetch from. Defaults to the repository's default branch.",
+          ),
+      },
+      async ({ repo, path, ref }) => {
+        const token = this.getGitHubToken();
+        const headers = githubHeaders(token);
+
+        const url = new URL(`${GITHUB_API}/repos/${repo}/contents/${path}`);
+        if (ref) {
+          url.searchParams.set("ref", ref);
+        }
+
+        let response: Response;
+        try {
+          response = await fetch(url.toString(), { headers });
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : String(err);
+          console.error(
+            `get_doc_content: network error fetching ${repo}/${path}: ${message}`,
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to fetch document: network error — ${message}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          console.error(
+            `get_doc_content: GitHub API returned ${response.status} for ${repo}/${path}: ${body}`,
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to fetch document: HTTP ${response.status} — ${body}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const data = (await response.json()) as {
+          content?: string;
+          encoding?: string;
+          name?: string;
+          path?: string;
+          size?: number;
+          sha?: string;
+          html_url?: string;
+        };
+
+        if (!data.content) {
+          console.error(
+            `get_doc_content: no content field in response for ${repo}/${path}`,
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Document response did not contain file content. The path may point to a directory or an unsupported file type.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // GitHub returns base64-encoded content
+        const decoded = atob(data.content.replace(/\n/g, ""));
+
+        const result = {
+          repo,
+          path: data.path ?? path,
+          sha: data.sha ?? "",
+          size: data.size ?? 0,
+          url: data.html_url ?? `https://github.com/${repo}/blob/main/${path}`,
+          content: decoded,
         };
 
         return {
