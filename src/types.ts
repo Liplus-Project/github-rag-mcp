@@ -59,6 +59,27 @@ export interface VectorMetadata {
   tag_name?: string;
   /** Document file path (docs only) */
   doc_path?: string;
+  /**
+   * Expanded label fields for Vectorize pre-filtering (first 4 labels, sorted).
+   * Empty string when slot is unused.
+   *
+   * Limitation: Vectorize filters only support AND between fields, not OR.
+   * A query like `label_0 = "bug" OR label_1 = "bug"` cannot be expressed.
+   * These fields are stored for future Vectorize improvements and to support
+   * the overfetch+post-filter strategy that improves recall.
+   */
+  label_0?: string;
+  label_1?: string;
+  label_2?: string;
+  label_3?: string;
+  /**
+   * Expanded assignee fields for Vectorize pre-filtering (first 2 assignees).
+   * Empty string when slot is unused.
+   *
+   * Same AND-only limitation as labels — see label_0 comment.
+   */
+  assignee_0?: string;
+  assignee_1?: string;
 }
 
 /** Env bindings for the Worker */

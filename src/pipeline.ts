@@ -195,15 +195,29 @@ export async function processAndUpsertIssue(
     const embeddingInput = prepareEmbeddingInput(title, issue.body);
     const embedding = await generateEmbedding(env.AI, embeddingInput);
 
+    // Expand labels into individual metadata fields (first 4, sorted)
+    // for potential Vectorize pre-filtering. Sorted order ensures deterministic
+    // slot assignment across upserts.
+    const labelNames = issue.labels.map((l) => l.name).sort();
+    const assigneeLogins = issue.assignees.map((a) => a.login);
+
     const metadata: Record<string, string | number> = {
       repo,
       number: issue.number,
       type,
       state: issue.state,
-      labels: issue.labels.map((l) => l.name).join(","),
+      labels: labelNames.join(","),
       milestone: issue.milestone?.title ?? "",
-      assignees: issue.assignees.map((a) => a.login).join(","),
+      assignees: assigneeLogins.join(","),
       updated_at: issue.updated_at,
+      // Expanded label fields (first 4, sorted alphabetically)
+      label_0: labelNames[0] ?? "",
+      label_1: labelNames[1] ?? "",
+      label_2: labelNames[2] ?? "",
+      label_3: labelNames[3] ?? "",
+      // Expanded assignee fields (first 2)
+      assignee_0: assigneeLogins[0] ?? "",
+      assignee_1: assigneeLogins[1] ?? "",
     };
 
     await env.VECTORIZE.upsert([

@@ -47,6 +47,13 @@ wrangler vectorize create-metadata-index github-rag-issues --type string --prope
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name type
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name state
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name milestone
+# label/assignee 展開フィールド (将来の Vectorize OR フィルター対応に備えて格納)
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_0
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_1
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_2
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_3
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name assignee_0
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name assignee_1
 ```
 
 ### 3.3 KV namespace
