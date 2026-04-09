@@ -138,12 +138,19 @@ Vectorize stores semantic embeddings and metadata for:
 - repository
 - item type
 - state
-- labels
+- labels (individual slots label_0..3 + CSV fallback)
 - milestone
-- assignees
+- assignees (individual slots assignee_0..1 + CSV fallback)
 - update timestamp
 - release tag name
 - documentation path
+
+Metadata indexes (10/10 slots used):
+
+- Pre-filter capable: repo, type, state, milestone
+- Stored for future pre-filter: label_0, label_1, label_2, label_3, assignee_0, assignee_1
+
+Vectorize metadata filters support AND between fields only, not OR. A query like `label_0 = "bug" OR label_1 = "bug"` cannot be expressed. Labels and assignees therefore remain post-filtered via overfetch strategy. When Vectorize adds OR or `$in`-across-fields support, the expanded fields are immediately usable for pre-filtering.
 
 The vector store is the semantic retrieval layer, not the canonical state store.
 
@@ -169,9 +176,11 @@ The retrieval layer must support both semantic search and structured filtering.
 Expected retrieval behavior:
 
 1. Generate an embedding for the query.
-2. Query Vectorize with repository and coarse metadata filters when available.
-3. Apply additional filtering and enrichment.
-4. Return results with enough structured context to continue work.
+2. Build Vectorize metadata filter from structured params (repo, state, type, milestone are pre-filtered).
+3. When labels or assignee filters are present, overfetch internally (requestedTopK * 5, max 50).
+4. Query Vectorize with embedding + filter.
+5. Post-filter labels (AND logic, expanded fields + CSV) and assignee.
+6. Trim to requestedTopK and return results with structured context.
 
 The retrieval layer is intended to recover working state, not merely keyword matches.
 
