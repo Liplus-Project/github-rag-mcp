@@ -114,12 +114,10 @@ function jsonResponse(status: number, body: unknown): Response {
 
 /**
  * Check whether a file path matches the doc file pattern.
- * Matches `docs/**\/*.md` and `README.md` at root — same rule as the poller.
+ * Matches all .md files in the repository.
  */
 function isDocFile(path: string): boolean {
-  if (path === "README.md") return true;
-  if (path.startsWith("docs/") && path.endsWith(".md")) return true;
-  return false;
+  return path.endsWith(".md");
 }
 
 /**

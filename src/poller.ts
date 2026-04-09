@@ -501,12 +501,9 @@ interface GitTreeResponse {
   truncated: boolean;
 }
 
-/** Pattern to match target documentation files */
+/** Pattern to match target documentation files — all .md files in the repository */
 function isDocFile(path: string): boolean {
-  // Match docs/**/*.md and README.md at root
-  if (path === "README.md") return true;
-  if (path.startsWith("docs/") && path.endsWith(".md")) return true;
-  return false;
+  return path.endsWith(".md");
 }
 
 /**

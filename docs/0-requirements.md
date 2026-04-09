@@ -96,7 +96,7 @@ Responsibilities:
 - route events to the embedding pipeline
 - update both semantic and structured stores
 
-`push` is used to detect documentation changes such as `docs/**/*.md` and `README.md`.
+`push` is used to detect changes in all `.md` files across the repository.
 
 ### 3. Cron Poller
 
