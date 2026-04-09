@@ -145,38 +145,70 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         if (milestone) {
           filter["milestone"] = { $eq: milestone };
         }
-        // Labels and assignees are stored as comma-separated strings in Vectorize metadata.
-        // Vectorize $eq only matches the full string, not substrings.
-        // Post-filter client-side after query for both.
 
-        // 3. Query Vectorize
+        // Labels and assignees cannot be pre-filtered via Vectorize because:
+        //   - They are multi-valued (an issue can have many labels / assignees)
+        //   - Stored in individual slots (label_0..3, assignee_0..1) but a given
+        //     label can land in any slot depending on sort order
+        //   - Vectorize filters only support AND between fields, not OR across them
+        //     (e.g., "label_0 = 'bug' OR label_1 = 'bug'" is not expressible)
+        //
+        // Strategy: overfetch from Vectorize when post-filters are active,
+        // then apply label/assignee filters client-side on the larger result set.
+        // This significantly improves recall vs. the previous fixed-topK approach.
+        const requestedTopK = top_k ?? 10;
+        const needsPostFilter = (labels && labels.length > 0) || !!assignee;
+        const internalTopK = needsPostFilter
+          ? Math.min(requestedTopK * 5, 50)
+          : requestedTopK;
+
+        // 3. Query Vectorize with potentially larger topK
         const vectorizeFilter: VectorizeVectorMetadataFilter | undefined =
           Object.keys(filter).length > 0 ? filter : undefined;
 
         const results = await this.env.VECTORIZE.query(embedding, {
-          topK: top_k ?? 10,
+          topK: internalTopK,
           filter: vectorizeFilter,
           returnMetadata: "all",
         });
 
-        // 4. Post-filter for labels (AND) and assignee (contains)
+        // 4. Post-filter for labels (AND) and assignee
+        // Uses both expanded fields (label_0..3, assignee_0..1) and the
+        // comma-separated fallback fields for overflow (5th+ label, 3rd+ assignee).
         let matches = results.matches;
         if (labels && labels.length > 0) {
           matches = matches.filter((m) => {
             const meta = m.metadata as unknown as VectorMetadata | undefined;
-            if (!meta?.labels) return false;
-            const itemLabels = meta.labels.split(",").map((l) => l.trim());
-            return labels.every((l) => itemLabels.includes(l));
+            if (!meta) return false;
+            // Collect all labels from expanded fields + comma-separated fallback
+            const expandedLabels = [
+              meta.label_0, meta.label_1, meta.label_2, meta.label_3,
+            ].filter((l): l is string => !!l);
+            const csvLabels = meta.labels
+              ? meta.labels.split(",").map((l) => l.trim()).filter(Boolean)
+              : [];
+            const allLabels = new Set([...expandedLabels, ...csvLabels]);
+            return labels.every((l) => allLabels.has(l));
           });
         }
         if (assignee) {
           matches = matches.filter((m) => {
             const meta = m.metadata as unknown as VectorMetadata | undefined;
-            if (!meta?.assignees) return false;
-            const itemAssignees = meta.assignees.split(",").map((a) => a.trim());
-            return itemAssignees.includes(assignee);
+            if (!meta) return false;
+            // Check expanded fields first, then comma-separated fallback
+            if (meta.assignee_0 === assignee || meta.assignee_1 === assignee) {
+              return true;
+            }
+            if (meta.assignees) {
+              const csvAssignees = meta.assignees.split(",").map((a) => a.trim());
+              return csvAssignees.includes(assignee);
+            }
+            return false;
           });
         }
+
+        // Trim to originally requested topK after post-filtering
+        matches = matches.slice(0, requestedTopK);
 
         // 5. Format results
         const items = matches.map((m) => {
