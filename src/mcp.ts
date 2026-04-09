@@ -333,6 +333,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
 
         // 2. Fetch issue/PR details from GitHub API (for body and additional context)
         let ghIssue: Record<string, unknown> | null = null;
+        let apiFetchError: string | null = null;
         try {
           const issueRes = await fetch(
             `${GITHUB_API}/repos/${repo}/issues/${number}`,
@@ -340,9 +341,17 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           );
           if (issueRes.ok) {
             ghIssue = (await issueRes.json()) as Record<string, unknown>;
+          } else {
+            apiFetchError = `GitHub API returned ${issueRes.status} ${issueRes.statusText}`;
+            console.error(
+              `get_issue_context: failed to fetch ${repo}#${number} from GitHub API: ${apiFetchError}`,
+            );
           }
-        } catch {
-          // Continue with IssueStore data if API fails
+        } catch (err) {
+          apiFetchError = err instanceof Error ? err.message : String(err);
+          console.error(
+            `get_issue_context: error fetching ${repo}#${number} from GitHub API: ${apiFetchError}`,
+          );
         }
 
         // 3. Fetch linked PRs via timeline events
@@ -505,7 +514,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         }
 
         // 7. Aggregate result
-        const result = {
+        const result: Record<string, unknown> = {
           repo,
           number,
           title: issueData?.title ?? (ghIssue as Record<string, unknown> | null)?.title ?? "",
@@ -524,6 +533,10 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           sub_issues: subIssues,
           releases: relatedReleases,
         };
+
+        if (apiFetchError) {
+          result.api_error = apiFetchError;
+        }
 
         return {
           content: [
