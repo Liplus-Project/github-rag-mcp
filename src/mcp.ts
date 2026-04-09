@@ -626,8 +626,10 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           };
         }
 
-        // GitHub returns base64-encoded content
-        const decoded = atob(data.content.replace(/\n/g, ""));
+        // GitHub returns base64-encoded content; decode via Uint8Array for UTF-8 safety
+        const binary = atob(data.content.replace(/\n/g, ""));
+        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+        const decoded = new TextDecoder().decode(bytes);
 
         const result = {
           repo,
