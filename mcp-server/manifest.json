@@ -49,6 +49,10 @@
       "description": "Get aggregated context for a single issue/PR including related PRs, branch status, and CI status."
     },
     {
+      "name": "get_doc_content",
+      "description": "Retrieve the content of a document file (.md) from a GitHub repository."
+    },
+    {
       "name": "list_recent_activity",
       "description": "List recent issue/PR activity across tracked repositories."
     }
