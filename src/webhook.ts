@@ -231,6 +231,7 @@ async function handleIssueOrPREvent(
     result: {
       embedded: result.embedded,
       skippedUnchanged: result.skippedUnchanged,
+      metadataUpdated: result.metadataUpdated,
       failed: result.failed,
     },
   });
@@ -294,6 +295,7 @@ async function handleReleaseEvent(
     result: {
       embedded: result.embedded,
       skippedUnchanged: result.skippedUnchanged,
+      metadataUpdated: result.metadataUpdated,
       failed: result.failed,
     },
   });
