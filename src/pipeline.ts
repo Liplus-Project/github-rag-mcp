@@ -120,6 +120,8 @@ export interface UpsertResult {
   embedded: boolean;
   /** Whether embedding was skipped because content hash matched existing record */
   skippedUnchanged: boolean;
+  /** Whether Vectorize metadata was updated without re-embedding (state/labels/assignees change) */
+  metadataUpdated: boolean;
   /** Whether embedding failed (item stored with empty bodyHash for retry) */
   failed: boolean;
 }
@@ -155,24 +157,29 @@ export async function processAndUpsertIssue(
   );
 
   let needsEmbedding = true;
+  let existing: IssueRecord | null = null;
   if (existingResp.ok) {
-    const existing = (await existingResp.json()) as IssueRecord;
+    existing = (await existingResp.json()) as IssueRecord;
     if (existing.bodyHash === bodyHash) {
       needsEmbedding = false;
     }
   }
 
   if (!needsEmbedding) {
-    // Hash matched — store record (metadata may have changed) but skip embedding
+    // Hash matched — skip embedding but update IssueStore (metadata may have changed)
+    const labelNames = issue.labels.map((l) => l.name);
+    const assigneeLogins = issue.assignees.map((a) => a.login);
+    const milestoneTitle = issue.milestone?.title ?? "";
+
     const record: IssueRecord = {
       repo,
       number: issue.number,
       type,
       state: issue.state,
       title,
-      labels: issue.labels.map((l) => l.name),
-      milestone: issue.milestone?.title ?? "",
-      assignees: issue.assignees.map((a) => a.login),
+      labels: labelNames,
+      milestone: milestoneTitle,
+      assignees: assigneeLogins,
       bodyHash,
       createdAt: issue.created_at,
       updatedAt: issue.updated_at,
@@ -186,7 +193,61 @@ export async function processAndUpsertIssue(
       }),
     );
 
-    return { embedded: false, skippedUnchanged: true, failed: false };
+    // Check if metadata changed — if so, update Vectorize metadata too
+    // (Vectorize state/labels/assignees must stay in sync with GitHub)
+    const sortedLabels = [...labelNames].sort();
+    const metadataChanged = existing !== null && (
+      existing.state !== issue.state ||
+      existing.title !== title ||
+      [...existing.labels].sort().join(",") !== sortedLabels.join(",") ||
+      existing.milestone !== milestoneTitle ||
+      [...existing.assignees].sort().join(",") !== [...assigneeLogins].sort().join(",")
+    );
+
+    if (metadataChanged) {
+      try {
+        // Retrieve existing vector values to re-upsert with updated metadata
+        const vid = vectorId(repo, issue.number);
+        const vectors = await env.VECTORIZE.getByIds([vid]);
+
+        if (vectors.length > 0 && vectors[0].values) {
+          const metadata: Record<string, string | number> = {
+            repo,
+            number: issue.number,
+            type,
+            state: issue.state,
+            labels: sortedLabels.join(","),
+            milestone: milestoneTitle,
+            assignees: assigneeLogins.join(","),
+            updated_at: issue.updated_at,
+            label_0: sortedLabels[0] ?? "",
+            label_1: sortedLabels[1] ?? "",
+            label_2: sortedLabels[2] ?? "",
+            label_3: sortedLabels[3] ?? "",
+            assignee_0: assigneeLogins[0] ?? "",
+            assignee_1: assigneeLogins[1] ?? "",
+          };
+
+          await env.VECTORIZE.upsert([
+            {
+              id: vid,
+              values: vectors[0].values as number[],
+              metadata,
+            },
+          ]);
+
+          return { embedded: false, skippedUnchanged: false, metadataUpdated: true, failed: false };
+        }
+      } catch (err) {
+        console.error(
+          `Failed to update Vectorize metadata for ${repo}#${issue.number}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // IssueStore was already updated — Vectorize metadata will catch up on next body change
+      }
+    }
+
+    return { embedded: false, skippedUnchanged: true, metadataUpdated: false, failed: false };
   }
 
   // Content changed — generate embedding
@@ -263,6 +324,7 @@ export async function processAndUpsertIssue(
   return {
     embedded: embeddingSucceeded,
     skippedUnchanged: false,
+    metadataUpdated: false,
     failed: !embeddingSucceeded,
   };
 }
@@ -322,7 +384,7 @@ export async function processAndUpsertRelease(
       }),
     );
 
-    return { embedded: false, skippedUnchanged: true, failed: false };
+    return { embedded: false, skippedUnchanged: true, metadataUpdated: false, failed: false };
   }
 
   // Content changed — generate embedding
@@ -382,6 +444,7 @@ export async function processAndUpsertRelease(
   return {
     embedded: embeddingSucceeded,
     skippedUnchanged: false,
+    metadataUpdated: false,
     failed: !embeddingSucceeded,
   };
 }
@@ -453,12 +516,12 @@ export async function processAndUpsertDoc(
       }),
     );
 
-    return { embedded: true, skippedUnchanged: false, failed: false };
+    return { embedded: true, skippedUnchanged: false, metadataUpdated: false, failed: false };
   } catch (err) {
     console.error(
       `Failed to embed doc ${repo}/${path}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return { embedded: false, skippedUnchanged: false, failed: true };
+    return { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true };
   }
 }
