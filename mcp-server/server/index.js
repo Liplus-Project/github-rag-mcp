@@ -9,6 +9,7 @@
  * Tools are proxied to the Worker's MCP endpoint:
  *   search_issues       — semantic + structured search via Vectorize + Workers AI
  *   get_issue_context   — aggregated issue view with related PRs, branch, CI
+ *   get_doc_content     — retrieve .md document content from a repository
  *   list_recent_activity — recent changes across tracked repositories
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -490,6 +491,38 @@ const TOOLS = [
     },
     annotations: {
       title: "Get Issue Context",
+      readOnlyHint: true,
+    },
+  },
+  {
+    name: "get_doc_content",
+    title: "Get Document Content",
+    description:
+      "Retrieve the content of a document file (.md) from a GitHub repository. " +
+      "Use this to read documents found via search_issues with type: \"doc\". " +
+      "Returns the raw file content fetched from the repository.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: {
+          type: "string",
+          description: "Repository (owner/repo)",
+        },
+        path: {
+          type: "string",
+          description:
+            'File path in the repository (e.g. "docs/0-requirements.md")',
+        },
+        ref: {
+          type: "string",
+          description:
+            "Git ref (branch, tag, or commit SHA) to fetch from. Defaults to the repository's default branch.",
+        },
+      },
+      required: ["repo", "path"],
+    },
+    annotations: {
+      title: "Get Document Content",
       readOnlyHint: true,
     },
   },
