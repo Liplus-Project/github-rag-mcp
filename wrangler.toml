@@ -31,7 +31,7 @@ index_name = "github-rag-issues"
 [[d1_databases]]
 binding = "DB_FTS"
 database_name = "github-rag-fts"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "5e18ffa8-584c-452e-b906-2cf71120c7ad"
 migrations_dir = "migrations"
 
 # Workers AI binding for embedding generation (BGE-M3)
