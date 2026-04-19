@@ -18,10 +18,21 @@ new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
 binding = "OAUTH_KV"
 id = "67611ab57f734f1c9a0b5d5a96f65e78"
 
-# Vectorize index for semantic search
+# Vectorize index for semantic search (dense side of hybrid retrieval)
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "github-rag-issues"
+
+# D1 database for full-text search (sparse side of hybrid retrieval, BM25 via FTS5)
+# database_id must be replaced with the actual ID after running:
+#   wrangler d1 create github-rag-fts
+# Migrations live in ./migrations and are applied via:
+#   wrangler d1 migrations apply github-rag-fts
+[[d1_databases]]
+binding = "DB_FTS"
+database_name = "github-rag-fts"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
 
 # Workers AI binding for embedding generation (BGE-M3)
 [ai]

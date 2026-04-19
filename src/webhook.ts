@@ -20,6 +20,7 @@ import {
   type GitHubReleaseData,
   type GitHubCommitDetail,
 } from "./pipeline.js";
+import { deleteFtsRow } from "./fts.js";
 
 /**
  * Verify GitHub webhook signature using WebCrypto HMAC-SHA256.
@@ -217,7 +218,8 @@ async function handleIssueOrPREvent(
 
   const number = raw.number as number;
 
-  // Handle deletion: remove vector and acknowledge
+  // Handle deletion: remove from Vectorize and D1 FTS5, then acknowledge.
+  // Diff rows are append-only and therefore not covered here.
   if (action === "deleted") {
     const vid = await vectorId(repo, number);
     try {
@@ -225,6 +227,14 @@ async function handleIssueOrPREvent(
     } catch (err) {
       console.error(
         `Failed to delete vector ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await deleteFtsRow(env.DB_FTS, vid);
+    } catch (err) {
+      console.error(
+        `Failed to delete FTS5 row ${vid}:`,
         err instanceof Error ? err.message : String(err),
       );
     }
@@ -288,7 +298,7 @@ async function handleReleaseEvent(
   const raw = payload.release as Record<string, unknown>;
   const tagName = raw.tag_name as string;
 
-  // Handle deletion
+  // Handle deletion: remove from Vectorize and D1 FTS5.
   if (action === "deleted") {
     const rvid = await releaseVectorId(repo, tagName);
     try {
@@ -296,6 +306,14 @@ async function handleReleaseEvent(
     } catch (err) {
       console.error(
         `Failed to delete release vector ${rvid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await deleteFtsRow(env.DB_FTS, rvid);
+    } catch (err) {
+      console.error(
+        `Failed to delete FTS5 row ${rvid}:`,
         err instanceof Error ? err.message : String(err),
       );
     }
@@ -473,12 +491,20 @@ async function handlePushEvent(
     }
   }
 
-  // Delete removed doc files
+  // Delete removed doc files from Vectorize, D1 FTS5, and the structured store.
   let deleted = 0;
   for (const path of removed) {
     try {
       const dvid = await docVectorId(repo, path);
       await env.VECTORIZE.deleteByIds([dvid]);
+      try {
+        await deleteFtsRow(env.DB_FTS, dvid);
+      } catch (ftsErr) {
+        console.error(
+          `Webhook: failed to delete FTS5 row for doc ${repo}/${path}:`,
+          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+      }
       await storeStub.fetch(
         new Request(
           `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`,

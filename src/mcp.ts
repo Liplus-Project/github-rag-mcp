@@ -17,6 +17,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env, IssueRecord, ReleaseRecord, DocRecord, DiffRecord, VectorMetadata } from "./types.js";
 import type { GitHubUserProps } from "./oauth.js";
+import {
+  queryFts,
+  toRankMap,
+  reciprocalRankFusion,
+  type FtsHit,
+  type FtsFilter,
+} from "./fts.js";
 
 /** User context passed via props from OAuth layer */
 interface McpProps extends Record<string, unknown> {
@@ -78,8 +85,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Semantic search for GitHub issues, PRs, releases, repository documentation, and commit diffs combined with structured filters. " +
-        "Uses embedding similarity (BGE-M3) with optional metadata filters. " +
+      "Hybrid search (dense + sparse) for GitHub issues, PRs, releases, repository documentation, and commit diffs. " +
+        "Dense retrieval uses BGE-M3 embeddings over Vectorize; sparse retrieval uses BM25 over D1 FTS5 " +
+        "with a porter tokenizer for natural-language surfaces and a trigram tokenizer for commit diffs. " +
+        "The two rankers are combined via Reciprocal Rank Fusion (RRF, k=60). " +
+        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply to both sides. " +
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files and non-.md files that are not present in the live document index.",
       {
         query: z.string().describe("Natural language search query"),
@@ -116,14 +126,102 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           .optional()
           .default(10)
           .describe("Max results (default: 10, max: 50)"),
+        fusion: z
+          .enum(["rrf", "dense_only", "sparse_only"])
+          .optional()
+          .default("rrf")
+          .describe(
+            "Fusion strategy. Default: rrf (Reciprocal Rank Fusion over dense + sparse). " +
+              "dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only. " +
+              "Use rrf unless debugging a specific ranker.",
+          ),
       },
-      async ({ query, repo, state, labels, milestone, assignee, type, top_k }) => {
-        // 1. Generate embedding for query via Workers AI (BGE-M3)
-        const aiResult = await this.env.AI.run("@cf/baai/bge-m3", {
-          text: [query],
-        });
-        const vectors = (aiResult as { data: Array<number[]> }).data;
-        if (!vectors || vectors.length === 0) {
+      async ({ query, repo, state, labels, milestone, assignee, type, top_k, fusion }) => {
+        const requestedTopK = top_k ?? 10;
+        const fusionMode = fusion ?? "rrf";
+        // Overfetch on both sides when label/assignee post-filter is needed.
+        // The post-filter is applied after fusion; overfetching preserves recall.
+        const needsPostFilter = (labels && labels.length > 0) || !!assignee;
+        const internalTopK = needsPostFilter
+          ? Math.min(requestedTopK * 5, 50)
+          : requestedTopK;
+
+        // ── Dense path: Vectorize embedding query ────────────────
+        const densePromise: Promise<{
+          hits: Array<{
+            vectorId: string;
+            score: number;
+            meta: VectorMetadata | undefined;
+          }>;
+          error?: string;
+        }> =
+          fusionMode === "sparse_only"
+            ? Promise.resolve({ hits: [] })
+            : (async () => {
+                const aiResult = await this.env.AI.run("@cf/baai/bge-m3", {
+                  text: [query],
+                });
+                const vectors = (aiResult as { data: Array<number[]> }).data;
+                if (!vectors || vectors.length === 0) {
+                  return { hits: [], error: "embedding_failed" };
+                }
+                const embedding = vectors[0];
+
+                const filter: VectorizeVectorMetadataFilter = {};
+                if (repo) filter["repo"] = { $eq: repo };
+                if (state && state !== "all") filter["state"] = { $eq: state };
+                if (type && type !== "all") filter["type"] = { $eq: type };
+                if (milestone) filter["milestone"] = { $eq: milestone };
+
+                const vectorizeFilter: VectorizeVectorMetadataFilter | undefined =
+                  Object.keys(filter).length > 0 ? filter : undefined;
+
+                const results = await this.env.VECTORIZE.query(embedding, {
+                  topK: internalTopK,
+                  filter: vectorizeFilter,
+                  returnMetadata: "all",
+                });
+
+                return {
+                  hits: results.matches.map((m) => ({
+                    vectorId: m.id,
+                    score: m.score,
+                    meta: m.metadata as unknown as VectorMetadata | undefined,
+                  })),
+                };
+              })();
+
+        // ── Sparse path: D1 FTS5 BM25 query ──────────────────────
+        const sparsePromise: Promise<FtsHit[]> =
+          fusionMode === "dense_only"
+            ? Promise.resolve([])
+            : (async () => {
+                const ftsFilter: FtsFilter = {};
+                if (repo) ftsFilter.repo = repo;
+                if (state && state !== "all") {
+                  ftsFilter.state = state as FtsFilter["state"];
+                }
+                if (type && type !== "all") {
+                  ftsFilter.type = type as FtsFilter["type"];
+                }
+                if (milestone) ftsFilter.milestone = milestone;
+                try {
+                  return await queryFts(this.env.DB_FTS, query, internalTopK, ftsFilter);
+                } catch (err) {
+                  console.error(
+                    "search_issues: D1 FTS5 query failed:",
+                    err instanceof Error ? err.message : String(err),
+                  );
+                  return [];
+                }
+              })();
+
+        const [denseResult, sparseHits] = await Promise.all([
+          densePromise,
+          sparsePromise,
+        ]);
+
+        if (denseResult.error === "embedding_failed" && fusionMode !== "sparse_only") {
           return {
             content: [
               { type: "text" as const, text: "Failed to generate embedding for query" },
@@ -131,111 +229,156 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             isError: true,
           };
         }
-        const embedding = vectors[0];
 
-        // 2. Build Vectorize metadata filter from structured params
-        const filter: VectorizeVectorMetadataFilter = {};
-        if (repo) {
-          filter["repo"] = { $eq: repo };
+        // ── Fusion: build rank maps and combine via RRF ──────────
+        // Both hit arrays are already ordered best-first by their respective ranker.
+        // For dense_only / sparse_only, RRF degenerates to a single-ranker sort,
+        // which preserves the original ordering without additional logic.
+        const denseRanks = toRankMap(
+          denseResult.hits.map((h) => ({ vectorId: h.vectorId })),
+        );
+        const sparseRanks = toRankMap(
+          sparseHits.map((h) => ({ vectorId: h.vectorId })),
+        );
+
+        const rankers = new Map<string, Map<string, number>>();
+        if (fusionMode !== "sparse_only") rankers.set("dense", denseRanks);
+        if (fusionMode !== "dense_only") rankers.set("sparse", sparseRanks);
+
+        const fused = reciprocalRankFusion({ rankers });
+
+        // Build a vector_id → payload lookup combining dense metadata and sparse rows.
+        // Dense metadata wins when both sides see a vector; sparse hits fill in the gaps
+        // (e.g., when BM25 surfaces a row that dense missed entirely).
+        const payload = new Map<
+          string,
+          {
+            meta: VectorMetadata | undefined;
+            ftsRow: FtsHit | undefined;
+            denseScore: number | undefined;
+            sparseScore: number | undefined;
+          }
+        >();
+        for (const h of denseResult.hits) {
+          payload.set(h.vectorId, {
+            meta: h.meta,
+            ftsRow: undefined,
+            denseScore: h.score,
+            sparseScore: undefined,
+          });
         }
-        if (state && state !== "all") {
-          filter["state"] = { $eq: state };
+        for (const h of sparseHits) {
+          const existing = payload.get(h.vectorId);
+          if (existing) {
+            existing.ftsRow = h;
+            existing.sparseScore = h.score;
+          } else {
+            payload.set(h.vectorId, {
+              meta: undefined,
+              ftsRow: h,
+              denseScore: undefined,
+              sparseScore: h.score,
+            });
+          }
         }
-        if (type && type !== "all") {
-          filter["type"] = { $eq: type };
-        }
-        if (milestone) {
-          filter["milestone"] = { $eq: milestone };
-        }
 
-        // Labels and assignees cannot be pre-filtered via Vectorize because:
-        //   - They are multi-valued (an issue can have many labels / assignees)
-        //   - Stored in individual slots (label_0..3, assignee_0..1) but a given
-        //     label can land in any slot depending on sort order
-        //   - Vectorize filters only support AND between fields, not OR across them
-        //     (e.g., "label_0 = 'bug' OR label_1 = 'bug'" is not expressible)
-        //
-        // Strategy: overfetch from Vectorize when post-filters are active,
-        // then apply label/assignee filters client-side on the larger result set.
-        // This significantly improves recall vs. the previous fixed-topK approach.
-        const requestedTopK = top_k ?? 10;
-        const needsPostFilter = (labels && labels.length > 0) || !!assignee;
-        const internalTopK = needsPostFilter
-          ? Math.min(requestedTopK * 5, 50)
-          : requestedTopK;
+        // ── Post-filter: labels (AND) and assignee ───────────────
+        // Applied after fusion on the combined view so both dense-only and sparse-only
+        // hits are filtered consistently. Prefers dense metadata when available
+        // (has expanded label_0..3 / assignee_0..1 slots), falls back to sparse row
+        // (comma-separated labels / assignees) otherwise.
+        const resolveLabels = (vectorId: string): Set<string> => {
+          const p = payload.get(vectorId);
+          if (!p) return new Set();
+          const out = new Set<string>();
+          if (p.meta) {
+            for (const l of [p.meta.label_0, p.meta.label_1, p.meta.label_2, p.meta.label_3]) {
+              if (l) out.add(l);
+            }
+            if (p.meta.labels) {
+              for (const l of p.meta.labels.split(",")) {
+                const t = l.trim();
+                if (t) out.add(t);
+              }
+            }
+          }
+          if (p.ftsRow?.labels) {
+            for (const l of p.ftsRow.labels.split(",")) {
+              const t = l.trim();
+              if (t) out.add(t);
+            }
+          }
+          return out;
+        };
 
-        // 3. Query Vectorize with potentially larger topK
-        const vectorizeFilter: VectorizeVectorMetadataFilter | undefined =
-          Object.keys(filter).length > 0 ? filter : undefined;
+        const resolveAssignees = (vectorId: string): Set<string> => {
+          const p = payload.get(vectorId);
+          if (!p) return new Set();
+          const out = new Set<string>();
+          if (p.meta) {
+            if (p.meta.assignee_0) out.add(p.meta.assignee_0);
+            if (p.meta.assignee_1) out.add(p.meta.assignee_1);
+            if (p.meta.assignees) {
+              for (const a of p.meta.assignees.split(",")) {
+                const t = a.trim();
+                if (t) out.add(t);
+              }
+            }
+          }
+          if (p.ftsRow?.assignees) {
+            for (const a of p.ftsRow.assignees.split(",")) {
+              const t = a.trim();
+              if (t) out.add(t);
+            }
+          }
+          return out;
+        };
 
-        const results = await this.env.VECTORIZE.query(embedding, {
-          topK: internalTopK,
-          filter: vectorizeFilter,
-          returnMetadata: "all",
-        });
-
-        // 4. Post-filter for labels (AND) and assignee
-        // Uses both expanded fields (label_0..3, assignee_0..1) and the
-        // comma-separated fallback fields for overflow (5th+ label, 3rd+ assignee).
-        let matches = results.matches;
+        let filtered = fused;
         if (labels && labels.length > 0) {
-          matches = matches.filter((m) => {
-            const meta = m.metadata as unknown as VectorMetadata | undefined;
-            if (!meta) return false;
-            // Collect all labels from expanded fields + comma-separated fallback
-            const expandedLabels = [
-              meta.label_0, meta.label_1, meta.label_2, meta.label_3,
-            ].filter((l): l is string => !!l);
-            const csvLabels = meta.labels
-              ? meta.labels.split(",").map((l) => l.trim()).filter(Boolean)
-              : [];
-            const allLabels = new Set([...expandedLabels, ...csvLabels]);
-            return labels.every((l) => allLabels.has(l));
+          filtered = filtered.filter((f) => {
+            const all = resolveLabels(f.vectorId);
+            return labels.every((l) => all.has(l));
           });
         }
         if (assignee) {
-          matches = matches.filter((m) => {
-            const meta = m.metadata as unknown as VectorMetadata | undefined;
-            if (!meta) return false;
-            // Check expanded fields first, then comma-separated fallback
-            if (meta.assignee_0 === assignee || meta.assignee_1 === assignee) {
-              return true;
-            }
-            if (meta.assignees) {
-              const csvAssignees = meta.assignees.split(",").map((a) => a.trim());
-              return csvAssignees.includes(assignee);
-            }
-            return false;
+          filtered = filtered.filter((f) => {
+            const all = resolveAssignees(f.vectorId);
+            return all.has(assignee);
           });
         }
 
-        // Trim to originally requested topK after post-filtering
-        matches = matches.slice(0, requestedTopK);
+        // Trim to requested top-K after fusion + post-filter.
+        filtered = filtered.slice(0, requestedTopK);
 
-        // 5. Format results
-        const items = matches.map((m) => {
-          const meta = m.metadata as unknown as VectorMetadata | undefined;
-          const itemRepo = meta?.repo ?? "";
-          const number = meta?.number ?? 0;
-          const itemType = meta?.type ?? "";
-          const tagName = meta?.tag_name ?? "";
-          const docPath = meta?.doc_path ?? "";
-          const commitSha = meta?.commit_sha ?? "";
-          const filePath = meta?.file_path ?? "";
-          const fileStatus = meta?.file_status ?? "";
-          const commitDate = meta?.commit_date ?? "";
-          const commitAuthor = meta?.commit_author ?? "";
+        // ── Format results ───────────────────────────────────────
+        const items = filtered.map((f) => {
+          const p = payload.get(f.vectorId);
+          const meta = p?.meta;
+          const ftsRow = p?.ftsRow;
 
-          // Build URL based on type
+          const itemRepo = meta?.repo ?? ftsRow?.repo ?? "";
+          const number = meta?.number ?? ftsRow?.number ?? 0;
+          const itemType = meta?.type ?? (ftsRow?.type as VectorMetadata["type"] | undefined) ?? "";
+          const itemState = meta?.state ?? ftsRow?.state ?? "";
+          const labelsCsv = meta?.labels ?? ftsRow?.labels ?? "";
+          const milestoneVal = meta?.milestone ?? ftsRow?.milestone ?? "";
+          const assigneesCsv = meta?.assignees ?? ftsRow?.assignees ?? "";
+          const updatedAt = meta?.updated_at ?? ftsRow?.updatedAt ?? "";
+          const tagName = meta?.tag_name ?? ftsRow?.tagName ?? "";
+          const docPath = meta?.doc_path ?? ftsRow?.docPath ?? "";
+          const commitSha = meta?.commit_sha ?? ftsRow?.commitSha ?? "";
+          const filePath = meta?.file_path ?? ftsRow?.filePath ?? "";
+          const fileStatus = meta?.file_status ?? ftsRow?.fileStatus ?? "";
+          const commitDate = meta?.commit_date ?? ftsRow?.commitDate ?? "";
+          const commitAuthor = meta?.commit_author ?? ftsRow?.commitAuthor ?? "";
+
           let url: string;
           if (itemType === "release" && tagName) {
             url = `https://github.com/${itemRepo}/releases/tag/${tagName}`;
           } else if (itemType === "doc" && docPath) {
             url = `https://github.com/${itemRepo}/blob/main/${docPath}`;
           } else if (itemType === "diff" && commitSha) {
-            // GitHub surfaces the per-file anchor on the commit view as `#diff-{sha256(path)}`.
-            // We deliberately link to the commit itself (no anchor) so the URL stays
-            // stable without hashing in the Worker.
             url = `https://github.com/${itemRepo}/commit/${commitSha}`;
           } else {
             url = `https://github.com/${itemRepo}/issues/${number}`;
@@ -244,16 +387,18 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           return {
             number,
             title: "", // Enriched below
-            state: meta?.state ?? "",
+            state: itemState,
             type: itemType,
-            labels: meta?.labels ? meta.labels.split(",").filter(Boolean) : [],
-            milestone: meta?.milestone ?? "",
-            assignees: meta?.assignees
-              ? meta.assignees.split(",").filter(Boolean)
-              : [],
-            score: m.score,
+            labels: labelsCsv ? labelsCsv.split(",").filter(Boolean) : [],
+            milestone: milestoneVal,
+            assignees: assigneesCsv ? assigneesCsv.split(",").filter(Boolean) : [],
+            score: f.fusedScore,
+            dense_score: p?.denseScore ?? null,
+            sparse_score: p?.sparseScore ?? null,
+            dense_rank: f.contributions["dense"] ?? null,
+            sparse_rank: f.contributions["sparse"] ?? null,
             url,
-            updated_at: meta?.updated_at ?? "",
+            updated_at: updatedAt,
             repo: itemRepo,
             ...(itemType === "release" ? { tag_name: tagName } : {}),
             ...(itemType === "doc" ? { doc_path: docPath } : {}),
@@ -318,7 +463,13 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             {
               type: "text" as const,
               text: JSON.stringify(
-                { count: items.length, results: items },
+                {
+                  count: items.length,
+                  fusion: fusionMode,
+                  dense_candidates: denseResult.hits.length,
+                  sparse_candidates: sparseHits.length,
+                  results: items,
+                },
                 null,
                 2,
               ),

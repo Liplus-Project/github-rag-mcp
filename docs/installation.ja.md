@@ -64,6 +64,36 @@ wrangler kv namespace create OAUTH_KV
 
 返された namespace ID を `wrangler.toml` に反映する。
 
+### 3.4 D1 database（hybrid retrieval の FTS5 sparse 側）
+
+BM25 / FTS5 sparse index 用の D1 database を作成する。
+
+```bash
+wrangler d1 create github-rag-fts
+```
+
+返された `database_id` を `wrangler.toml` に反映する:
+
+```toml
+[[d1_databases]]
+binding = "DB_FTS"
+database_name = "github-rag-fts"
+database_id = "<ここに ID を貼る>"
+migrations_dir = "migrations"
+```
+
+初回 migration を適用する（`search_docs` と 2 つの FTS5 virtual table を作成）:
+
+```bash
+wrangler d1 migrations apply github-rag-fts
+```
+
+新規 D1 database への初回デプロイ時は `--remote` も実行する:
+
+```bash
+wrangler d1 migrations apply github-rag-fts --remote
+```
+
 ## 4. GitHub App を作成
 
 OAuth と repository access 用の GitHub App を作成する。

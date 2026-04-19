@@ -14,6 +14,7 @@ import type {
   DiffRecord,
   DiffFileStatus,
 } from "./types.js";
+import { upsertFtsRow, deleteFtsRow } from "./fts.js";
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -361,6 +362,30 @@ export async function processAndUpsertIssue(
             },
           ]);
 
+          // Mirror the metadata change onto D1 FTS5 so sparse retrieval stays filterable.
+          // Content stays the same (no body change), but labels/state/milestone etc.
+          // on the sparse side must match the dense side for pre-filter consistency.
+          try {
+            await upsertFtsRow(env.DB_FTS, {
+              vectorId: vid,
+              repo,
+              type,
+              state: issue.state,
+              labels: sortedLabels.join(","),
+              milestone: milestoneTitle,
+              assignees: assigneeLogins.join(","),
+              updatedAt: issue.updated_at,
+              number: issue.number,
+              content: prepareEmbeddingInput(title, issue.body),
+            });
+          } catch (ftsErr) {
+            console.error(
+              `Failed to update FTS5 metadata for ${repo}#${issue.number}:`,
+              ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+            );
+            // Non-fatal: sparse side will catch up on next body change.
+          }
+
           return { embedded: false, skippedUnchanged: false, metadataUpdated: true, failed: false };
         }
       } catch (err) {
@@ -414,6 +439,29 @@ export async function processAndUpsertIssue(
         metadata,
       },
     ]);
+
+    // Mirror the same content into D1 FTS5 for sparse (BM25) retrieval.
+    // Failure here does not invalidate the Vectorize upsert — we still consider the
+    // embedding successful and rely on the next run to reconcile the sparse side.
+    try {
+      await upsertFtsRow(env.DB_FTS, {
+        vectorId: vid,
+        repo,
+        type,
+        state: issue.state,
+        labels: labelNames.join(","),
+        milestone: issue.milestone?.title ?? "",
+        assignees: assigneeLogins.join(","),
+        updatedAt: issue.updated_at,
+        number: issue.number,
+        content: embeddingInput,
+      });
+    } catch (ftsErr) {
+      console.error(
+        `Failed to upsert FTS5 row for ${repo}#${issue.number}:`,
+        ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+      );
+    }
 
     embeddingSucceeded = true;
   } catch (err) {
@@ -540,6 +588,27 @@ export async function processAndUpsertRelease(
       },
     ]);
 
+    // Mirror into D1 FTS5 sparse index.
+    try {
+      await upsertFtsRow(env.DB_FTS, {
+        vectorId: rvid,
+        repo,
+        type: "release",
+        state: "published",
+        labels: "",
+        milestone: "",
+        assignees: "",
+        updatedAt: release.published_at ?? release.created_at,
+        tagName: release.tag_name,
+        content: embeddingInput,
+      });
+    } catch (ftsErr) {
+      console.error(
+        `Failed to upsert FTS5 row for release ${repo}#${release.tag_name}:`,
+        ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+      );
+    }
+
     embeddingSucceeded = true;
   } catch (err) {
     console.error(
@@ -627,6 +696,27 @@ export async function processAndUpsertDoc(
         metadata,
       },
     ]);
+
+    // Mirror into D1 FTS5 sparse index.
+    try {
+      await upsertFtsRow(env.DB_FTS, {
+        vectorId: dvid,
+        repo,
+        type: "doc",
+        state: "active",
+        labels: "",
+        milestone: "",
+        assignees: "",
+        updatedAt: now,
+        docPath: path,
+        content: embeddingInput,
+      });
+    } catch (ftsErr) {
+      console.error(
+        `Failed to upsert FTS5 row for doc ${repo}/${path}:`,
+        ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+      );
+    }
 
     // Upsert doc record into store
     const record: DocRecord = {
@@ -840,6 +930,37 @@ export async function processAndUpsertCommitDiff(
       );
       failed += chunk.length;
       continue;
+    }
+
+    // Mirror each diff into D1 FTS5 (trigram tokenizer via tokenizer_kind='code').
+    // Failures are logged but do not invalidate the successful Vectorize upsert —
+    // the dense side still surfaces the vector, and the next reindex can catch up.
+    for (let i = 0; i < chunk.length; i++) {
+      const f = chunk[i];
+      const v = vectors[i];
+      try {
+        await upsertFtsRow(env.DB_FTS, {
+          vectorId: v.id,
+          repo,
+          type: "diff",
+          state: "active",
+          labels: "",
+          milestone: "",
+          assignees: "",
+          updatedAt: commitDate,
+          commitSha,
+          filePath: f.filename,
+          fileStatus: normaliseFileStatus(f.status),
+          commitDate,
+          commitAuthor,
+          content: inputs[i],
+        });
+      } catch (ftsErr) {
+        console.error(
+          `Failed to upsert FTS5 row for diff ${repo}@${commitSha}/${f.filename}:`,
+          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+      }
     }
 
     // Record store rows for each successfully upserted file. We issue these

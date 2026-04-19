@@ -16,6 +16,7 @@ import {
   type GitHubIssueData,
   type GitHubReleaseData,
 } from "./pipeline.js";
+import { deleteFtsRow } from "./fts.js";
 
 /** GitHub API page size */
 const PER_PAGE = 100;
@@ -702,11 +703,19 @@ async function pollDocs(
     }
   }
 
-  // Handle deleted files: remove from Vectorize and store
+  // Handle deleted files: remove from Vectorize, D1 FTS5, and the structured store.
   for (const doc of deletedDocs) {
     try {
       const dvid = await docVectorId(repo, doc.path);
       await env.VECTORIZE.deleteByIds([dvid]);
+      try {
+        await deleteFtsRow(env.DB_FTS, dvid);
+      } catch (ftsErr) {
+        console.error(
+          `Failed to delete FTS5 row for doc ${repo}/${doc.path}:`,
+          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+      }
       await storeStub.fetch(
         new Request(
           `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(doc.path)}`,

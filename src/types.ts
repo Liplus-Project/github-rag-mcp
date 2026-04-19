@@ -125,6 +125,8 @@ export interface Env {
   ISSUE_STORE: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
   VECTORIZE: Vectorize;
+  /** D1 database for full-text search (sparse side of hybrid retrieval, BM25 via FTS5) */
+  DB_FTS: D1Database;
   AI: Ai;
   /** GitHub App OAuth client ID (set via `wrangler secret put`) */
   GITHUB_CLIENT_ID: string;

@@ -64,6 +64,36 @@ wrangler kv namespace create OAUTH_KV
 
 Update `wrangler.toml` with the returned namespace ID.
 
+### 3.4 D1 database (FTS5 sparse side of hybrid retrieval)
+
+Create a D1 database for the BM25 / FTS5 sparse index.
+
+```bash
+wrangler d1 create github-rag-fts
+```
+
+Update `wrangler.toml` with the returned `database_id`:
+
+```toml
+[[d1_databases]]
+binding = "DB_FTS"
+database_name = "github-rag-fts"
+database_id = "<paste-the-id-here>"
+migrations_dir = "migrations"
+```
+
+Apply the initial migration (creates `search_docs` + the two FTS5 virtual tables):
+
+```bash
+wrangler d1 migrations apply github-rag-fts
+```
+
+For the first deploy against a brand-new D1 database, also run the same command with `--remote`:
+
+```bash
+wrangler d1 migrations apply github-rag-fts --remote
+```
+
 ## 4. Create the GitHub App
 
 Create a GitHub App for OAuth and repository access.

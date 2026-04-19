@@ -65,7 +65,8 @@ const innerHandler: ExportedHandler<Env> = {
 
     // -- Admin: reset hashes and watermarks to trigger full re-embedding on next cron --
     // POST /admin/reset-hashes?repo=owner/repo
-    // Resets: issue body_hash, release body_hash, docs (deleted), and all watermarks for the repo.
+    // Resets: issue body_hash, release body_hash, docs (deleted), watermarks, and
+    //         D1 FTS5 search_docs rows for the repo.
     // Requires GITHUB_TOKEN header for authentication.
     if (request.method === "POST" && url.pathname === "/admin/reset-hashes") {
       const authHeader = request.headers.get("GITHUB_TOKEN");
@@ -87,11 +88,37 @@ const innerHandler: ExportedHandler<Env> = {
           { method: "POST" },
         ),
       );
+      const storeBody = await storeResp.text();
 
-      const body = await storeResp.text();
-      return new Response(body, {
+      // Also clear the D1 FTS5 sparse index for this repo. The delete trigger on
+      // search_docs fans out to the FTS5 virtual tables automatically.
+      let ftsDeleted = 0;
+      try {
+        const ftsResult = await env.DB_FTS
+          .prepare(`DELETE FROM search_docs WHERE repo = ?`)
+          .bind(repo)
+          .run();
+        ftsDeleted = ftsResult.meta?.changes ?? 0;
+      } catch (err) {
+        console.error(
+          `Failed to clear D1 FTS5 rows for ${repo}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+
+      // Merge the FTS5 reset count into the JSON response when possible.
+      let mergedBody: string = storeBody;
+      try {
+        const parsed = JSON.parse(storeBody) as Record<string, unknown>;
+        parsed.ftsRowsDeleted = ftsDeleted;
+        mergedBody = JSON.stringify(parsed);
+      } catch {
+        // storeBody was not JSON — just return it verbatim.
+      }
+
+      return new Response(mergedBody, {
         status: storeResp.status,
-        headers: { "Content-Type": storeResp.headers.get("Content-Type") ?? "text/plain" },
+        headers: { "Content-Type": "application/json" },
       });
     }
 
