@@ -106,34 +106,23 @@ export async function generateEmbeddingBatch(
 }
 
 // ── Vector ID builders ───────────────────────────────────────
-
-/**
- * Build Vectorize vector ID from repo and issue number.
- * Format: "owner/repo#123"
- */
-export function vectorId(repo: string, number: number): string {
-  return `${repo}#${number}`;
-}
-
-/**
- * Build Vectorize vector ID for a release.
- * Format: "owner/repo#release-v1.0.0"
- */
-export function releaseVectorId(repo: string, tagName: string): string {
-  return `${repo}#release-${tagName}`;
-}
-
-/**
- * Build Vectorize vector ID for a document.
- * Format: "owner/repo#doc-docs/0-requirements.md"
- */
-export function docVectorId(repo: string, path: string): string {
-  return `${repo}#doc-${path}`;
-}
+//
+// Vectorize enforces a 64-byte cap on vector IDs. The previous scheme embedded
+// the repo name + path/tag/sha as plain text and overflowed for long paths
+// (e.g. `owner/repo#doc-docs/long-filename.md` hit 74 bytes). We now derive a
+// deterministic fixed-length ID by hashing the scheme parts with SHA-256 and
+// encoding as base64url (43 chars). A short type prefix preserves surface
+// separation and keeps the total under 46 bytes, well inside the 64-byte cap.
+//
+// Per-surface prefixes:
+//   "i" — issue / pull request
+//   "d" — doc
+//   "r" — release
+//   "c" — commit diff (file inside a commit)
 
 /**
  * Encode an arbitrary string to URL-safe base64 (RFC 4648 §5) without padding.
- * Used for embedding file paths that contain `/` into Vectorize IDs.
+ * Retained because `stableVectorId` uses it to encode the SHA-256 digest.
  */
 export function base64UrlEncode(input: string): string {
   // Encode UTF-8 -> binary string -> base64 via btoa
@@ -149,15 +138,76 @@ export function base64UrlEncode(input: string): string {
 }
 
 /**
+ * Encode raw bytes as URL-safe base64 (RFC 4648 §5) without padding.
+ * Used to render the SHA-256 digest directly without going through UTF-8.
+ */
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+/**
+ * Build a deterministic fixed-length Vectorize vector ID from a type prefix and
+ * an ordered list of string parts. Parts are joined with a NUL separator (0x00)
+ * so that no legitimate component can forge a collision across surfaces.
+ *
+ * Output format: `{prefix}:{base64url(sha256(part1\0part2\0...))}`
+ * Output length: 1–2 byte prefix + 1 byte separator + 43 byte digest = 45–46 bytes.
+ */
+async function stableVectorId(
+  prefix: string,
+  ...parts: string[]
+): Promise<string> {
+  const input = parts.join("\u0000");
+  const bytes = new TextEncoder().encode(input);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
+  const digest = base64UrlEncodeBytes(new Uint8Array(hashBuffer));
+  return `${prefix}:${digest}`;
+}
+
+/**
+ * Build Vectorize vector ID from repo and issue number.
+ * Deterministic SHA-256-based ID under the "i" prefix.
+ */
+export function vectorId(repo: string, number: number): Promise<string> {
+  return stableVectorId("i", repo, String(number));
+}
+
+/**
+ * Build Vectorize vector ID for a release.
+ * Deterministic SHA-256-based ID under the "r" prefix.
+ */
+export function releaseVectorId(
+  repo: string,
+  tagName: string,
+): Promise<string> {
+  return stableVectorId("r", repo, tagName);
+}
+
+/**
+ * Build Vectorize vector ID for a document.
+ * Deterministic SHA-256-based ID under the "d" prefix.
+ */
+export function docVectorId(repo: string, path: string): Promise<string> {
+  return stableVectorId("d", repo, path);
+}
+
+/**
  * Build Vectorize vector ID for a commit diff (one file inside one commit).
- * Format: "owner/repo#commit-{sha}#file-{base64url(path)}"
+ * Deterministic SHA-256-based ID under the "c" prefix.
  */
 export function diffVectorId(
   repo: string,
   commitSha: string,
   filePath: string,
-): string {
-  return `${repo}#commit-${commitSha}#file-${base64UrlEncode(filePath)}`;
+): Promise<string> {
+  return stableVectorId("c", repo, commitSha, filePath);
 }
 
 // ── Per-item upsert functions ────────────────────────────────
@@ -282,7 +332,7 @@ export async function processAndUpsertIssue(
     if (metadataChanged) {
       try {
         // Retrieve existing vector values to re-upsert with updated metadata
-        const vid = vectorId(repo, issue.number);
+        const vid = await vectorId(repo, issue.number);
         const vectors = await env.VECTORIZE.getByIds([vid]);
 
         if (vectors.length > 0 && vectors[0].values) {
@@ -356,9 +406,10 @@ export async function processAndUpsertIssue(
       assignee_1: assigneeLogins[1] ?? "",
     };
 
+    const vid = await vectorId(repo, issue.number);
     await env.VECTORIZE.upsert([
       {
-        id: vectorId(repo, issue.number),
+        id: vid,
         values: embedding,
         metadata,
       },
@@ -480,9 +531,10 @@ export async function processAndUpsertRelease(
       tag_name: release.tag_name,
     };
 
+    const rvid = await releaseVectorId(repo, release.tag_name);
     await env.VECTORIZE.upsert([
       {
-        id: releaseVectorId(repo, release.tag_name),
+        id: rvid,
         values: embedding,
         metadata,
       },
@@ -567,9 +619,10 @@ export async function processAndUpsertDoc(
     };
 
     // Upsert vector into Vectorize
+    const dvid = await docVectorId(repo, path);
     await env.VECTORIZE.upsert([
       {
-        id: docVectorId(repo, path),
+        id: dvid,
         values: embedding,
         metadata,
       },
@@ -741,38 +794,42 @@ export async function processAndUpsertCommitDiff(
       continue;
     }
 
-    const vectors = chunk.map((f, i) => {
-      const fileStatus = normaliseFileStatus(f.status);
-      const blobShaAfter = f.sha ?? "";
-      // GitHub's files API does not return the previous blob SHA directly —
-      // we leave it empty for now. blob_sha_after is enough to locate the
-      // post-commit object; history lookup can use the commit SHA itself.
-      const blobShaBefore = "";
+    // Vector IDs are async (SHA-256 digest). Generate them in parallel so the
+    // chunk still maps to a single Vectorize.upsert call below.
+    const vectors = await Promise.all(
+      chunk.map(async (f, i) => {
+        const fileStatus = normaliseFileStatus(f.status);
+        const blobShaAfter = f.sha ?? "";
+        // GitHub's files API does not return the previous blob SHA directly —
+        // we leave it empty for now. blob_sha_after is enough to locate the
+        // post-commit object; history lookup can use the commit SHA itself.
+        const blobShaBefore = "";
 
-      const metadata: Record<string, string | number> = {
-        repo,
-        number: 0,
-        type: "diff",
-        state: "active",
-        labels: "",
-        milestone: "",
-        assignees: "",
-        updated_at: commitDate,
-        commit_sha: commitSha,
-        file_path: f.filename,
-        file_status: fileStatus,
-        commit_date: commitDate,
-        commit_author: commitAuthor,
-        blob_sha_before: blobShaBefore,
-        blob_sha_after: blobShaAfter,
-      };
+        const metadata: Record<string, string | number> = {
+          repo,
+          number: 0,
+          type: "diff",
+          state: "active",
+          labels: "",
+          milestone: "",
+          assignees: "",
+          updated_at: commitDate,
+          commit_sha: commitSha,
+          file_path: f.filename,
+          file_status: fileStatus,
+          commit_date: commitDate,
+          commit_author: commitAuthor,
+          blob_sha_before: blobShaBefore,
+          blob_sha_after: blobShaAfter,
+        };
 
-      return {
-        id: diffVectorId(repo, commitSha, f.filename),
-        values: embeddings[i],
-        metadata,
-      };
-    });
+        return {
+          id: await diffVectorId(repo, commitSha, f.filename),
+          values: embeddings[i],
+          metadata,
+        };
+      }),
+    );
 
     try {
       await env.VECTORIZE.upsert(vectors);
