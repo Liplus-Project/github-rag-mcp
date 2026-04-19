@@ -62,10 +62,12 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller
      + embedding pipeline
+     + hybrid retrieval (dense + sparse + RRF fusion)
             |
-            +--> Vectorize
-            +--> Durable Object / SQLite
-            +--> Workers AI BGE-M3
+            +--> Vectorize         (dense: BGE-M3 1024d, cosine)
+            +--> D1 FTS5           (sparse: BM25, porter + trigram)
+            +--> Durable Object / SQLite (structured state, watermarks)
+            +--> Workers AI BGE-M3 (embedding generation)
 ```
 
 ## Components
@@ -132,13 +134,15 @@ Responsibilities:
 - prepare embedding input from title + body or path + content
 - skip unchanged records when safe
 - upsert vectors with metadata into Vectorize
+- mirror the same content into the D1 FTS5 `search_docs` table for the sparse (BM25) side, choosing tokenizer_kind `nat` or `code` by surface type
 - keep retryable failures detectable on the next run
+- D1 FTS5 upsert failures do not invalidate a successful Vectorize upsert; the next reindex reconciles the sparse side
 - for commit diffs: batch-embed a commit's file list in a single Workers AI call (`text: string[]`) and upsert the resulting N vectors in one `VECTORIZE.upsert` call
 - batch size is capped by `MAX_EMBEDDING_BATCH_SIZE` (default 20); commits exceeding it are split across multiple batch calls
 
-### 5. Vector Store
+### 5. Vector Store (Dense)
 
-Vectorize stores semantic embeddings and metadata for:
+Vectorize is the dense side of hybrid retrieval. It stores semantic embeddings and metadata for:
 
 - repository
 - item type (`issue` / `pull_request` / `release` / `doc` / `diff`)
@@ -160,7 +164,36 @@ Vectorize metadata filters support AND between fields only, not OR. A query like
 
 The vector store is the semantic retrieval layer, not the canonical state store.
 
-### 6. Structured State Store
+### 6. Full-Text Index (Sparse, D1 FTS5 / BM25)
+
+D1's FTS5 virtual tables provide the sparse side of hybrid retrieval.
+
+Rationale:
+
+- Dense-only retrieval has known recall weakness on sparse-information queries (code identifiers, proper nouns, SHA prefixes, exact terms).
+- As of 2026, hybrid search is the production baseline in the industry; rerankers are a further optional layer on top.
+- Cloudflare D1 is pre-compiled with SQLite FTS5 including the BM25 ranking function, and the `fts5` virtual table module is usable directly from Workers.
+
+Schema overview:
+
+- `search_docs` — external content table (source of truth, `vector_id` primary key).
+- `search_docs_nat_fts` — FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc).
+- `search_docs_code_fts` — FTS5 virtual table with trigram tokenizer for code / SHA / identifier surfaces (diff).
+
+Tokenizer selection:
+
+- `porter` — stem-based matching appropriate for natural language.
+- `trigram` — substring matching appropriate for SHA prefixes, CamelCase tokens, and file paths.
+- A `tokenizer_kind` column on `search_docs` decides which virtual table a row is indexed in.
+- `content=search_docs` + triggers cascade inserts / updates / deletes automatically, so `DELETE FROM search_docs` fans out to both FTS5 tables in a single statement.
+
+The `vector_id` mirrors the Vectorize vector ID (deterministic SHA-256 based) so RRF fusion can join dense and sparse hits without an extra round-trip.
+
+Metadata filters (`repo`, `type`, `state`, `milestone`) are applied as SQL WHERE predicates, matching the pre-filter capability of the Vectorize side.
+
+BM25 ranking is obtained via the `bm25(<fts_table>)` auxiliary function (lower score = better); scores are converted to ranks for RRF fusion.
+
+### 7. Structured State Store
 
 Durable Object with SQLite stores structured records for:
 
@@ -178,18 +211,42 @@ This store supports:
 
 ## Retrieval Model
 
-The retrieval layer must support both semantic search and structured filtering.
+The retrieval layer supports hybrid search (dense + sparse) with structured filtering.
+
+### Hybrid Retrieval (default)
 
 Expected retrieval behavior:
 
-1. Generate an embedding for the query.
-2. Build Vectorize metadata filter from structured params (repo, state, type, milestone are pre-filtered).
-3. When labels or assignee filters are present, overfetch internally (requestedTopK * 5, max 50).
-4. Query Vectorize with embedding + filter.
-5. Post-filter labels (AND logic, expanded fields + CSV) and assignee.
-6. Trim to requestedTopK and return results with structured context.
+1. Generate an embedding for the query via Workers AI BGE-M3.
+2. Build Vectorize metadata filter (dense side) and D1 SQL WHERE clause (sparse side) from the same structured params (repo, state, type, milestone are pre-filtered on both sides).
+3. When labels or assignee filters are present, overfetch internally on both sides (requestedTopK × 5, max 50).
+4. Query Vectorize (dense) and D1 FTS5 (sparse, BM25) in parallel.
+5. Combine the two rankers via Reciprocal Rank Fusion (RRF, k=60).
+6. Post-filter labels (AND logic, expanded fields + CSV fallback) and assignee over the fused view.
+7. Trim to requestedTopK and return results with structured context.
 
-The retrieval layer is intended to recover working state, not merely keyword matches.
+#### Reciprocal Rank Fusion (RRF)
+
+RRF formula:
+
+```
+score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
+```
+
+- k = 60 is the canonical value from Cormack et al. (2009) and the de-facto default in production hybrid search (Elasticsearch, Vespa, Milvus).
+- `rank_r(d)` is the 1-based rank of document d under ranker r; documents missed by a ranker contribute 0 from that ranker.
+- Dense and sparse scores have non-comparable scales; normalizing to rank is what makes fusion valid.
+- Documents that appear in only one ranker still get partial credit, which boosts recall.
+
+### Fusion mode toggle
+
+`search_issues` accepts a `fusion` parameter:
+
+- `rrf` (default) — combine dense and sparse via RRF.
+- `dense_only` — query Vectorize only (debugging, semantic-heavy queries).
+- `sparse_only` — query D1 FTS5 BM25 only (debugging, exact-term / identifier queries).
+
+The retrieval layer is intended to recover working state, not merely keyword matches. Hybrid retrieval raises recall in the regime where BGE-M3 alone struggles — short identifiers, SHA prefixes, and proper nouns.
 
 ## MCP Tools
 
@@ -197,7 +254,7 @@ The retrieval layer is intended to recover working state, not merely keyword mat
 
 Purpose:
 
-- semantic search over issues, pull requests, releases, documentation, and commit diffs
+- **hybrid search** (dense + sparse BM25, fused via RRF) over issues, pull requests, releases, documentation, and commit diffs
 - use `type: "diff"` to retrieve judgment history (including deleted files and non-`.md` extensions)
 
 Parameters:
@@ -210,10 +267,13 @@ Parameters:
 - `assignee` optional
 - `type` optional
 - `top_k` optional
+- `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 
 Returns:
 
-- ranked matches with repository, type, state, labels, milestone, assignees, URL, and score
+- ranked matches with repository, type, state, labels, milestone, assignees, URL, and RRF fused `score`
+- additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`
+- top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`
 
 ### `get_issue_context`
 
@@ -272,13 +332,15 @@ The retrieval system indexes those surfaces. It does not replace them as source 
 - webhook updates should be applied as soon as practical
 - cron should reconcile any drift
 - failed embeddings must remain retryable
-- deleted releases or docs must be removable from the semantic index
+- deleted issues / PRs / releases / docs must be removable from both the semantic index (Vectorize) and the sparse index (D1 FTS5)
+- commit diffs are append-only and are not part of the delete path
 
 ## Current Deployment Assumptions
 
 - TypeScript codebase
 - Cloudflare Workers runtime
-- Vectorize for semantic search
+- Vectorize for dense semantic search (dense side of hybrid retrieval)
+- Cloudflare D1 for FTS5 BM25 sparse search (sparse side of hybrid retrieval; schema managed via migrations)
 - Workers AI for embedding generation
 - Durable Object / SQLite for structured state
 - one deployment may track multiple repositories via `POLL_REPOS`
@@ -296,6 +358,10 @@ Large initial syncs can exceed CPU limits, so pagination and resumable watermark
 ### Durable Object resets
 
 Deployments may reset Durable Object state, so the system must recover by replaying from GitHub through webhook and cron paths.
+
+### Free-tier hard stop (D1 / Vectorize / Workers AI)
+
+Workers AI Free (10,000 Neurons/day), D1 Free, and Vectorize Free all specify that exceeding the free quota causes `operations will fail with an error` (hard stop). Overage billing only applies when the account is on a paid Workers plan. Because the managed AI Search product is not used, AI-Search-specific hard-stop uncertainty is out of scope here.
 
 ### Retry safety
 
