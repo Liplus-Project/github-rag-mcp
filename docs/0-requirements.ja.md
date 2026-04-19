@@ -62,12 +62,13 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller
      + embedding pipeline
-     + hybrid retrieval (dense + sparse + RRF fusion)
+     + hybrid retrieval (dense + sparse + RRF fusion + cross-encoder rerank)
             |
-            +--> Vectorize         (dense: BGE-M3 1024d, cosine)
-            +--> D1 FTS5           (sparse: BM25, porter + trigram)
-            +--> Durable Object / SQLite (structured state, watermarks)
-            +--> Workers AI BGE-M3 (embedding generation)
+            +--> Vectorize             (dense: BGE-M3 1024d, cosine)
+            +--> D1 FTS5               (sparse: BM25, porter + trigram)
+            +--> Durable Object/SQLite (structured state, watermarks)
+            +--> Workers AI BGE-M3     (embedding generation)
+            +--> Workers AI bge-reranker-base (cross-encoder rerank)
 ```
 
 ## Components
@@ -211,19 +212,20 @@ Durable Object + SQLite は次の structured record を保持する。
 
 ## Retrieval Model
 
-retrieval layer は hybrid search（dense + sparse）+ structured filter を支える。
+retrieval layer は hybrid search（dense + sparse）+ cross-encoder rerank + structured filter を 3 段で支える（2026 production baseline）。
 
-### Hybrid Retrieval (default)
+### 3-tier Hybrid Retrieval (default)
 
 想定フロー:
 
 1. query の embedding を Workers AI BGE-M3 で生成
 2. structured params から Vectorize filter（dense 側）と D1 SQL WHERE（sparse 側）を同時構築（repo, state, type, milestone は pre-filter）
-3. labels / assignee フィルタ指定時は内部 topK をオーバーフェッチ（requestedTopK × 5, max 50）
+3. labels / assignee フィルタ指定時、または reranker 有効時は内部 topK をオーバーフェッチ（requestedTopK × 5, max 50）。reranker は最大 50 件まで処理
 4. dense (Vectorize.query) と sparse (D1 FTS5 MATCH + BM25) を並列実行
 5. 両 ranker の結果を Reciprocal Rank Fusion（RRF、k=60）で合成
 6. 合成後の rank 順に、labels（AND ロジック、個別フィールド + CSV フォールバック）と assignee を post-filter
-7. requestedTopK にトリムして structured context と共に返す
+7. reranker 有効時（default ON）は post-filter 後の候補を `@cf/baai/bge-reranker-base` で re-score し、reranker score 降順に並び替え
+8. requestedTopK にトリムして structured context と共に返す
 
 #### Reciprocal Rank Fusion (RRF)
 
@@ -238,6 +240,30 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 - dense と sparse で score の scale が非互換でも、rank に正規化することで合成可能
 - 片側にしかヒットしない document も部分点を得られる（recall boost）
 
+### Cross-encoder Reranker
+
+3 段目の reranker は `@cf/baai/bge-reranker-base`（Workers AI）を使用する。
+
+採用理由:
+
+- 2026 業界標準で reranker は production baseline の必須層（hybrid + reranker）。Cloudflare AI Search 公式 (2026-04-16) も `@cf/baai/bge-reranker-base` を rerank primitive として組み込み済
+- bi-encoder（BGE-M3）と sparse BM25 は recall 向上には強いが、precision@k では cross-encoder に劣る。RRF で fuse した上位候補を cross-encoder で re-rank することで precision を底上げできる
+- 既存 BGE-M3 embedding と同じ `env.AI` primitive で呼び出せるため追加 binding 不要
+
+実装制約と既知の限界:
+
+- bge-reranker-base は context window 512 tokens（BAAI 元仕様）。`(query, candidate content)` pair が超過しないよう char-budget ベースで truncate（query 200 chars 上限、pair 合計 1700 chars 上限）
+- reranker は最大 50 件 / 1 検索（Workers AI Free tier 10,000 neurons/day と業界中央値の整合点）
+- bge-reranker-base は英語ベース・多言語非対応。日本語 issue/PR では精度低下リスクあり（runtime 観察対象、将来的に bge-reranker-v2-m3 提供開始時または外部 reranker への切替を別 issue で検討）
+- reranker 呼び出し失敗・想定外レスポンス時は graceful fallback（fusion 順を維持、`rerank_applied: false` で通知）
+
+呼び出しコスト試算:
+
+- Workers AI 公式単価: bge-reranker-base = 283 neurons/M tokens
+- 1 検索あたり試算: 約 7.5 neurons (query 30 tokens + 候補 50 件 × 平均 500 tokens, embedding 含む)
+- Free tier 10,000 neurons/day で約 1,300 検索/day 上限
+- neuron 実測値はレスポンスに `usage` フィールドが含まれる場合に取得し、理論試算と照合する（公式未文書化のため存在しない場合は黙ってスキップ）
+
 ### 切替オプション
 
 `search_issues` の `fusion` パラメータで retrieval mode を切り替え可能:
@@ -246,7 +272,12 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 - `dense_only` — Vectorize のみ（debug、semantic 特化クエリ）
 - `sparse_only` — D1 FTS5 BM25 のみ（debug、exact term / identifier クエリ）
 
-この retrieval layer の目的は keyword match ではなく working state の復元である。hybrid 化は、BGE-M3 の semantic 表現が弱い短い識別子・SHA prefix・固有名詞レベルの query における recall を底上げすることにある。
+`rerank` パラメータで cross-encoder rerank を切り替え可能:
+
+- `true` (default) — RRF 合成後に bge-reranker-base で re-score
+- `false` — rerank skip（faster、Workers AI rerank cost なし。短い識別子クエリで lexical match が決定的な場合や debug に推奨）
+
+この retrieval layer の目的は keyword match ではなく working state の復元である。3 段化の意図は、BGE-M3 の semantic 表現が弱い短い識別子・SHA prefix・固有名詞で sparse がカバーし、RRF で recall を確保しつつ、cross-encoder で precision を底上げすることにある。
 
 ## MCP Tools
 
@@ -254,7 +285,7 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 
 Purpose:
 
-- issue / pull request / release / documentation / commit diff を **hybrid search**（dense + sparse BM25、RRF 合成）で引く
+- issue / pull request / release / documentation / commit diff を **3-tier hybrid search**（dense + sparse BM25 → RRF 合成 → cross-encoder rerank）で引く
 - `type: "diff"` 指定で判断履歴（削除済みファイル・非 .md 拡張子を含む）を引ける
 
 Parameters:
@@ -268,12 +299,13 @@ Parameters:
 - `type` optional
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
+- `rerank` optional — `true` (default) / `false`
 
 Returns:
 
 - repository、type、state、labels、milestone、assignees、URL、RRF fused score を含む ranked match
-- 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`
-- top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`
+- 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`、`rerank_score`（rerank 無効時または fallback 時は null）
+- top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`
 
 ### `get_issue_context`
 

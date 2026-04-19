@@ -62,12 +62,13 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller
      + embedding pipeline
-     + hybrid retrieval (dense + sparse + RRF fusion)
+     + hybrid retrieval (dense + sparse + RRF fusion + cross-encoder rerank)
             |
-            +--> Vectorize         (dense: BGE-M3 1024d, cosine)
-            +--> D1 FTS5           (sparse: BM25, porter + trigram)
-            +--> Durable Object / SQLite (structured state, watermarks)
-            +--> Workers AI BGE-M3 (embedding generation)
+            +--> Vectorize             (dense: BGE-M3 1024d, cosine)
+            +--> D1 FTS5               (sparse: BM25, porter + trigram)
+            +--> Durable Object/SQLite (structured state, watermarks)
+            +--> Workers AI BGE-M3     (embedding generation)
+            +--> Workers AI bge-reranker-base (cross-encoder rerank)
 ```
 
 ## Components
@@ -211,19 +212,20 @@ This store supports:
 
 ## Retrieval Model
 
-The retrieval layer supports hybrid search (dense + sparse) with structured filtering.
+The retrieval layer supports a 3-tier pipeline: hybrid search (dense + sparse), RRF fusion, and cross-encoder reranking, with structured filtering applied along the way (the 2026 production baseline).
 
-### Hybrid Retrieval (default)
+### 3-tier Hybrid Retrieval (default)
 
 Expected retrieval behavior:
 
 1. Generate an embedding for the query via Workers AI BGE-M3.
 2. Build Vectorize metadata filter (dense side) and D1 SQL WHERE clause (sparse side) from the same structured params (repo, state, type, milestone are pre-filtered on both sides).
-3. When labels or assignee filters are present, overfetch internally on both sides (requestedTopK × 5, max 50).
+3. When labels or assignee filters are present, OR when the reranker is enabled, overfetch internally on both sides (requestedTopK × 5, max 50). The reranker processes at most 50 candidates per call.
 4. Query Vectorize (dense) and D1 FTS5 (sparse, BM25) in parallel.
 5. Combine the two rankers via Reciprocal Rank Fusion (RRF, k=60).
 6. Post-filter labels (AND logic, expanded fields + CSV fallback) and assignee over the fused view.
-7. Trim to requestedTopK and return results with structured context.
+7. When the reranker is enabled (default ON), re-score the post-filtered candidates with `@cf/baai/bge-reranker-base` and reorder by reranker score, descending.
+8. Trim to requestedTopK and return results with structured context.
 
 #### Reciprocal Rank Fusion (RRF)
 
@@ -238,6 +240,30 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 - Dense and sparse scores have non-comparable scales; normalizing to rank is what makes fusion valid.
 - Documents that appear in only one ranker still get partial credit, which boosts recall.
 
+### Cross-encoder Reranker
+
+The 3rd tier reranker uses `@cf/baai/bge-reranker-base` (Workers AI).
+
+Rationale:
+
+- As of 2026, the cross-encoder reranker is treated as a baseline production layer (hybrid + reranker), not an optional add-on. Cloudflare's AI Search primitive (2026-04-16) ships `@cf/baai/bge-reranker-base` as the rerank stage.
+- Bi-encoders (BGE-M3) and sparse BM25 are strong on recall but weaker on precision@k than cross-encoders. Re-scoring the top RRF-fused candidates with a cross-encoder lifts precision without re-architecting the recall layer.
+- Reranking uses the same `env.AI` primitive as BGE-M3 embedding, so no additional binding is required.
+
+Implementation constraints and known limitations:
+
+- bge-reranker-base inherits BAAI's 512-token context window. Each `(query, candidate content)` pair is truncated by character budget (query: 200 chars max, pair total: 1700 chars max) since no tokenizer is available in Workers.
+- The reranker processes at most 50 candidates per call — chosen as the join point between the Workers AI Free tier neuron budget (10,000/day) and industry median (50–75 candidates).
+- bge-reranker-base is English-centric and not multilingual. Japanese issue/PR content may see degraded quality. This is observed at runtime; switching to `bge-reranker-v2-m3` or an external reranker (Voyage / Cohere) is tracked as a separate issue when needed.
+- On reranker call failure or unexpected response shape, the system falls back gracefully to the post-filter (RRF) order and reports `rerank_applied: false`.
+
+Cost estimate:
+
+- Workers AI public pricing: bge-reranker-base = 283 neurons/M tokens.
+- Per-search estimate: ~7.5 neurons (query 30 tokens + 50 candidates × 500 avg tokens, embedding included).
+- Free tier (10,000 neurons/day) supports ~1,300 searches/day at this rate.
+- Actual neuron usage is read from a `usage` field on the response when present and reconciled against the estimate. The field is not officially documented as of 2026-04, so absence is tolerated silently.
+
 ### Fusion mode toggle
 
 `search_issues` accepts a `fusion` parameter:
@@ -246,7 +272,12 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 - `dense_only` — query Vectorize only (debugging, semantic-heavy queries).
 - `sparse_only` — query D1 FTS5 BM25 only (debugging, exact-term / identifier queries).
 
-The retrieval layer is intended to recover working state, not merely keyword matches. Hybrid retrieval raises recall in the regime where BGE-M3 alone struggles — short identifiers, SHA prefixes, and proper nouns.
+`search_issues` also accepts a `rerank` parameter:
+
+- `true` (default) — re-score the RRF-fused candidates with bge-reranker-base.
+- `false` — skip rerank (faster, no Workers AI rerank cost; recommended for short-identifier queries where lexical match is already decisive, or for debugging).
+
+The retrieval layer is intended to recover working state, not merely keyword matches. The 3-tier design lets sparse cover BGE-M3's weak regime (short identifiers, SHA prefixes, proper nouns), RRF maintains recall across both rankers, and the cross-encoder lifts precision on the surviving candidates.
 
 ## MCP Tools
 
@@ -254,7 +285,7 @@ The retrieval layer is intended to recover working state, not merely keyword mat
 
 Purpose:
 
-- **hybrid search** (dense + sparse BM25, fused via RRF) over issues, pull requests, releases, documentation, and commit diffs
+- **3-tier hybrid search** (dense + sparse BM25 → RRF fusion → cross-encoder rerank) over issues, pull requests, releases, documentation, and commit diffs
 - use `type: "diff"` to retrieve judgment history (including deleted files and non-`.md` extensions)
 
 Parameters:
@@ -268,12 +299,13 @@ Parameters:
 - `type` optional
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
+- `rerank` optional — `true` (default) / `false`
 
 Returns:
 
 - ranked matches with repository, type, state, labels, milestone, assignees, URL, and RRF fused `score`
-- additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`
-- top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`
+- additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`, `rerank_score` (null when rerank disabled or when graceful fallback engaged)
+- top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`
 
 ### `get_issue_context`
 

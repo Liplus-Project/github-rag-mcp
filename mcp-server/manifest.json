@@ -42,7 +42,7 @@
   "tools": [
     {
       "name": "search_issues",
-      "description": "Semantic search for GitHub issues and PRs combined with structured filters."
+      "description": "3-tier hybrid search (dense + sparse BM25 + cross-encoder rerank) for GitHub issues, PRs, releases, documentation, and commit diffs with structured filters."
     },
     {
       "name": "get_issue_context",

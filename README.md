@@ -37,12 +37,13 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller (fallback)
      + embedding pipeline
-     + hybrid retrieval (dense + sparse + RRF fusion)
+     + hybrid retrieval (dense + sparse + RRF fusion + cross-encoder rerank)
             |
             +--> Vectorize (dense semantic index)
             +--> D1 FTS5 (BM25 sparse index)
             +--> Durable Object / SQLite (structured state store)
             +--> Workers AI BGE-M3 (embeddings)
+            +--> Workers AI bge-reranker-base (cross-encoder rerank)
 ```
 
 - The MCP surface exposes hybrid retrieval and context tools to AI clients.
@@ -50,6 +51,7 @@ GitHub webhooks + GitHub API
 - The cron poller repairs missed updates and supports backfill.
 - Vectorize stores semantic embeddings for the dense side of retrieval.
 - D1 FTS5 stores the BM25 sparse index for exact-term and identifier queries.
+- The cross-encoder reranker re-scores fused candidates as the 3rd tier (toggleable per query).
 - Durable Object keeps structured state for fast lookups and activity views.
 
 ## Why GitHub
@@ -81,7 +83,7 @@ See:
 
 | Tool | Description |
 |------|-------------|
-| `search_issues` | Hybrid retrieval (dense + sparse) across issues, pull requests, releases, and documentation with structured filters. |
+| `search_issues` | 3-tier hybrid retrieval (dense + sparse → RRF fusion → cross-encoder rerank) across issues, pull requests, releases, documentation, and commit diffs with structured filters. |
 | `get_issue_context` | Aggregated state for one issue or pull request, including linked PRs, branch information, CI state, sub-issues, and related releases. |
 | `list_recent_activity` | Recent activity across tracked repositories, including issue, PR, release, and documentation updates. |
 
