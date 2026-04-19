@@ -15,7 +15,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Env, IssueRecord, ReleaseRecord, DocRecord, VectorMetadata } from "./types.js";
+import type { Env, IssueRecord, ReleaseRecord, DocRecord, DiffRecord, VectorMetadata } from "./types.js";
 import type { GitHubUserProps } from "./oauth.js";
 
 /** User context passed via props from OAuth layer */
@@ -78,8 +78,9 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Semantic search for GitHub issues, PRs, releases, and repository documentation combined with structured filters. " +
-        "Uses embedding similarity (BGE-M3) with optional metadata filters.",
+      "Semantic search for GitHub issues, PRs, releases, repository documentation, and commit diffs combined with structured filters. " +
+        "Uses embedding similarity (BGE-M3) with optional metadata filters. " +
+        "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files and non-.md files that are not present in the live document index.",
       {
         query: z.string().describe("Natural language search query"),
         repo: z
@@ -104,10 +105,10 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           .optional()
           .describe("Filter by assignee login"),
         type: z
-          .enum(["issue", "pull_request", "release", "doc", "all"])
+          .enum(["issue", "pull_request", "release", "doc", "diff", "all"])
           .optional()
           .default("all")
-          .describe("Filter by type (default: all)"),
+          .describe("Filter by type (default: all). Use \"diff\" to search per-file commit diffs."),
         top_k: z
           .number()
           .min(1)
@@ -219,6 +220,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           const itemType = meta?.type ?? "";
           const tagName = meta?.tag_name ?? "";
           const docPath = meta?.doc_path ?? "";
+          const commitSha = meta?.commit_sha ?? "";
+          const filePath = meta?.file_path ?? "";
+          const fileStatus = meta?.file_status ?? "";
+          const commitDate = meta?.commit_date ?? "";
+          const commitAuthor = meta?.commit_author ?? "";
 
           // Build URL based on type
           let url: string;
@@ -226,6 +232,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             url = `https://github.com/${itemRepo}/releases/tag/${tagName}`;
           } else if (itemType === "doc" && docPath) {
             url = `https://github.com/${itemRepo}/blob/main/${docPath}`;
+          } else if (itemType === "diff" && commitSha) {
+            // GitHub surfaces the per-file anchor on the commit view as `#diff-{sha256(path)}`.
+            // We deliberately link to the commit itself (no anchor) so the URL stays
+            // stable without hashing in the Worker.
+            url = `https://github.com/${itemRepo}/commit/${commitSha}`;
           } else {
             url = `https://github.com/${itemRepo}/issues/${number}`;
           }
@@ -246,6 +257,15 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             repo: itemRepo,
             ...(itemType === "release" ? { tag_name: tagName } : {}),
             ...(itemType === "doc" ? { doc_path: docPath } : {}),
+            ...(itemType === "diff"
+              ? {
+                  commit_sha: commitSha,
+                  file_path: filePath,
+                  file_status: fileStatus,
+                  commit_date: commitDate,
+                  commit_author: commitAuthor,
+                }
+              : {}),
           };
         });
 
@@ -269,6 +289,13 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           } else if (item.type === "doc" && item.repo && (item as Record<string, unknown>).doc_path) {
             // Use the file path as the title for docs
             item.title = (item as Record<string, unknown>).doc_path as string;
+          } else if (item.type === "diff") {
+            // Title = "{short-sha} {file_path}" so the result list remains
+            // scannable without making an additional API call.
+            const fp = (item as Record<string, unknown>).file_path as string;
+            const sha = (item as Record<string, unknown>).commit_sha as string;
+            const shortSha = sha ? sha.slice(0, 7) : "";
+            item.title = [shortSha, fp].filter(Boolean).join(" ");
           } else if (item.repo && item.number) {
             try {
               const res = await store.fetch(
@@ -790,6 +817,40 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
               url: `https://github.com/${doc.repo}/blob/main/${doc.path}`,
               updated_at: doc.updatedAt,
               created_at: doc.updatedAt,
+            });
+          }
+        }
+
+        // Fetch recent commit diffs too
+        const diffParams = new URLSearchParams();
+        diffParams.set("since", effectiveSince);
+        diffParams.set("limit", String(effectiveLimit));
+        if (repo) {
+          diffParams.set("repo", repo);
+        }
+
+        const diffRes = await store.fetch(
+          new Request(`http://store/recent-diffs?${diffParams.toString()}`),
+        );
+
+        if (diffRes.ok) {
+          const diffs = (await diffRes.json()) as DiffRecord[];
+          for (const diff of diffs) {
+            const shortSha = diff.commitSha.slice(0, 7);
+            activities.push({
+              activity_type: "updated",
+              number: 0,
+              title: `${shortSha} ${diff.filePath}`,
+              type: "diff",
+              state: "active",
+              labels: [],
+              repo: diff.repo,
+              commit_sha: diff.commitSha,
+              file_path: diff.filePath,
+              file_status: diff.fileStatus,
+              url: `https://github.com/${diff.repo}/commit/${diff.commitSha}`,
+              updated_at: diff.commitDate,
+              created_at: diff.indexedAt,
             });
           }
         }

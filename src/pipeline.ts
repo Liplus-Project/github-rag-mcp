@@ -6,12 +6,33 @@
  * individual items as events arrive.
  */
 
-import type { Env, IssueRecord, ReleaseRecord, DocRecord } from "./types.js";
+import type {
+  Env,
+  IssueRecord,
+  ReleaseRecord,
+  DocRecord,
+  DiffRecord,
+  DiffFileStatus,
+} from "./types.js";
 
 // ── Constants ────────────────────────────────────────────────
 
 /** Maximum characters for embedding input (BGE-M3 context limit ~8192 tokens, conservative char limit) */
 export const MAX_EMBEDDING_INPUT_CHARS = 8000;
+
+/**
+ * Maximum number of inputs per Workers AI batch embed call.
+ * Cloudflare Workers AI does not publish a hard cap on batched embedding inputs,
+ * so we split large commits into multiple calls. 20 × 8000 chars ≈ 160k chars per
+ * call keeps payload size comfortably inside observed request limits.
+ */
+export const MAX_EMBEDDING_BATCH_SIZE = 20;
+
+/**
+ * Maximum number of vectors per single Vectorize.upsert call.
+ * We mirror MAX_EMBEDDING_BATCH_SIZE so each embed batch maps 1:1 onto one upsert.
+ */
+export const MAX_VECTORIZE_UPSERT_BATCH_SIZE = 20;
 
 // ── Pure utility functions ───────────────────────────────────
 
@@ -59,6 +80,31 @@ export async function generateEmbedding(
   return vectors[0];
 }
 
+/**
+ * Generate embeddings for multiple text inputs in one batched Workers AI call.
+ * Input order is preserved in the returned array.
+ *
+ * Workers AI does not publish a hard limit on the number of inputs per call,
+ * so callers must chunk by MAX_EMBEDDING_BATCH_SIZE before invoking this
+ * function. Throws if the returned vector count does not match the input count.
+ */
+export async function generateEmbeddingBatch(
+  ai: Ai,
+  texts: string[],
+): Promise<number[][]> {
+  if (texts.length === 0) return [];
+
+  const result = await ai.run("@cf/baai/bge-m3", { text: texts });
+  const vectors = (result as { data: Array<number[]> }).data;
+
+  if (!vectors || vectors.length !== texts.length) {
+    throw new Error(
+      `Workers AI returned ${vectors?.length ?? 0} vectors for ${texts.length} inputs`,
+    );
+  }
+  return vectors;
+}
+
 // ── Vector ID builders ───────────────────────────────────────
 
 /**
@@ -83,6 +129,35 @@ export function releaseVectorId(repo: string, tagName: string): string {
  */
 export function docVectorId(repo: string, path: string): string {
   return `${repo}#doc-${path}`;
+}
+
+/**
+ * Encode an arbitrary string to URL-safe base64 (RFC 4648 §5) without padding.
+ * Used for embedding file paths that contain `/` into Vectorize IDs.
+ */
+export function base64UrlEncode(input: string): string {
+  // Encode UTF-8 -> binary string -> base64 via btoa
+  const utf8Bytes = new TextEncoder().encode(input);
+  let binary = "";
+  for (let i = 0; i < utf8Bytes.length; i++) {
+    binary += String.fromCharCode(utf8Bytes[i]);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+/**
+ * Build Vectorize vector ID for a commit diff (one file inside one commit).
+ * Format: "owner/repo#commit-{sha}#file-{base64url(path)}"
+ */
+export function diffVectorId(
+  repo: string,
+  commitSha: string,
+  filePath: string,
+): string {
+  return `${repo}#commit-${commitSha}#file-${base64UrlEncode(filePath)}`;
 }
 
 // ── Per-item upsert functions ────────────────────────────────
@@ -524,4 +599,230 @@ export async function processAndUpsertDoc(
     );
     return { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true };
   }
+}
+
+// ── Commit diff surface ──────────────────────────────────────
+
+/** GitHub API commit detail response — subset needed for diff indexing */
+export interface GitHubCommitDetail {
+  sha: string;
+  commit: {
+    message: string;
+    author?: { name?: string | null; email?: string | null; date?: string | null } | null;
+    committer?: { date?: string | null } | null;
+  };
+  author?: { login?: string | null } | null;
+  files?: Array<{
+    filename: string;
+    status: string;
+    patch?: string;
+    sha?: string;
+    previous_filename?: string;
+  }>;
+}
+
+/** Result of a commit diff batch upsert */
+export interface DiffUpsertResult {
+  /** Number of file-in-commit entries successfully embedded and upserted */
+  embedded: number;
+  /** Number of file-in-commit entries skipped (no patch available, e.g., binary) */
+  skipped: number;
+  /** Number of file-in-commit entries that failed to embed/upsert */
+  failed: number;
+  /** Number of Workers AI batch calls issued (for observability) */
+  batches: number;
+}
+
+/**
+ * Normalise GitHub's file status string to our DiffFileStatus union.
+ * Unknown values fall through to "changed" (the generic GitHub bucket).
+ */
+function normaliseFileStatus(status: string): DiffFileStatus {
+  switch (status) {
+    case "added":
+    case "modified":
+    case "removed":
+    case "renamed":
+    case "copied":
+    case "changed":
+    case "unchanged":
+      return status;
+    default:
+      return "changed";
+  }
+}
+
+/**
+ * Build the embedding input for a single file-in-commit.
+ * Format: "{commitMessage}\n\n{filePath}\n\n{patch}", truncated to MAX_EMBEDDING_INPUT_CHARS.
+ * The file path is included inline so semantic search can match against it
+ * even when the patch body alone does not mention it.
+ */
+export function prepareDiffEmbeddingInput(
+  commitMessage: string,
+  filePath: string,
+  patch: string,
+): string {
+  const text = `${commitMessage}\n\n${filePath}\n\n${patch}`;
+  if (text.length <= MAX_EMBEDDING_INPUT_CHARS) return text;
+  return text.slice(0, MAX_EMBEDDING_INPUT_CHARS);
+}
+
+/**
+ * Process and upsert a commit's per-file diffs: one vector per (commit × file).
+ *
+ * Flow:
+ *   1. Filter `files[]` to those with a textual `patch` (binary / oversized files are skipped).
+ *   2. Build embedding inputs = commit message + file path + patch, truncated.
+ *   3. Batch-embed inputs via Workers AI (chunked by MAX_EMBEDDING_BATCH_SIZE).
+ *   4. Upsert all vectors into Vectorize in the same chunks.
+ *   5. Record DiffRecord rows into the Durable Object store for each indexed file.
+ *
+ * Failures inside a chunk do not halt subsequent chunks — counts are tallied and
+ * returned so the caller can log/escalate without losing partial progress.
+ *
+ * @param env - Worker env bindings (AI, VECTORIZE)
+ * @param storeStub - Durable Object stub for IssueStore
+ * @param repo - Repository in "owner/repo" format
+ * @param commit - Commit detail from GitHub (from GET /repos/{repo}/commits/{sha})
+ * @returns Summary of embeddings/upserts produced
+ */
+export async function processAndUpsertCommitDiff(
+  env: Env,
+  storeStub: DurableObjectStub,
+  repo: string,
+  commit: GitHubCommitDetail,
+): Promise<DiffUpsertResult> {
+  const commitSha = commit.sha;
+  const commitMessage = commit.commit.message ?? "";
+  const commitDate =
+    commit.commit.author?.date ??
+    commit.commit.committer?.date ??
+    new Date().toISOString();
+  const commitAuthor =
+    commit.author?.login ?? commit.commit.author?.name ?? "";
+  const files = commit.files ?? [];
+  const now = new Date().toISOString();
+
+  // Keep only files with a textual patch. Binary blobs, submodule changes, and
+  // oversized diffs arrive without a patch field and cannot be embedded.
+  const indexable = files.filter(
+    (f): f is typeof f & { patch: string } =>
+      typeof f.patch === "string" && f.patch.length > 0,
+  );
+  const skipped = files.length - indexable.length;
+
+  if (indexable.length === 0) {
+    return { embedded: 0, skipped, failed: 0, batches: 0 };
+  }
+
+  let embedded = 0;
+  let failed = 0;
+  let batches = 0;
+
+  // Chunk to respect Workers AI / Vectorize batch limits.
+  for (let offset = 0; offset < indexable.length; offset += MAX_EMBEDDING_BATCH_SIZE) {
+    const chunk = indexable.slice(offset, offset + MAX_EMBEDDING_BATCH_SIZE);
+    batches++;
+
+    const inputs = chunk.map((f) =>
+      prepareDiffEmbeddingInput(commitMessage, f.filename, f.patch),
+    );
+
+    let embeddings: number[][];
+    try {
+      embeddings = await generateEmbeddingBatch(env.AI, inputs);
+    } catch (err) {
+      console.error(
+        `Failed to batch-embed diffs for ${repo}@${commitSha} chunk offset ${offset}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      failed += chunk.length;
+      continue;
+    }
+
+    const vectors = chunk.map((f, i) => {
+      const fileStatus = normaliseFileStatus(f.status);
+      const blobShaAfter = f.sha ?? "";
+      // GitHub's files API does not return the previous blob SHA directly —
+      // we leave it empty for now. blob_sha_after is enough to locate the
+      // post-commit object; history lookup can use the commit SHA itself.
+      const blobShaBefore = "";
+
+      const metadata: Record<string, string | number> = {
+        repo,
+        number: 0,
+        type: "diff",
+        state: "active",
+        labels: "",
+        milestone: "",
+        assignees: "",
+        updated_at: commitDate,
+        commit_sha: commitSha,
+        file_path: f.filename,
+        file_status: fileStatus,
+        commit_date: commitDate,
+        commit_author: commitAuthor,
+        blob_sha_before: blobShaBefore,
+        blob_sha_after: blobShaAfter,
+      };
+
+      return {
+        id: diffVectorId(repo, commitSha, f.filename),
+        values: embeddings[i],
+        metadata,
+      };
+    });
+
+    try {
+      await env.VECTORIZE.upsert(vectors);
+    } catch (err) {
+      console.error(
+        `Failed to upsert diff vectors for ${repo}@${commitSha} chunk offset ${offset}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      failed += chunk.length;
+      continue;
+    }
+
+    // Record store rows for each successfully upserted file. We issue these
+    // sequentially (the DO is single-threaded per stub anyway) and swallow
+    // individual failures — the Vectorize upsert has already landed, so the
+    // search surface is correct even if a store insert is lost.
+    for (let i = 0; i < chunk.length; i++) {
+      const f = chunk[i];
+      const fileStatus = normaliseFileStatus(f.status);
+      const record: DiffRecord = {
+        repo,
+        commitSha,
+        filePath: f.filename,
+        fileStatus,
+        commitDate,
+        commitAuthor,
+        blobShaBefore: null,
+        blobShaAfter: f.sha ?? null,
+        indexedAt: now,
+      };
+
+      try {
+        await storeStub.fetch(
+          new Request("http://store/upsert-diff", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(record),
+          }),
+        );
+      } catch (err) {
+        console.error(
+          `Failed to record diff row for ${repo}@${commitSha}/${f.filename}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // Do not count as failed: Vectorize already has the vector.
+      }
+    }
+
+    embedded += chunk.length;
+  }
+
+  return { embedded, skipped, failed, batches };
 }

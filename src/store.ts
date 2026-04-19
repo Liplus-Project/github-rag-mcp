@@ -5,7 +5,15 @@
  * Body text is NOT stored (only body_hash for embedding change detection).
  */
 
-import type { Env, IssueRecord, ReleaseRecord, DocRecord, PollWatermark } from "./types.js";
+import type {
+  Env,
+  IssueRecord,
+  ReleaseRecord,
+  DocRecord,
+  DiffRecord,
+  DiffFileStatus,
+  PollWatermark,
+} from "./types.js";
 
 /** Row shape returned by SQLite for the issues table */
 type IssueRow = {
@@ -43,6 +51,20 @@ type DocRow = {
   path: string;
   blob_sha: string;
   updated_at: string;
+};
+
+/** Row shape returned by SQLite for the diffs table */
+type DiffRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  commit_sha: string;
+  file_path: string;
+  file_status: string;
+  commit_date: string;
+  commit_author: string;
+  blob_sha_before: string;
+  blob_sha_after: string;
+  indexed_at: string;
 };
 
 /** Row shape returned by SQLite for the watermarks table */
@@ -88,6 +110,20 @@ function rowToDocRecord(row: DocRow): DocRecord {
     path: row.path,
     blobSha: row.blob_sha,
     updatedAt: row.updated_at,
+  };
+}
+
+function rowToDiffRecord(row: DiffRow): DiffRecord {
+  return {
+    repo: row.repo,
+    commitSha: row.commit_sha,
+    filePath: row.file_path,
+    fileStatus: row.file_status as DiffFileStatus,
+    commitDate: row.commit_date,
+    commitAuthor: row.commit_author,
+    blobShaBefore: row.blob_sha_before === "" ? null : row.blob_sha_before,
+    blobShaAfter: row.blob_sha_after === "" ? null : row.blob_sha_after,
+    indexedAt: row.indexed_at,
   };
 }
 
@@ -167,6 +203,31 @@ export class IssueStore implements DurableObject {
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_docs_repo
         ON docs (repo, updated_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS diffs (
+        repo            TEXT NOT NULL,
+        commit_sha      TEXT NOT NULL,
+        file_path       TEXT NOT NULL,
+        file_status     TEXT NOT NULL DEFAULT '',
+        commit_date     TEXT NOT NULL,
+        commit_author   TEXT NOT NULL DEFAULT '',
+        blob_sha_before TEXT NOT NULL DEFAULT '',
+        blob_sha_after  TEXT NOT NULL DEFAULT '',
+        indexed_at      TEXT NOT NULL,
+        PRIMARY KEY (repo, commit_sha, file_path)
+      );
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_diffs_repo_date
+        ON diffs (repo, commit_date DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_diffs_commit
+        ON diffs (repo, commit_sha);
     `);
 
     // Migration: add etag column if missing (existing deployments)
@@ -421,6 +482,73 @@ export class IssueStore implements DurableObject {
     );
   }
 
+  // ---- Diff CRUD ----
+
+  upsertDiff(record: DiffRecord): void {
+    this.sql.exec(
+      `INSERT INTO diffs (repo, commit_sha, file_path, file_status, commit_date, commit_author, blob_sha_before, blob_sha_after, indexed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo, commit_sha, file_path) DO UPDATE SET
+         file_status     = excluded.file_status,
+         commit_date     = excluded.commit_date,
+         commit_author   = excluded.commit_author,
+         blob_sha_before = excluded.blob_sha_before,
+         blob_sha_after  = excluded.blob_sha_after,
+         indexed_at      = excluded.indexed_at`,
+      record.repo,
+      record.commitSha,
+      record.filePath,
+      record.fileStatus,
+      record.commitDate,
+      record.commitAuthor,
+      record.blobShaBefore ?? "",
+      record.blobShaAfter ?? "",
+      record.indexedAt,
+    );
+  }
+
+  getDiff(repo: string, commitSha: string, filePath: string): DiffRecord | null {
+    const cursor = this.sql.exec<DiffRow>(
+      `SELECT * FROM diffs WHERE repo = ? AND commit_sha = ? AND file_path = ?`,
+      repo,
+      commitSha,
+      filePath,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToDiffRecord(rows[0]);
+  }
+
+  listDiffsByCommit(repo: string, commitSha: string): DiffRecord[] {
+    const cursor = this.sql.exec<DiffRow>(
+      `SELECT * FROM diffs WHERE repo = ? AND commit_sha = ? ORDER BY file_path ASC`,
+      repo,
+      commitSha,
+    );
+    return [...cursor].map(rowToDiffRecord);
+  }
+
+  getRecentDiffs(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): DiffRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM diffs WHERE repo = ? AND commit_date >= ? ORDER BY commit_date DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM diffs WHERE commit_date >= ? ORDER BY commit_date DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<DiffRow>(query, ...params);
+    return [...cursor].map(rowToDiffRecord);
+  }
+
   // ---- Full re-embed reset ----
 
   /**
@@ -431,6 +559,8 @@ export class IssueStore implements DurableObject {
    * - body_hash in issues table (cleared to '' so poller detects change)
    * - body_hash in releases table (cleared to '' so poller detects change)
    * - blob_sha in docs table (deleted rows so poller re-fetches all files)
+   * - diffs table (deleted rows — diffs are append-only, so no backfill happens
+   *   on subsequent pushes; historical backfill is out of scope for now)
    * - Watermark entries for issues, releases, and docs (deleted so poller
    *   re-fetches from the beginning, bypassing ETag / since skipping)
    *
@@ -440,6 +570,7 @@ export class IssueStore implements DurableObject {
     issueHashesReset: number;
     releaseHashesReset: number;
     docsDeleted: number;
+    diffsDeleted: number;
     watermarksDeleted: number;
   } {
     const issuesCursor = this.sql.exec(
@@ -457,6 +588,11 @@ export class IssueStore implements DurableObject {
       repo,
     );
 
+    const diffsCursor = this.sql.exec(
+      `DELETE FROM diffs WHERE repo = ?`,
+      repo,
+    );
+
     // Delete all three watermark namespaces: issues (repo), releases (releases:{repo}), docs (docs:{repo})
     const watermarksCursor = this.sql.exec(
       `DELETE FROM watermarks WHERE repo IN (?, ?, ?)`,
@@ -469,6 +605,7 @@ export class IssueStore implements DurableObject {
       issueHashesReset: issuesCursor.rowsWritten,
       releaseHashesReset: releasesCursor.rowsWritten,
       docsDeleted: docsCursor.rowsWritten,
+      diffsDeleted: diffsCursor.rowsWritten,
       watermarksDeleted: watermarksCursor.rowsWritten,
     };
   }
@@ -688,6 +825,53 @@ export class IssueStore implements DurableObject {
         }
         this.deleteDoc(repo, docPath);
         return new Response("ok", { status: 200 });
+      }
+
+      // POST /upsert-diff — upsert a single diff record
+      if (request.method === "POST" && path === "/upsert-diff") {
+        const record = (await request.json()) as DiffRecord;
+        this.upsertDiff(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /diff?repo=...&commit_sha=...&file_path=... — get a single diff
+      if (request.method === "GET" && path === "/diff") {
+        const repo = url.searchParams.get("repo");
+        const commitSha = url.searchParams.get("commit_sha");
+        const filePath = url.searchParams.get("file_path");
+        if (!repo || !commitSha || !filePath) {
+          return new Response(
+            "missing repo, commit_sha, or file_path",
+            { status: 400 },
+          );
+        }
+        const diff = this.getDiff(repo, commitSha, filePath);
+        if (!diff) return new Response("not found", { status: 404 });
+        return Response.json(diff);
+      }
+
+      // GET /diffs?repo=...&commit_sha=... — list diffs for a commit
+      if (request.method === "GET" && path === "/diffs") {
+        const repo = url.searchParams.get("repo");
+        const commitSha = url.searchParams.get("commit_sha");
+        if (!repo || !commitSha) {
+          return new Response("missing repo or commit_sha", { status: 400 });
+        }
+        const diffs = this.listDiffsByCommit(repo, commitSha);
+        return Response.json(diffs);
+      }
+
+      // GET /recent-diffs?since=...&limit=...&repo=... — recent diff activity
+      if (request.method === "GET" && path === "/recent-diffs") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentDiffs({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
       }
 
       return new Response("not found", { status: 404 });

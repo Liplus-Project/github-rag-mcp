@@ -37,6 +37,29 @@ export interface DocRecord {
   updatedAt: string;
 }
 
+/** File change status reported by GitHub for a file inside a commit */
+export type DiffFileStatus =
+  | "added"
+  | "modified"
+  | "removed"
+  | "renamed"
+  | "copied"
+  | "changed"
+  | "unchanged";
+
+/** Stored commit diff record in Durable Object SQLite (one row per file-in-commit) */
+export interface DiffRecord {
+  repo: string;
+  commitSha: string;
+  filePath: string;
+  fileStatus: DiffFileStatus;
+  commitDate: string;
+  commitAuthor: string;
+  blobShaBefore: string | null;
+  blobShaAfter: string | null;
+  indexedAt: string;
+}
+
 /** Polling watermark per repository */
 export interface PollWatermark {
   repo: string;
@@ -49,7 +72,7 @@ export interface PollWatermark {
 export interface VectorMetadata {
   repo: string;
   number: number;
-  type: "issue" | "pull_request" | "release" | "doc";
+  type: "issue" | "pull_request" | "release" | "doc" | "diff";
   state: "open" | "closed" | "published" | "active";
   labels: string;
   milestone: string;
@@ -59,6 +82,20 @@ export interface VectorMetadata {
   tag_name?: string;
   /** Document file path (docs only) */
   doc_path?: string;
+  /** Commit SHA (diffs only) */
+  commit_sha?: string;
+  /** File path inside the commit (diffs only) */
+  file_path?: string;
+  /** File change status (diffs only) */
+  file_status?: DiffFileStatus;
+  /** Commit date ISO 8601 (diffs only) */
+  commit_date?: string;
+  /** Commit author login (diffs only) */
+  commit_author?: string;
+  /** Git blob SHA before the commit, empty when file was added (diffs only) */
+  blob_sha_before?: string;
+  /** Git blob SHA after the commit, empty when file was removed (diffs only) */
+  blob_sha_after?: string;
   /**
    * Expanded label fields for Vectorize pre-filtering (first 4 labels, sorted).
    * Empty string when slot is unused.

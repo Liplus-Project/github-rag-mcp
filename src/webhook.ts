@@ -12,11 +12,13 @@ import {
   processAndUpsertIssue,
   processAndUpsertRelease,
   processAndUpsertDoc,
+  processAndUpsertCommitDiff,
   vectorId,
   releaseVectorId,
   docVectorId,
   type GitHubIssueData,
   type GitHubReleaseData,
+  type GitHubCommitDetail,
 } from "./pipeline.js";
 
 /**
@@ -157,6 +159,38 @@ async function fetchFileContent(
     bytes[i] = binary.charCodeAt(i);
   }
   return new TextDecoder("utf-8").decode(bytes);
+}
+
+/**
+ * Fetch a commit with per-file patches via the GitHub REST API.
+ * Returns the commit detail including `files[]` with inline `patch` fields.
+ * Throws on non-2xx responses.
+ */
+async function fetchCommitDetail(
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<GitHubCommitDetail> {
+  const url = `https://api.github.com/repos/${repo}/commits/${sha}`;
+
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "github-rag-mcp/0.1.0",
+    },
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(
+      `GitHub Commits API error ${resp.status} for ${repo}@${sha}: ${text}`,
+    );
+  }
+
+  return (await resp.json()) as GitHubCommitDetail;
 }
 
 // ── Per-event handlers ──────────────────────────────────────
@@ -330,6 +364,7 @@ async function handlePushEvent(
 
   // Collect unique file paths from all commits, categorised by change type
   const commits = (payload.commits as Array<{
+    id?: string;
     added: string[];
     modified: string[];
     removed: string[];
@@ -359,13 +394,55 @@ async function handlePushEvent(
     }
   }
 
-  // Nothing doc-related in this push
+  // ── Per-commit diff indexing ────────────────────────────────
+  // Runs alongside the .md live-doc path above. Each commit becomes N vectors
+  // (one per file-with-patch). Failures on one commit do not interrupt the
+  // others — counts are aggregated into the response.
+  let diffsEmbedded = 0;
+  let diffsSkipped = 0;
+  let diffsFailed = 0;
+  let diffCommitsProcessed = 0;
+  let diffCommitsFailed = 0;
+
+  for (const commit of commits) {
+    const sha = commit.id;
+    if (!sha) continue;
+
+    try {
+      const detail = await fetchCommitDetail(repo, sha, env.GITHUB_TOKEN);
+      const result = await processAndUpsertCommitDiff(env, storeStub, repo, detail);
+      diffsEmbedded += result.embedded;
+      diffsSkipped += result.skipped;
+      diffsFailed += result.failed;
+      diffCommitsProcessed++;
+    } catch (err) {
+      console.error(
+        `Webhook: failed to index diff for ${repo}@${sha}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      diffCommitsFailed++;
+      // continue — other commits should still be processed
+    }
+  }
+
+  // Nothing doc-related in this push — but diff indexing may still have work.
   if (addedOrModified.size === 0 && removed.size === 0) {
     return jsonResponse(202, {
       received: true,
       event: "push",
-      action: "ignored",
-      reason: "no doc file changes",
+      action: diffCommitsProcessed > 0 ? "processed" : "ignored",
+      reason:
+        diffCommitsProcessed > 0
+          ? undefined
+          : "no doc file changes and no diff commits",
+      repo,
+      diffs: {
+        commitsProcessed: diffCommitsProcessed,
+        commitsFailed: diffCommitsFailed,
+        filesEmbedded: diffsEmbedded,
+        filesSkipped: diffsSkipped,
+        filesFailed: diffsFailed,
+      },
     });
   }
 
@@ -425,6 +502,13 @@ async function handlePushEvent(
       embedded,
       deleted,
       failed,
+    },
+    diffs: {
+      commitsProcessed: diffCommitsProcessed,
+      commitsFailed: diffCommitsFailed,
+      filesEmbedded: diffsEmbedded,
+      filesSkipped: diffsSkipped,
+      filesFailed: diffsFailed,
     },
   });
 }
