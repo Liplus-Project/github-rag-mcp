@@ -9,7 +9,7 @@ Cloudflare Workers 上で動く、GitHub の issue / pull request / release / do
 [github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp) の検索側カウンターパートとして位置づけています。両者を組み合わせると、AI は次の二つを扱えます。
 
 - いま何が起きたかを push で受け取ること
-- 次に必要な状態を search で引き戻すこと
+- 次に必要な状態を hybrid retrieval (dense + sparse) で引き戻すこと
 
 ## Memory Model
 
@@ -37,16 +37,19 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller (fallback)
      + embedding pipeline
+     + hybrid retrieval (dense + sparse + RRF fusion)
             |
-            +--> Vectorize (semantic search index)
+            +--> Vectorize (dense semantic index)
+            +--> D1 FTS5 (BM25 sparse index)
             +--> Durable Object / SQLite (structured state store)
             +--> Workers AI BGE-M3 (embeddings)
 ```
 
-- MCP surface は AI クライアント向けの検索・文脈取得ツールを提供します。
+- MCP surface は AI クライアント向けの hybrid retrieval と文脈取得ツールを提供します。
 - webhook receiver は GitHub 更新をほぼリアルタイムで memory に反映します。
 - cron poller は取りこぼし補償と backfill を担います。
-- Vectorize は semantic search index を保持します。
+- Vectorize は dense 側の semantic embedding を保持します。
+- D1 FTS5 は sparse 側の BM25 index を保持し、exact term や識別子クエリを担います。
 - Durable Object は activity と structured lookup のための状態を保持します。
 
 ## Why GitHub
@@ -78,7 +81,7 @@ GitHub webhooks + GitHub API
 
 | Tool | Description |
 |------|-------------|
-| `search_issues` | issue / pull request / release / documentation を semantic search と structured filter で検索する |
+| `search_issues` | issue / pull request / release / documentation を hybrid retrieval (dense + sparse) と structured filter で検索する |
 | `get_issue_context` | 単一 issue / pull request の集約状態を返す。linked PR、branch、CI、sub-issue、related release を含む |
 | `list_recent_activity` | 追跡対象 repository の recent activity を返す。issue、PR、release、documentation 更新を含む |
 
