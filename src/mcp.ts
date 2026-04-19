@@ -24,6 +24,7 @@ import {
   type FtsHit,
   type FtsFilter,
 } from "./fts.js";
+import { rerankCandidates, RERANK_MAX_CANDIDATES } from "./rerank.js";
 
 /** User context passed via props from OAuth layer */
 interface McpProps extends Record<string, unknown> {
@@ -85,10 +86,12 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Hybrid search (dense + sparse) for GitHub issues, PRs, releases, repository documentation, and commit diffs. " +
+      "Hybrid search (dense + sparse + cross-encoder reranker) for GitHub issues, PRs, releases, repository documentation, and commit diffs. " +
         "Dense retrieval uses BGE-M3 embeddings over Vectorize; sparse retrieval uses BM25 over D1 FTS5 " +
         "with a porter tokenizer for natural-language surfaces and a trigram tokenizer for commit diffs. " +
         "The two rankers are combined via Reciprocal Rank Fusion (RRF, k=60). " +
+        "By default, the fused candidates are then re-scored with a cross-encoder reranker " +
+        "(@cf/baai/bge-reranker-base) — set rerank: false to skip this stage. " +
         "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply to both sides. " +
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files and non-.md files that are not present in the live document index.",
       {
@@ -135,16 +138,32 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
               "dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only. " +
               "Use rrf unless debugging a specific ranker.",
           ),
+        rerank: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe(
+            "Cross-encoder reranking with @cf/baai/bge-reranker-base. Default: true. " +
+              "When enabled, the fused (or single-ranker) candidates are overfetched (top_k × 5, max 50), " +
+              "post-filtered, then re-scored by the cross-encoder before being trimmed to top_k. " +
+              "Set false to disable (faster, no Workers AI rerank cost; recommended for debugging or " +
+              "when query is a short identifier where lexical match is already decisive).",
+          ),
       },
-      async ({ query, repo, state, labels, milestone, assignee, type, top_k, fusion }) => {
+      async ({ query, repo, state, labels, milestone, assignee, type, top_k, fusion, rerank }) => {
         const requestedTopK = top_k ?? 10;
         const fusionMode = fusion ?? "rrf";
+        const rerankEnabled = rerank ?? true;
         // Overfetch on both sides when label/assignee post-filter is needed.
-        // The post-filter is applied after fusion; overfetching preserves recall.
+        // Also overfetch when the reranker is enabled, so the cross-encoder
+        // sees enough candidates (issue #91 default: top_k × 5, capped at 50).
+        // RERANK_MAX_CANDIDATES is the AI-side upper bound; we mirror it here
+        // so dense and sparse fetch enough rows to feed the reranker.
         const needsPostFilter = (labels && labels.length > 0) || !!assignee;
-        const internalTopK = needsPostFilter
-          ? Math.min(requestedTopK * 5, 50)
-          : requestedTopK;
+        const internalTopK =
+          needsPostFilter || rerankEnabled
+            ? Math.min(requestedTopK * 5, RERANK_MAX_CANDIDATES)
+            : requestedTopK;
 
         // ── Dense path: Vectorize embedding query ────────────────
         const densePromise: Promise<{
@@ -348,7 +367,60 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           });
         }
 
-        // Trim to requested top-K after fusion + post-filter.
+        // ── Reranker (3rd tier): cross-encoder re-scoring ────────
+        // Only invoked when:
+        //   - rerank is enabled (default true),
+        //   - more than one candidate survived post-filter (single-element
+        //     reranking would not change order),
+        //   - we have content text to feed (sparse FtsRow has it; dense-only
+        //     candidates without sparse hit have no content available — for
+        //     those we use an empty string and the reranker contributes
+        //     nothing for that row, which is acceptable graceful degradation).
+        // The reranker re-orders `filtered` in place. On error or unexpected
+        // shape it returns null, in which case we keep the post-filter order.
+        const rerankScores = new Map<string, number>();
+        let rerankApplied = false;
+        if (rerankEnabled && filtered.length > 1) {
+          const rerankInput = filtered.map((f) => {
+            const p = payload.get(f.vectorId);
+            // Prefer sparse content (always populated when present), fall back
+            // to empty string for dense-only hits where we have no FtsRow.
+            const content = p?.ftsRow?.content ?? "";
+            return { id: f.vectorId, content };
+          });
+
+          const reranked = await rerankCandidates(
+            this.env,
+            query,
+            rerankInput,
+            // Ask the reranker to return all rows so we can attach scores even
+            // to candidates that drop below requestedTopK; we trim ourselves.
+            rerankInput.length,
+          );
+
+          if (reranked) {
+            for (const r of reranked) {
+              rerankScores.set(r.id, r.score);
+            }
+            // Re-order `filtered` by reranker score descending. Candidates
+            // missing from the reranker response (defensive: model may drop
+            // rows) are appended in their original relative order.
+            const rerankedIds = new Set(reranked.map((r) => r.id));
+            const byId = new Map(filtered.map((f) => [f.vectorId, f]));
+            const reorderedHits: typeof filtered = [];
+            for (const r of reranked) {
+              const hit = byId.get(r.id);
+              if (hit) reorderedHits.push(hit);
+            }
+            for (const f of filtered) {
+              if (!rerankedIds.has(f.vectorId)) reorderedHits.push(f);
+            }
+            filtered = reorderedHits;
+            rerankApplied = true;
+          }
+        }
+
+        // Trim to requested top-K after fusion + post-filter (+ rerank).
         filtered = filtered.slice(0, requestedTopK);
 
         // ── Format results ───────────────────────────────────────
@@ -397,6 +469,9 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             sparse_score: p?.sparseScore ?? null,
             dense_rank: f.contributions["dense"] ?? null,
             sparse_rank: f.contributions["sparse"] ?? null,
+            // null when reranker was disabled, skipped (≤1 candidate), or
+            // failed gracefully; populated otherwise.
+            rerank_score: rerankScores.get(f.vectorId) ?? null,
             url,
             updated_at: updatedAt,
             repo: itemRepo,
@@ -468,6 +543,15 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
                   fusion: fusionMode,
                   dense_candidates: denseResult.hits.length,
                   sparse_candidates: sparseHits.length,
+                  // rerank metadata:
+                  //   - rerank_requested: caller-facing flag (default true)
+                  //   - rerank_applied: whether the cross-encoder actually
+                  //     ran and re-scored. False when disabled, when there
+                  //     was ≤1 candidate to rerank, or when the AI call
+                  //     errored / returned an unexpected shape (graceful
+                  //     fallback to fusion order).
+                  rerank_requested: rerankEnabled,
+                  rerank_applied: rerankApplied,
                   results: items,
                 },
                 null,

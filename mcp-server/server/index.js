@@ -422,8 +422,11 @@ const TOOLS = [
     name: "search_issues",
     title: "Search Issues",
     description:
-      "Semantic search for GitHub issues and PRs combined with structured filters. " +
-      "Uses embedding similarity (BGE-M3) with optional metadata filters.",
+      "3-tier hybrid search (dense + sparse BM25 + cross-encoder rerank) for GitHub issues, PRs, releases, " +
+      "documentation, and commit diffs with structured filters. " +
+      "Dense uses BGE-M3 over Vectorize; sparse uses BM25 over D1 FTS5; " +
+      "the two are fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored by " +
+      "@cf/baai/bge-reranker-base (toggle with rerank: false to skip).",
     inputSchema: {
       type: "object",
       properties: {
@@ -455,12 +458,25 @@ const TOOLS = [
         },
         type: {
           type: "string",
-          enum: ["issue", "pull_request", "all"],
-          description: "Filter by type (default: all)",
+          enum: ["issue", "pull_request", "release", "doc", "diff", "all"],
+          description:
+            "Filter by type (default: all). Use \"diff\" to search per-file commit diffs (judgment history).",
         },
         top_k: {
           type: "number",
           description: "Max results (default: 10, max: 50)",
+        },
+        fusion: {
+          type: "string",
+          enum: ["rrf", "dense_only", "sparse_only"],
+          description:
+            "Fusion strategy (default: rrf). dense_only / sparse_only for debugging or single-ranker queries.",
+        },
+        rerank: {
+          type: "boolean",
+          description:
+            "Cross-encoder reranking with @cf/baai/bge-reranker-base (default: true). " +
+            "Set false to skip — faster, no rerank cost; recommended for short identifier queries or debugging.",
         },
       },
       required: ["query"],

@@ -37,12 +37,13 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller (fallback)
      + embedding pipeline
-     + hybrid retrieval (dense + sparse + RRF fusion)
+     + hybrid retrieval (dense + sparse + RRF fusion + cross-encoder rerank)
             |
             +--> Vectorize (dense semantic index)
             +--> D1 FTS5 (BM25 sparse index)
             +--> Durable Object / SQLite (structured state store)
             +--> Workers AI BGE-M3 (embeddings)
+            +--> Workers AI bge-reranker-base (cross-encoder rerank)
 ```
 
 - MCP surface は AI クライアント向けの hybrid retrieval と文脈取得ツールを提供します。
@@ -50,6 +51,7 @@ GitHub webhooks + GitHub API
 - cron poller は取りこぼし補償と backfill を担います。
 - Vectorize は dense 側の semantic embedding を保持します。
 - D1 FTS5 は sparse 側の BM25 index を保持し、exact term や識別子クエリを担います。
+- cross-encoder reranker は fusion 後の候補を 3 段目として re-score します（クエリごとに切替可能）。
 - Durable Object は activity と structured lookup のための状態を保持します。
 
 ## Why GitHub
@@ -81,7 +83,7 @@ GitHub webhooks + GitHub API
 
 | Tool | Description |
 |------|-------------|
-| `search_issues` | issue / pull request / release / documentation を hybrid retrieval (dense + sparse) と structured filter で検索する |
+| `search_issues` | issue / pull request / release / documentation / commit diff を 3 段 hybrid retrieval (dense + sparse → RRF 合成 → cross-encoder rerank) と structured filter で検索する |
 | `get_issue_context` | 単一 issue / pull request の集約状態を返す。linked PR、branch、CI、sub-issue、related release を含む |
 | `list_recent_activity` | 追跡対象 repository の recent activity を返す。issue、PR、release、documentation 更新を含む |
 
