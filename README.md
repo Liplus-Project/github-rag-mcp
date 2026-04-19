@@ -9,7 +9,7 @@ GitHub issue, pull request, release, and documentation search for MCP clients on
 It is the search-oriented counterpart to [github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp). Together they provide both:
 
 - push-based awareness of what just happened
-- retrieval of the state that matters for the next step
+- hybrid retrieval (dense + sparse) of the state that matters for the next step
 
 ## Memory Model
 
@@ -37,16 +37,19 @@ GitHub webhooks + GitHub API
      + webhook receiver
      + cron poller (fallback)
      + embedding pipeline
+     + hybrid retrieval (dense + sparse + RRF fusion)
             |
-            +--> Vectorize (semantic search index)
+            +--> Vectorize (dense semantic index)
+            +--> D1 FTS5 (BM25 sparse index)
             +--> Durable Object / SQLite (structured state store)
             +--> Workers AI BGE-M3 (embeddings)
 ```
 
-- The MCP surface exposes semantic search and context tools to AI clients.
+- The MCP surface exposes hybrid retrieval and context tools to AI clients.
 - The webhook receiver updates memory in near real time when GitHub changes.
 - The cron poller repairs missed updates and supports backfill.
-- Vectorize stores semantic embeddings.
+- Vectorize stores semantic embeddings for the dense side of retrieval.
+- D1 FTS5 stores the BM25 sparse index for exact-term and identifier queries.
 - Durable Object keeps structured state for fast lookups and activity views.
 
 ## Why GitHub
@@ -78,7 +81,7 @@ See:
 
 | Tool | Description |
 |------|-------------|
-| `search_issues` | Semantic search across issues, pull requests, releases, and documentation with structured filters. |
+| `search_issues` | Hybrid retrieval (dense + sparse) across issues, pull requests, releases, and documentation with structured filters. |
 | `get_issue_context` | Aggregated state for one issue or pull request, including linked PRs, branch information, CI state, sub-issues, and related releases. |
 | `list_recent_activity` | Recent activity across tracked repositories, including issue, PR, release, and documentation updates. |
 
