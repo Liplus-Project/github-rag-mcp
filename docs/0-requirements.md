@@ -12,6 +12,7 @@ The system indexes:
 - pull requests
 - releases
 - repository documentation
+- commit diffs (judgment history, including changes to deleted files)
 
 The design goal is not transcript memory. The goal is recoverable project state.
 
@@ -21,6 +22,7 @@ This project treats GitHub as a shared working memory:
 - Pull requests preserve implementation, review, and CI state.
 - Docs preserve stabilized understanding.
 - Releases preserve shipped checkpoints.
+- Commit diffs preserve the judgment history of what changed and why (including deleted files and non-`.md` extensions).
 
 Search is used to recover the relevant slice of that state when an agent needs to act.
 
@@ -96,7 +98,7 @@ Responsibilities:
 - route events to the embedding pipeline
 - update both semantic and structured stores
 
-`push` is used to detect changes in all `.md` files across the repository.
+`push` is used to detect changes in all `.md` files across the repository. The same `push` events also drive per-commit diff indexing: each commit produces N vectors (one per file with a textual patch), with embedding input being `commit message + file path + patch`. This surface makes deleted files and non-`.md` extensions searchable as judgment history.
 
 ### 3. Cron Poller
 
@@ -123,6 +125,7 @@ Current implementation:
 - cosine similarity
 - body hash comparison for issue and release change detection
 - blob SHA comparison for documentation change detection
+- commit diffs are append-only: once `(commit_sha, file_path)` is indexed it is not recomputed
 
 Responsibilities:
 
@@ -130,13 +133,15 @@ Responsibilities:
 - skip unchanged records when safe
 - upsert vectors with metadata into Vectorize
 - keep retryable failures detectable on the next run
+- for commit diffs: batch-embed a commit's file list in a single Workers AI call (`text: string[]`) and upsert the resulting N vectors in one `VECTORIZE.upsert` call
+- batch size is capped by `MAX_EMBEDDING_BATCH_SIZE` (default 20); commits exceeding it are split across multiple batch calls
 
 ### 5. Vector Store
 
 Vectorize stores semantic embeddings and metadata for:
 
 - repository
-- item type
+- item type (`issue` / `pull_request` / `release` / `doc` / `diff`)
 - state
 - labels (individual slots label_0..3 + CSV fallback)
 - milestone
@@ -144,6 +149,7 @@ Vectorize stores semantic embeddings and metadata for:
 - update timestamp
 - release tag name
 - documentation path
+- commit SHA, file path, file status, commit date, commit author, blob SHA (diff only)
 
 Metadata indexes (10/10 slots used):
 
@@ -161,6 +167,7 @@ Durable Object with SQLite stores structured records for:
 - issues and pull requests
 - releases
 - documentation file state
+- commit diff file state (one row per file-in-commit)
 - polling watermarks
 
 This store supports:
@@ -190,7 +197,8 @@ The retrieval layer is intended to recover working state, not merely keyword mat
 
 Purpose:
 
-- semantic search over issues, pull requests, releases, and documentation
+- semantic search over issues, pull requests, releases, documentation, and commit diffs
+- use `type: "diff"` to retrieve judgment history (including deleted files and non-`.md` extensions)
 
 Parameters:
 
@@ -233,6 +241,7 @@ Returns:
 - created, updated, and closed issue or PR activity
 - release publication activity
 - documentation update activity
+- commit diff indexing activity
 
 ## Authentication
 
@@ -254,6 +263,7 @@ The canonical project memory remains in GitHub artifacts:
 - pull requests and review state
 - docs in the repository
 - releases
+- commit history (diffs)
 
 The retrieval system indexes those surfaces. It does not replace them as source of truth.
 
