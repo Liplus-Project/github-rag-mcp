@@ -219,11 +219,12 @@ async function handleIssueOrPREvent(
 
   // Handle deletion: remove vector and acknowledge
   if (action === "deleted") {
+    const vid = await vectorId(repo, number);
     try {
-      await env.VECTORIZE.deleteByIds([vectorId(repo, number)]);
+      await env.VECTORIZE.deleteByIds([vid]);
     } catch (err) {
       console.error(
-        `Failed to delete vector ${vectorId(repo, number)}:`,
+        `Failed to delete vector ${vid}:`,
         err instanceof Error ? err.message : String(err),
       );
     }
@@ -289,11 +290,12 @@ async function handleReleaseEvent(
 
   // Handle deletion
   if (action === "deleted") {
+    const rvid = await releaseVectorId(repo, tagName);
     try {
-      await env.VECTORIZE.deleteByIds([releaseVectorId(repo, tagName)]);
+      await env.VECTORIZE.deleteByIds([rvid]);
     } catch (err) {
       console.error(
-        `Failed to delete release vector ${releaseVectorId(repo, tagName)}:`,
+        `Failed to delete release vector ${rvid}:`,
         err instanceof Error ? err.message : String(err),
       );
     }
@@ -475,7 +477,8 @@ async function handlePushEvent(
   let deleted = 0;
   for (const path of removed) {
     try {
-      await env.VECTORIZE.deleteByIds([docVectorId(repo, path)]);
+      const dvid = await docVectorId(repo, path);
+      await env.VECTORIZE.deleteByIds([dvid]);
       await storeStub.fetch(
         new Request(
           `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`,

@@ -705,7 +705,8 @@ async function pollDocs(
   // Handle deleted files: remove from Vectorize and store
   for (const doc of deletedDocs) {
     try {
-      await env.VECTORIZE.deleteByIds([docVectorId(repo, doc.path)]);
+      const dvid = await docVectorId(repo, doc.path);
+      await env.VECTORIZE.deleteByIds([dvid]);
       await storeStub.fetch(
         new Request(
           `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(doc.path)}`,
