@@ -16,7 +16,7 @@
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
- *   RagMcpAgent  -- MCP server (tools: search_issues, get_issue_context, list_recent_activity)
+ *   RagMcpAgentV2  -- MCP server (tools: search_issues, get_issue_context, list_recent_activity)
  *   IssueStore   -- Issue/PR state store (SQLite-backed)
  *
  * Cron Trigger:
@@ -33,17 +33,17 @@ import {
 } from "./oauth.js";
 import { handleScheduled } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
-import { RagMcpAgent } from "./mcp.js";
+import { RagMcpAgentV2 } from "./mcp.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
 
 // Durable Object: MCP server (tools: search_issues, get_issue_context, list_recent_activity)
-export { RagMcpAgent } from "./mcp.js";
+export { RagMcpAgentV2 } from "./mcp.js";
 
 // McpAgent.serve() returns a fetch handler for MCP protocol.
 // It reads ctx.props (set by OAuthProvider) and passes them to the DO.
-const mcpHandler = RagMcpAgent.serve("/mcp");
+const mcpHandler = RagMcpAgentV2.serve("/mcp");
 
 /**
  * Inner handler -- processes requests after OAuthProvider routing.
@@ -129,7 +129,7 @@ const innerHandler: ExportedHandler<Env> = {
         return new Response("Unauthorized", { status: 401 });
       }
 
-      // Rewrite ctx.props to McpProps shape expected by RagMcpAgent.
+      // Rewrite ctx.props to McpProps shape expected by RagMcpAgentV2.
       // Pass the GitHub access token so the agent can make API calls.
       (ctx as unknown as { props: { githubUserId: number; githubLogin: string; accessToken: string } }).props = {
         githubUserId: props.githubUserId,

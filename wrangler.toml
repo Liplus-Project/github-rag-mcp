@@ -5,13 +5,24 @@ compatibility_flags = ["nodejs_compat"]
 
 [durable_objects]
 bindings = [
-  { name = "MCP_OBJECT", class_name = "RagMcpAgent" },
+  { name = "MCP_OBJECT", class_name = "RagMcpAgentV2" },
   { name = "ISSUE_STORE", class_name = "IssueStore" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
+
+# v2: add RagMcpAgentV2 as a fresh class and re-point MCP_OBJECT binding to it.
+# First request to MCP_OBJECT now lands on a brand-new V2 instance and re-runs
+# init(), publishing the current 9-value type enum (issue #109).
+# Old RagMcpAgent DO instances remain in storage but are no longer bound or
+# referenced. Their deletion is deferred to a later PR to keep this migration
+# minimal and avoid the deleted_classes binding-coupling constraint.
+# IssueStore is untouched; indexed content in Vectorize + D1 FTS5 is preserved.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RagMcpAgentV2"]
 
 # KV namespace for OAuth provider (token, client, grant storage)
 [[kv_namespaces]]
