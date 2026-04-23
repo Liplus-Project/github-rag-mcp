@@ -13,8 +13,14 @@ import {
   processAndUpsertIssue,
   processAndUpsertRelease,
   processAndUpsertDoc,
+  ingestIssueComment,
+  ingestPRReview,
+  ingestPRReviewComment,
   type GitHubIssueData,
   type GitHubReleaseData,
+  type GitHubCommentData,
+  type GitHubPRReviewData,
+  type GitHubPRReviewCommentData,
 } from "./pipeline.js";
 import { deleteFtsRow } from "./fts.js";
 
@@ -32,6 +38,15 @@ const MAX_EMBEDDINGS_PER_RUN = 50;
  *  When capped, the watermark is set to the last fetched issue's updated_at
  *  so the next cron continues from where it left off. */
 const MAX_PAGES_PER_RUN = 2;
+
+/** Maximum number of recent parent issues/PRs to fan out comment backfill over per repo.
+ *  Keeps the API fan-out bounded on large, active repos so a single cron run
+ *  does not exhaust the rate budget. Older parents are left to the next cron. */
+const MAX_COMMENT_BACKFILL_PARENTS = 20;
+
+/** Maximum number of comment-level items embedded per repo per run.
+ *  Workers AI embed calls are the dominant cost for the comment surface. */
+const MAX_COMMENTS_EMBEDDED_PER_REPO = 30;
 
 /** Sentinel value indicating GitHub returned 304 Not Modified */
 const NOT_MODIFIED = Symbol("NOT_MODIFIED");
@@ -744,6 +759,205 @@ async function pollDocs(
   );
 }
 
+// ── Comment / review backfill ────────────────────────────────
+
+/** Identify whether an issue record represents a pull request (has the PR surface) */
+function isPullRequestRecord(record: IssueRecord): boolean {
+  return record.type === "pull_request";
+}
+
+/** Fetch top-level comments for a single issue/PR. Returns [] on transient failures. */
+async function fetchIssueComments(
+  repo: string,
+  number: number,
+  token: string,
+): Promise<GitHubCommentData[]> {
+  const url = `https://api.github.com/repos/${repo}/issues/${number}/comments?per_page=100`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "github-rag-mcp/0.1.0",
+    },
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    throw new Error(`GitHub Issues Comments API error ${resp.status} for ${repo}#${number}`);
+  }
+
+  return (await resp.json()) as GitHubCommentData[];
+}
+
+/** Fetch PR reviews for a single PR. */
+async function fetchPRReviews(
+  repo: string,
+  number: number,
+  token: string,
+): Promise<GitHubPRReviewData[]> {
+  const url = `https://api.github.com/repos/${repo}/pulls/${number}/reviews?per_page=100`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "github-rag-mcp/0.1.0",
+    },
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    throw new Error(`GitHub PR Reviews API error ${resp.status} for ${repo}#${number}`);
+  }
+
+  return (await resp.json()) as GitHubPRReviewData[];
+}
+
+/** Fetch PR inline review comments for a single PR. */
+async function fetchPRReviewComments(
+  repo: string,
+  number: number,
+  token: string,
+): Promise<GitHubPRReviewCommentData[]> {
+  const url = `https://api.github.com/repos/${repo}/pulls/${number}/comments?per_page=100`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "github-rag-mcp/0.1.0",
+    },
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    throw new Error(`GitHub PR Review Comments API error ${resp.status} for ${repo}#${number}`);
+  }
+
+  return (await resp.json()) as GitHubPRReviewCommentData[];
+}
+
+/**
+ * Backfill comments, reviews, and review comments for a repo.
+ *
+ * Strategy: iterate over the most recently updated issues/PRs in the store
+ * (capped at MAX_COMMENT_BACKFILL_PARENTS), fetch their comment lists,
+ * and ingest each comment via the shared pipeline (bot / min-length filter
+ * + hash-based skip handle deduplication and noise).
+ *
+ * Embedding count is capped at MAX_COMMENTS_EMBEDDED_PER_REPO to stay within
+ * Workers AI rate budgets. Remaining items are picked up on the next cron.
+ */
+async function pollComments(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  // Pull the most recent issues/PRs from the store; these are the most likely
+  // to have fresh comments. Limit keeps fan-out bounded on busy repos.
+  const recentResp = await storeStub.fetch(
+    new Request(
+      `http://store/issues?repo=${encodeURIComponent(repo)}&limit=${MAX_COMMENT_BACKFILL_PARENTS}`,
+    ),
+  );
+  if (!recentResp.ok) {
+    console.warn(`pollComments: unable to list recent issues for ${repo}`);
+    return;
+  }
+
+  const parents = (await recentResp.json()) as IssueRecord[];
+  if (parents.length === 0) {
+    console.log(`${repo} comments: no parents to backfill`);
+    return;
+  }
+
+  let commentsEmbedded = 0;
+  let commentsSkipped = 0;
+  let commentsFiltered = 0;
+  let reviewsEmbedded = 0;
+  let reviewsSkipped = 0;
+  let reviewsFiltered = 0;
+  let reviewCommentsEmbedded = 0;
+  let reviewCommentsSkipped = 0;
+  let reviewCommentsFiltered = 0;
+  let fetchFailures = 0;
+
+  const embedBudget = (): boolean =>
+    commentsEmbedded + reviewsEmbedded + reviewCommentsEmbedded < MAX_COMMENTS_EMBEDDED_PER_REPO;
+
+  for (const parent of parents) {
+    if (!embedBudget()) break;
+
+    // Top-level comments (issues and PRs both route through /issues/{N}/comments)
+    try {
+      const comments = await fetchIssueComments(repo, parent.number, env.GITHUB_TOKEN);
+      for (const c of comments) {
+        if (!embedBudget()) break;
+        const result = await ingestIssueComment(env, storeStub, repo, parent.number, c);
+        if (result.embedded) commentsEmbedded++;
+        else if (result.skippedUnchanged) commentsSkipped++;
+        else if (result.filtered) commentsFiltered++;
+      }
+    } catch (err) {
+      fetchFailures++;
+      console.error(
+        `pollComments: failed to fetch comments for ${repo}#${parent.number}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    // PR-only: review bodies + inline review comments
+    if (!isPullRequestRecord(parent)) continue;
+
+    if (!embedBudget()) break;
+
+    try {
+      const reviews = await fetchPRReviews(repo, parent.number, env.GITHUB_TOKEN);
+      for (const r of reviews) {
+        if (!embedBudget()) break;
+        const result = await ingestPRReview(env, storeStub, repo, parent.number, r);
+        if (result.embedded) reviewsEmbedded++;
+        else if (result.skippedUnchanged) reviewsSkipped++;
+        else if (result.filtered) reviewsFiltered++;
+      }
+    } catch (err) {
+      fetchFailures++;
+      console.error(
+        `pollComments: failed to fetch reviews for ${repo}#${parent.number}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    if (!embedBudget()) break;
+
+    try {
+      const inline = await fetchPRReviewComments(repo, parent.number, env.GITHUB_TOKEN);
+      for (const rc of inline) {
+        if (!embedBudget()) break;
+        const result = await ingestPRReviewComment(env, storeStub, repo, parent.number, rc);
+        if (result.embedded) reviewCommentsEmbedded++;
+        else if (result.skippedUnchanged) reviewCommentsSkipped++;
+        else if (result.filtered) reviewCommentsFiltered++;
+      }
+    } catch (err) {
+      fetchFailures++;
+      console.error(
+        `pollComments: failed to fetch review comments for ${repo}#${parent.number}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  console.log(
+    `${repo} comments: scanned ${parents.length} parents, ` +
+      `top-level [embedded=${commentsEmbedded}, skipped=${commentsSkipped}, filtered=${commentsFiltered}], ` +
+      `reviews [embedded=${reviewsEmbedded}, skipped=${reviewsSkipped}, filtered=${reviewsFiltered}], ` +
+      `inline [embedded=${reviewCommentsEmbedded}, skipped=${reviewCommentsSkipped}, filtered=${reviewCommentsFiltered}], ` +
+      `fetch_failures=${fetchFailures}`,
+  );
+}
+
 /**
  * Main scheduled handler — called by Cron Trigger hourly as fallback.
  * Polls all configured repositories for issue/PR updates.
@@ -807,6 +1021,15 @@ export async function handleScheduled(
     } catch (err) {
       console.error(
         `Failed to poll docs for ${repo}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    try {
+      await pollComments(repo, env, storeStub);
+    } catch (err) {
+      console.error(
+        `Failed to poll comments for ${repo}:`,
         err instanceof Error ? err.message : String(err),
       );
     }

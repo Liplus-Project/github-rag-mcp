@@ -85,15 +85,17 @@ This MCP server exposes a single consolidated tool. All retrieval modes — sema
 
 ### `search_issues`
 
-Unified search across GitHub issues, pull requests, releases, repository documentation, and commit diffs.
+Unified search across GitHub issues, pull requests, releases, repository documentation, commit diffs, and comment / review surfaces (top-level comments on issues and PRs, PR review bodies, and PR inline review comments).
 
 Three modes are selected by the combination of `query` and `sort`:
 
 1. **Hybrid semantic search (default)** — dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with the `@cf/baai/bge-reranker-base` cross-encoder. Pass a natural-language `query`.
-2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent issue / PR / release / doc / diff activity. This subsumes the previous `list_recent_activity` tool.
+2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent activity across every type. This subsumes the previous `list_recent_activity` tool.
 3. **Doc content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API and inlined as a `content` field. Capped at the first few doc rows to bound API fan-out. This subsumes the previous `get_doc_content` tool.
 
 Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode.
+
+Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter than 10 characters (trimmed) are filtered out at ingest time so noise such as `LGTM`, `+1`, or CI chatter does not dilute the retrieval surface.
 
 #### Parameters
 
@@ -105,7 +107,7 @@ Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) 
 | `labels` | string[] | Filter by label names (AND). |
 | `milestone` | string | Filter by milestone title. |
 | `assignee` | string | Filter by assignee login. |
-| `type` | `"issue"` \| `"pull_request"` \| `"release"` \| `"doc"` \| `"diff"` \| `"all"` | Filter by type (default `all`). |
+| `type` | see below | Filter by type (default `all`). |
 | `top_k` | number | Max results (default 10, max 50). |
 | `fusion` | `"rrf"` \| `"dense_only"` \| `"sparse_only"` | Fusion strategy (default `rrf`). Ignored in scan mode. |
 | `rerank` | boolean | Cross-encoder rerank (default `true`). Ignored in scan mode. |
@@ -113,6 +115,20 @@ Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) 
 | `since` | ISO 8601 string | Keep only results with `updated_at >= since`. |
 | `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
 | `include_content` | boolean | Inline raw content on top doc results (default `false`). |
+
+#### `type` values
+
+| Value | Surface |
+|-------|---------|
+| `"issue"` | GitHub issues (title + body). |
+| `"pull_request"` | Pull request descriptions (title + body). |
+| `"release"` | Release notes (name + body). |
+| `"doc"` | Markdown documentation files. |
+| `"diff"` | Per-file commit diffs (commit message + file path + patch). |
+| `"issue_comment"` | Top-level comments on issues and PRs. |
+| `"pr_review"` | PR review bodies (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`). |
+| `"pr_review_comment"` | PR inline review comments (per-line diff comments). |
+| `"all"` | Union of every type above (default). |
 
 #### Examples
 
@@ -144,6 +160,16 @@ Semantic search with inline doc content on the top doc hits:
   "type": "doc",
   "include_content": true,
   "top_k": 3
+}
+```
+
+Search past PR review judgments about a specific topic:
+
+```json
+{
+  "query": "rerank threshold tuning",
+  "type": "pr_review",
+  "top_k": 5
 }
 ```
 

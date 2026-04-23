@@ -12,6 +12,9 @@ import type {
   DocRecord,
   DiffRecord,
   DiffFileStatus,
+  IssueCommentRecord,
+  PRReviewRecord,
+  PRReviewCommentRecord,
   PollWatermark,
 } from "./types.js";
 
@@ -74,6 +77,86 @@ type WatermarkRow = {
   last_polled_at: string;
   etag: string;
 };
+
+/** Row shape returned by SQLite for the issue_comments table */
+type IssueCommentRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  comment_id: number;
+  number: number;
+  author: string;
+  body_hash: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Row shape returned by SQLite for the pr_reviews table */
+type PRReviewRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  review_id: number;
+  number: number;
+  author: string;
+  state: string;
+  body_hash: string;
+  submitted_at: string;
+  updated_at: string;
+};
+
+/** Row shape returned by SQLite for the pr_review_comments table */
+type PRReviewCommentRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  comment_id: number;
+  number: number;
+  author: string;
+  file_path: string;
+  line: number;
+  commit_id: string;
+  body_hash: string;
+  created_at: string;
+  updated_at: string;
+};
+
+function rowToIssueCommentRecord(row: IssueCommentRow): IssueCommentRecord {
+  return {
+    repo: row.repo,
+    commentId: row.comment_id,
+    number: row.number,
+    author: row.author,
+    bodyHash: row.body_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToPRReviewRecord(row: PRReviewRow): PRReviewRecord {
+  return {
+    repo: row.repo,
+    reviewId: row.review_id,
+    number: row.number,
+    author: row.author,
+    state: row.state,
+    bodyHash: row.body_hash,
+    submittedAt: row.submitted_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToPRReviewCommentRecord(row: PRReviewCommentRow): PRReviewCommentRecord {
+  return {
+    repo: row.repo,
+    commentId: row.comment_id,
+    number: row.number,
+    author: row.author,
+    filePath: row.file_path,
+    line: row.line,
+    commitId: row.commit_id,
+    bodyHash: row.body_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 function rowToReleaseRecord(row: ReleaseRow): ReleaseRecord {
   return {
@@ -236,6 +319,82 @@ export class IssueStore implements DurableObject {
     } catch {
       // Column already exists — ignore
     }
+
+    // Top-level comments on issues and PRs share the same number space, so we
+    // key on (repo, comment_id) directly. `number` stores the parent issue/PR
+    // number so we can filter by parent or reindex quickly.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS issue_comments (
+        repo       TEXT    NOT NULL,
+        comment_id INTEGER NOT NULL,
+        number     INTEGER NOT NULL,
+        author     TEXT    NOT NULL DEFAULT '',
+        body_hash  TEXT    NOT NULL DEFAULT '',
+        created_at TEXT    NOT NULL,
+        updated_at TEXT    NOT NULL,
+        PRIMARY KEY (repo, comment_id)
+      );
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_issue_comments_parent
+        ON issue_comments (repo, number, updated_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_issue_comments_recent
+        ON issue_comments (updated_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pr_reviews (
+        repo         TEXT    NOT NULL,
+        review_id    INTEGER NOT NULL,
+        number       INTEGER NOT NULL,
+        author       TEXT    NOT NULL DEFAULT '',
+        state        TEXT    NOT NULL DEFAULT '',
+        body_hash    TEXT    NOT NULL DEFAULT '',
+        submitted_at TEXT    NOT NULL,
+        updated_at   TEXT    NOT NULL,
+        PRIMARY KEY (repo, review_id)
+      );
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_parent
+        ON pr_reviews (repo, number, submitted_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_recent
+        ON pr_reviews (updated_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pr_review_comments (
+        repo       TEXT    NOT NULL,
+        comment_id INTEGER NOT NULL,
+        number     INTEGER NOT NULL,
+        author     TEXT    NOT NULL DEFAULT '',
+        file_path  TEXT    NOT NULL DEFAULT '',
+        line       INTEGER NOT NULL DEFAULT 0,
+        commit_id  TEXT    NOT NULL DEFAULT '',
+        body_hash  TEXT    NOT NULL DEFAULT '',
+        created_at TEXT    NOT NULL,
+        updated_at TEXT    NOT NULL,
+        PRIMARY KEY (repo, comment_id)
+      );
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pr_review_comments_parent
+        ON pr_review_comments (repo, number, updated_at DESC);
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pr_review_comments_recent
+        ON pr_review_comments (updated_at DESC);
+    `);
 
     // Index for recent-activity queries (updated_at descending scan)
     this.sql.exec(`
@@ -549,6 +708,198 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToDiffRecord);
   }
 
+  // ---- Issue comment CRUD ----
+
+  upsertIssueComment(record: IssueCommentRecord): void {
+    this.sql.exec(
+      `INSERT INTO issue_comments (repo, comment_id, number, author, body_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo, comment_id) DO UPDATE SET
+         number     = excluded.number,
+         author     = excluded.author,
+         body_hash  = excluded.body_hash,
+         updated_at = excluded.updated_at`,
+      record.repo,
+      record.commentId,
+      record.number,
+      record.author,
+      record.bodyHash,
+      record.createdAt,
+      record.updatedAt,
+    );
+  }
+
+  getIssueComment(repo: string, commentId: number): IssueCommentRecord | null {
+    const cursor = this.sql.exec<IssueCommentRow>(
+      `SELECT * FROM issue_comments WHERE repo = ? AND comment_id = ?`,
+      repo,
+      commentId,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToIssueCommentRecord(rows[0]);
+  }
+
+  deleteIssueComment(repo: string, commentId: number): void {
+    this.sql.exec(
+      `DELETE FROM issue_comments WHERE repo = ? AND comment_id = ?`,
+      repo,
+      commentId,
+    );
+  }
+
+  getRecentIssueComments(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): IssueCommentRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM issue_comments WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM issue_comments WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<IssueCommentRow>(query, ...params);
+    return [...cursor].map(rowToIssueCommentRecord);
+  }
+
+  // ---- PR review CRUD ----
+
+  upsertPRReview(record: PRReviewRecord): void {
+    this.sql.exec(
+      `INSERT INTO pr_reviews (repo, review_id, number, author, state, body_hash, submitted_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo, review_id) DO UPDATE SET
+         number       = excluded.number,
+         author       = excluded.author,
+         state        = excluded.state,
+         body_hash    = excluded.body_hash,
+         submitted_at = excluded.submitted_at,
+         updated_at   = excluded.updated_at`,
+      record.repo,
+      record.reviewId,
+      record.number,
+      record.author,
+      record.state,
+      record.bodyHash,
+      record.submittedAt,
+      record.updatedAt,
+    );
+  }
+
+  getPRReview(repo: string, reviewId: number): PRReviewRecord | null {
+    const cursor = this.sql.exec<PRReviewRow>(
+      `SELECT * FROM pr_reviews WHERE repo = ? AND review_id = ?`,
+      repo,
+      reviewId,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToPRReviewRecord(rows[0]);
+  }
+
+  deletePRReview(repo: string, reviewId: number): void {
+    this.sql.exec(
+      `DELETE FROM pr_reviews WHERE repo = ? AND review_id = ?`,
+      repo,
+      reviewId,
+    );
+  }
+
+  getRecentPRReviews(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): PRReviewRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM pr_reviews WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM pr_reviews WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<PRReviewRow>(query, ...params);
+    return [...cursor].map(rowToPRReviewRecord);
+  }
+
+  // ---- PR review comment CRUD ----
+
+  upsertPRReviewComment(record: PRReviewCommentRecord): void {
+    this.sql.exec(
+      `INSERT INTO pr_review_comments (repo, comment_id, number, author, file_path, line, commit_id, body_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo, comment_id) DO UPDATE SET
+         number     = excluded.number,
+         author     = excluded.author,
+         file_path  = excluded.file_path,
+         line       = excluded.line,
+         commit_id  = excluded.commit_id,
+         body_hash  = excluded.body_hash,
+         updated_at = excluded.updated_at`,
+      record.repo,
+      record.commentId,
+      record.number,
+      record.author,
+      record.filePath,
+      record.line,
+      record.commitId,
+      record.bodyHash,
+      record.createdAt,
+      record.updatedAt,
+    );
+  }
+
+  getPRReviewComment(repo: string, commentId: number): PRReviewCommentRecord | null {
+    const cursor = this.sql.exec<PRReviewCommentRow>(
+      `SELECT * FROM pr_review_comments WHERE repo = ? AND comment_id = ?`,
+      repo,
+      commentId,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToPRReviewCommentRecord(rows[0]);
+  }
+
+  deletePRReviewComment(repo: string, commentId: number): void {
+    this.sql.exec(
+      `DELETE FROM pr_review_comments WHERE repo = ? AND comment_id = ?`,
+      repo,
+      commentId,
+    );
+  }
+
+  getRecentPRReviewComments(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): PRReviewCommentRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM pr_review_comments WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM pr_review_comments WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<PRReviewCommentRow>(query, ...params);
+    return [...cursor].map(rowToPRReviewCommentRecord);
+  }
+
   // ---- Full re-embed reset ----
 
   /**
@@ -571,6 +922,9 @@ export class IssueStore implements DurableObject {
     releaseHashesReset: number;
     docsDeleted: number;
     diffsDeleted: number;
+    issueCommentHashesReset: number;
+    prReviewHashesReset: number;
+    prReviewCommentHashesReset: number;
     watermarksDeleted: number;
   } {
     const issuesCursor = this.sql.exec(
@@ -593,12 +947,32 @@ export class IssueStore implements DurableObject {
       repo,
     );
 
-    // Delete all three watermark namespaces: issues (repo), releases (releases:{repo}), docs (docs:{repo})
+    const issueCommentsCursor = this.sql.exec(
+      `UPDATE issue_comments SET body_hash = '' WHERE repo = ? AND body_hash != ''`,
+      repo,
+    );
+
+    const prReviewsCursor = this.sql.exec(
+      `UPDATE pr_reviews SET body_hash = '' WHERE repo = ? AND body_hash != ''`,
+      repo,
+    );
+
+    const prReviewCommentsCursor = this.sql.exec(
+      `UPDATE pr_review_comments SET body_hash = '' WHERE repo = ? AND body_hash != ''`,
+      repo,
+    );
+
+    // Delete all watermark namespaces: issues (repo), releases (releases:{repo}),
+    // docs (docs:{repo}), and the three comment/review surfaces
+    // (comments:{repo}, reviews:{repo}, review_comments:{repo}).
     const watermarksCursor = this.sql.exec(
-      `DELETE FROM watermarks WHERE repo IN (?, ?, ?)`,
+      `DELETE FROM watermarks WHERE repo IN (?, ?, ?, ?, ?, ?)`,
       repo,
       `releases:${repo}`,
       `docs:${repo}`,
+      `comments:${repo}`,
+      `reviews:${repo}`,
+      `review_comments:${repo}`,
     );
 
     return {
@@ -606,6 +980,9 @@ export class IssueStore implements DurableObject {
       releaseHashesReset: releasesCursor.rowsWritten,
       docsDeleted: docsCursor.rowsWritten,
       diffsDeleted: diffsCursor.rowsWritten,
+      issueCommentHashesReset: issueCommentsCursor.rowsWritten,
+      prReviewHashesReset: prReviewsCursor.rowsWritten,
+      prReviewCommentHashesReset: prReviewCommentsCursor.rowsWritten,
       watermarksDeleted: watermarksCursor.rowsWritten,
     };
   }
@@ -867,6 +1244,141 @@ export class IssueStore implements DurableObject {
         const limit = url.searchParams.get("limit");
         const repo = url.searchParams.get("repo") ?? undefined;
         const items = this.getRecentDiffs({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
+      }
+
+      // ── Issue comment endpoints ───────────────────────────────
+
+      // POST /upsert-comment — upsert a single issue/PR top-level comment
+      if (request.method === "POST" && path === "/upsert-comment") {
+        const record = (await request.json()) as IssueCommentRecord;
+        this.upsertIssueComment(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /comment?repo=...&comment_id=... — get a single comment
+      if (request.method === "GET" && path === "/comment") {
+        const repo = url.searchParams.get("repo");
+        const commentId = url.searchParams.get("comment_id");
+        if (!repo || !commentId) {
+          return new Response("missing repo or comment_id", { status: 400 });
+        }
+        const item = this.getIssueComment(repo, parseInt(commentId, 10));
+        if (!item) return new Response("not found", { status: 404 });
+        return Response.json(item);
+      }
+
+      // DELETE /comment?repo=...&comment_id=... — delete a comment
+      if (request.method === "DELETE" && path === "/comment") {
+        const repo = url.searchParams.get("repo");
+        const commentId = url.searchParams.get("comment_id");
+        if (!repo || !commentId) {
+          return new Response("missing repo or comment_id", { status: 400 });
+        }
+        this.deleteIssueComment(repo, parseInt(commentId, 10));
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /recent-comments?since=...&limit=...&repo=... — recent comments
+      if (request.method === "GET" && path === "/recent-comments") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentIssueComments({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
+      }
+
+      // ── PR review endpoints ───────────────────────────────────
+
+      // POST /upsert-review — upsert a single PR review
+      if (request.method === "POST" && path === "/upsert-review") {
+        const record = (await request.json()) as PRReviewRecord;
+        this.upsertPRReview(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /review?repo=...&review_id=... — get a single review
+      if (request.method === "GET" && path === "/review") {
+        const repo = url.searchParams.get("repo");
+        const reviewId = url.searchParams.get("review_id");
+        if (!repo || !reviewId) {
+          return new Response("missing repo or review_id", { status: 400 });
+        }
+        const item = this.getPRReview(repo, parseInt(reviewId, 10));
+        if (!item) return new Response("not found", { status: 404 });
+        return Response.json(item);
+      }
+
+      // DELETE /review?repo=...&review_id=... — delete a review
+      if (request.method === "DELETE" && path === "/review") {
+        const repo = url.searchParams.get("repo");
+        const reviewId = url.searchParams.get("review_id");
+        if (!repo || !reviewId) {
+          return new Response("missing repo or review_id", { status: 400 });
+        }
+        this.deletePRReview(repo, parseInt(reviewId, 10));
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /recent-reviews?since=...&limit=...&repo=... — recent PR reviews
+      if (request.method === "GET" && path === "/recent-reviews") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentPRReviews({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
+      }
+
+      // ── PR review comment endpoints ───────────────────────────
+
+      // POST /upsert-review-comment — upsert a single PR inline review comment
+      if (request.method === "POST" && path === "/upsert-review-comment") {
+        const record = (await request.json()) as PRReviewCommentRecord;
+        this.upsertPRReviewComment(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /review-comment?repo=...&comment_id=... — get a single review comment
+      if (request.method === "GET" && path === "/review-comment") {
+        const repo = url.searchParams.get("repo");
+        const commentId = url.searchParams.get("comment_id");
+        if (!repo || !commentId) {
+          return new Response("missing repo or comment_id", { status: 400 });
+        }
+        const item = this.getPRReviewComment(repo, parseInt(commentId, 10));
+        if (!item) return new Response("not found", { status: 404 });
+        return Response.json(item);
+      }
+
+      // DELETE /review-comment?repo=...&comment_id=... — delete a review comment
+      if (request.method === "DELETE" && path === "/review-comment") {
+        const repo = url.searchParams.get("repo");
+        const commentId = url.searchParams.get("comment_id");
+        if (!repo || !commentId) {
+          return new Response("missing repo or comment_id", { status: 400 });
+        }
+        this.deletePRReviewComment(repo, parseInt(commentId, 10));
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /recent-review-comments?since=...&limit=...&repo=... — recent review comments
+      if (request.method === "GET" && path === "/recent-review-comments") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentPRReviewComments({
           since,
           limit: limit ? parseInt(limit, 10) : undefined,
           repo,

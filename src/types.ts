@@ -37,6 +37,54 @@ export interface DocRecord {
   updatedAt: string;
 }
 
+/**
+ * Stored top-level comment record (issues + PRs) in Durable Object SQLite.
+ * `number` is the parent issue or PR number (issues and PRs share the same number space).
+ */
+export interface IssueCommentRecord {
+  repo: string;
+  commentId: number;
+  number: number;
+  author: string;
+  bodyHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Stored PR review record (approve / request_changes / comment bodies).
+ * `state` carries the GitHub review state enum verbatim.
+ */
+export interface PRReviewRecord {
+  repo: string;
+  reviewId: number;
+  number: number;
+  author: string;
+  /** GitHub review state: APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING */
+  state: string;
+  bodyHash: string;
+  submittedAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Stored PR inline review comment record (per-line comments on a diff).
+ * `filePath` / `line` pinpoint the diff location; `commitId` ties the
+ * comment to the reviewed commit SHA.
+ */
+export interface PRReviewCommentRecord {
+  repo: string;
+  commentId: number;
+  number: number;
+  author: string;
+  filePath: string;
+  line: number;
+  commitId: string;
+  bodyHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** File change status reported by GitHub for a file inside a commit */
 export type DiffFileStatus =
   | "added"
@@ -72,8 +120,16 @@ export interface PollWatermark {
 export interface VectorMetadata {
   repo: string;
   number: number;
-  type: "issue" | "pull_request" | "release" | "doc" | "diff";
-  state: "open" | "closed" | "published" | "active";
+  type:
+    | "issue"
+    | "pull_request"
+    | "release"
+    | "doc"
+    | "diff"
+    | "issue_comment"
+    | "pr_review"
+    | "pr_review_comment";
+  state: string;
   labels: string;
   milestone: string;
   assignees: string;
@@ -96,6 +152,14 @@ export interface VectorMetadata {
   blob_sha_before?: string;
   /** Git blob SHA after the commit, empty when file was removed (diffs only) */
   blob_sha_after?: string;
+  /** Comment / review author login (comments + reviews + review comments only) */
+  author?: string;
+  /** GitHub comment id (issue_comment + pr_review_comment only) */
+  comment_id?: number;
+  /** GitHub review id (pr_review only) */
+  review_id?: number;
+  /** Review-comment inline line number (pr_review_comment only) */
+  line?: number;
   /**
    * Expanded label fields for Vectorize pre-filtering (first 4 labels, sorted).
    * Empty string when slot is unused.
