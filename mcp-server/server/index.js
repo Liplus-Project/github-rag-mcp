@@ -7,10 +7,8 @@
  * Authenticates via OAuth 2.1 with PKCE (localhost callback).
  *
  * Tools are proxied to the Worker's MCP endpoint:
- *   search_issues       — semantic + structured search via Vectorize + Workers AI
- *   get_issue_context   — aggregated issue view with related PRs, branch, CI
- *   get_doc_content     — retrieve .md document content from a repository
- *   list_recent_activity — recent changes across tracked repositories
+ *   search_issues — unified hybrid search / time-ordered activity scan /
+ *                   inline doc content fetch via Vectorize + Workers AI
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -422,17 +420,21 @@ const TOOLS = [
     name: "search_issues",
     title: "Search Issues",
     description:
-      "3-tier hybrid search (dense + sparse BM25 + cross-encoder rerank) for GitHub issues, PRs, releases, " +
-      "documentation, and commit diffs with structured filters. " +
-      "Dense uses BGE-M3 over Vectorize; sparse uses BM25 over D1 FTS5; " +
-      "the two are fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored by " +
-      "@cf/baai/bge-reranker-base (toggle with rerank: false to skip).",
+      "Unified search across GitHub issues, PRs, releases, documentation, and commit diffs. Three modes: " +
+      "(1) hybrid semantic search — dense BGE-M3 + sparse BM25 over D1 FTS5 fused via RRF, then re-scored " +
+      "by @cf/baai/bge-reranker-base (toggle with rerank: false); " +
+      "(2) time-ordered activity scan — omit or empty query with sort=\"updated_desc\" / \"created_desc\", " +
+      "optionally narrow via since / until; " +
+      "(3) doc content fetch — include_content: true inlines raw file content on top doc results. " +
+      "Structured filters (repo, state, labels, milestone, assignee, type) apply across all modes.",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Natural language search query",
+          description:
+            "Natural language search query. Omit or leave empty to switch to metadata-only scan mode " +
+            "(results ordered by the timestamp implied by sort; default sort=\"updated_desc\" when empty).",
         },
         repo: {
           type: "string",
@@ -470,103 +472,45 @@ const TOOLS = [
           type: "string",
           enum: ["rrf", "dense_only", "sparse_only"],
           description:
-            "Fusion strategy (default: rrf). dense_only / sparse_only for debugging or single-ranker queries.",
+            "Fusion strategy (default: rrf). dense_only / sparse_only for debugging or single-ranker queries. " +
+            "Ignored in scan mode (empty query).",
         },
         rerank: {
           type: "boolean",
           description:
             "Cross-encoder reranking with @cf/baai/bge-reranker-base (default: true). " +
-            "Set false to skip — faster, no rerank cost; recommended for short identifier queries or debugging.",
+            "Set false to skip — faster, no rerank cost; recommended for short identifier queries or debugging. " +
+            "Ignored in scan mode (empty query).",
         },
-      },
-      required: ["query"],
-    },
-    annotations: {
-      title: "Search Issues",
-      readOnlyHint: true,
-    },
-  },
-  {
-    name: "get_issue_context",
-    title: "Get Issue Context",
-    description:
-      "Get aggregated context for a single issue/PR including related PRs, branch status, and CI status.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repo: {
+        sort: {
           type: "string",
-          description: "Repository (owner/repo)",
-        },
-        number: {
-          type: "number",
-          description: "Issue or PR number",
-        },
-      },
-      required: ["repo", "number"],
-    },
-    annotations: {
-      title: "Get Issue Context",
-      readOnlyHint: true,
-    },
-  },
-  {
-    name: "get_doc_content",
-    title: "Get Document Content",
-    description:
-      "Retrieve the content of a document file (.md) from a GitHub repository. " +
-      "Use this to read documents found via search_issues with type: \"doc\". " +
-      "Returns the raw file content fetched from the repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repo: {
-          type: "string",
-          description: "Repository (owner/repo)",
-        },
-        path: {
-          type: "string",
+          enum: ["relevance", "updated_desc", "created_desc"],
           description:
-            'File path in the repository (e.g. "docs/0-requirements.md")',
-        },
-        ref: {
-          type: "string",
-          description:
-            "Git ref (branch, tag, or commit SHA) to fetch from. Defaults to the repository's default branch.",
-        },
-      },
-      required: ["repo", "path"],
-    },
-    annotations: {
-      title: "Get Document Content",
-      readOnlyHint: true,
-    },
-  },
-  {
-    name: "list_recent_activity",
-    title: "List Recent Activity",
-    description:
-      "List recent issue/PR activity across tracked repositories. " +
-      "Returns changes classified as created, updated, or closed.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        repo: {
-          type: "string",
-          description: "Filter by repository (owner/repo)",
+            "Result ordering. Default: \"relevance\" when query is non-empty, \"updated_desc\" when query is empty. " +
+            "Setting \"updated_desc\" / \"created_desc\" forces time-ordered output and overrides ranker scores.",
         },
         since: {
           type: "string",
-          description: "ISO 8601 timestamp for activity start (default: last 24 hours)",
+          description:
+            "ISO 8601 timestamp (inclusive) — keep only results whose updated_at >= since. " +
+            "Pair with sort=\"updated_desc\" + empty query for an activity scan.",
         },
-        limit: {
-          type: "number",
-          description: "Max results (default: 20, max: 100)",
+        until: {
+          type: "string",
+          description:
+            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until.",
+        },
+        include_content: {
+          type: "boolean",
+          description:
+            "When true and a result row is type=\"doc\", inline the raw file content (fetched from the " +
+            "GitHub contents API) on that row. Capped at the first few doc rows to bound API fan-out. " +
+            "Non-doc rows are unaffected. Default: false.",
         },
       },
     },
     annotations: {
-      title: "List Recent Activity",
+      title: "Search Issues",
       readOnlyHint: true,
     },
   },
