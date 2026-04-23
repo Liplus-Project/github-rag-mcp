@@ -12,6 +12,7 @@
  * idFromName("user-{githubUserId}").
  */
 
+import { DurableObject } from "cloudflare:workers";
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -64,6 +65,20 @@ function githubHeaders(token: string): Record<string, string> {
  * additional queries rather than lifting this cap.
  */
 const INCLUDE_CONTENT_MAX_DOCS = 5;
+
+/**
+ * Legacy class retained solely to satisfy Cloudflare's "class must exist in
+ * script for classes declared in past migrations (v1 new_sqlite_classes)"
+ * constraint. MCP_OBJECT binding points to RagMcpAgentV2 now, so this class
+ * never receives live traffic. It exists only so `wrangler deploy` does not
+ * fail with "script does not export class 'RagMcpAgent'". A follow-up PR can
+ * delete this class together with a deleted_classes migration.
+ */
+export class RagMcpAgent extends DurableObject<Env> {
+  async fetch(): Promise<Response> {
+    return new Response("RagMcpAgent has been retired; use RagMcpAgentV2", { status: 410 });
+  }
+}
 
 export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
   // @ts-expect-error -- McpServer version mismatch between top-level SDK and agents' bundled copy (same issue as webhook-mcp; wrangler resolves at bundle time)
