@@ -13,15 +13,15 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
 
-# v2: rename MCP agent class to force fresh DO namespace + init().
-# Cloudflare rejects delete_classes while the binding still references the class,
-# so MCP_OBJECT is re-pointed to RagMcpAgentV2 before the old class is deleted.
-# Outcome: first request to MCP_OBJECT lands on a fresh RagMcpAgentV2 instance,
-# re-running init() and publishing the current 9-value type enum (issue #109).
+# v2: add RagMcpAgentV2 as a fresh class and re-point MCP_OBJECT binding to it.
+# First request to MCP_OBJECT now lands on a brand-new V2 instance and re-runs
+# init(), publishing the current 9-value type enum (issue #109).
+# Old RagMcpAgent DO instances remain in storage but are no longer bound or
+# referenced. Their deletion is deferred to a later PR to keep this migration
+# minimal and avoid the deleted_classes binding-coupling constraint.
 # IssueStore is untouched; indexed content in Vectorize + D1 FTS5 is preserved.
 [[migrations]]
 tag = "v2"
-deleted_classes = ["RagMcpAgent"]
 new_sqlite_classes = ["RagMcpAgentV2"]
 
 # KV namespace for OAuth provider (token, client, grant storage)
