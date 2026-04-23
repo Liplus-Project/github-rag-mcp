@@ -1,5 +1,5 @@
 /**
- * RagMcpAgent — MCP server Durable Object exposing a single consolidated
+ * RagMcpAgentV2 — MCP server Durable Object exposing a single consolidated
  * semantic search tool.
  *
  * Tools:
@@ -65,7 +65,7 @@ function githubHeaders(token: string): Record<string, string> {
  */
 const INCLUDE_CONTENT_MAX_DOCS = 5;
 
-export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
+export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
   // @ts-expect-error -- McpServer version mismatch between top-level SDK and agents' bundled copy (same issue as webhook-mcp; wrangler resolves at bundle time)
   server = new McpServer({
     name: "github-rag-mcp",

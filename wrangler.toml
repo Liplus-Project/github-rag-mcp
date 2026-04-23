@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [durable_objects]
 bindings = [
-  { name = "MCP_OBJECT", class_name = "RagMcpAgent" },
+  { name = "MCP_OBJECT", class_name = "RagMcpAgentV2" },
   { name = "ISSUE_STORE", class_name = "IssueStore" }
 ]
 
@@ -13,13 +13,16 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
 
-# v2: force reset RagMcpAgent to clear in-memory init() cache (tool schema enum).
-# IssueStore is preserved; indexed content (Vectorize + D1 FTS5) is untouched.
-# Required when init()-time schema definitions drift from deployed source (issue #109).
+# v2: rename MCP agent class to force fresh DO namespace + init().
+# Cloudflare rejects delete_classes while the binding still references the class,
+# so MCP_OBJECT is re-pointed to RagMcpAgentV2 before the old class is deleted.
+# Outcome: first request to MCP_OBJECT lands on a fresh RagMcpAgentV2 instance,
+# re-running init() and publishing the current 9-value type enum (issue #109).
+# IssueStore is untouched; indexed content in Vectorize + D1 FTS5 is preserved.
 [[migrations]]
 tag = "v2"
 deleted_classes = ["RagMcpAgent"]
-new_sqlite_classes = ["RagMcpAgent"]
+new_sqlite_classes = ["RagMcpAgentV2"]
 
 # KV namespace for OAuth provider (token, client, grant storage)
 [[kv_namespaces]]
