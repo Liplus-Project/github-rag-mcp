@@ -36,27 +36,8 @@ interface McpProps extends Record<string, unknown> {
 const GITHUB_API = "https://api.github.com";
 const USER_AGENT = "github-rag-mcp/0.1.0";
 
-/**
- * Diagnostic summary of an access token — never includes the token body.
- * Surfaces only: length, first 4 chars (GitHub token prefix e.g. "ghu_" / "gho_" / "ghp_"),
- * and a trailing "…" marker so readers know it is truncated.
- * Used by logs that need to correlate 401 failures with the token's shape.
- */
-function describeToken(token: string | undefined | null): string {
-  if (!token) {
-    return "<missing>";
-  }
-  const prefix = token.slice(0, 4);
-  return `len=${token.length} prefix=${prefix}…`;
-}
-
 /** Build GitHub API request headers using the authenticated user's token */
 function githubHeaders(token: string): Record<string, string> {
-  // Diagnostic (issue #98): log token shape on every header build so we can
-  // correlate 401 failures with the token surface. No token body is emitted.
-  console.log(
-    `githubHeaders: building Authorization header token=${describeToken(token)}`,
-  );
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
@@ -94,21 +75,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
 
   /** Get the authenticated user's GitHub access token from props */
   private getGitHubToken(): string {
-    // Diagnostic (issue #98): log props propagation state. 401s may stem from
-    // props not reaching the DO, a missing accessToken field, or a stale token.
-    // Only token shape is surfaced — never the token body.
-    const propsPresent = this.props !== undefined && this.props !== null;
-    const propKeys = propsPresent
-      ? Object.keys(this.props as Record<string, unknown>).join(",")
-      : "<no-props>";
     const token = this.props?.accessToken;
-    console.log(
-      `getGitHubToken: props=${propsPresent ? "present" : "missing"} ` +
-        `propKeys=[${propKeys}] ` +
-        `githubUserId=${this.props?.githubUserId ?? "<missing>"} ` +
-        `githubLogin=${this.props?.githubLogin ?? "<missing>"} ` +
-        `token=${describeToken(token)}`,
-    );
     if (!token) {
       throw new Error("No GitHub access token available");
     }
@@ -865,13 +832,6 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           ),
       },
       async ({ repo, path, ref }) => {
-        // Diagnostic (issue #98): entry log to confirm handler invocation and
-        // parameter shape. Helps distinguish "handler never ran" from
-        // "handler ran but token missing".
-        console.log(
-          `get_doc_content: entry repo=${repo} path=${path} ref=${ref ?? "<default>"}`,
-        );
-
         const token = this.getGitHubToken();
         const headers = githubHeaders(token);
 
@@ -902,29 +862,8 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
 
         if (!response.ok) {
           const body = await response.text().catch(() => "");
-          // Diagnostic (issue #98): surface auth-relevant response headers on
-          // failure so we can distinguish scope issues (X-OAuth-Scopes),
-          // auth-challenge details (www-authenticate), and rate-limit state.
-          // These headers do not contain the token body.
-          const diagHeaders = {
-            "x-oauth-scopes": response.headers.get("x-oauth-scopes"),
-            "x-accepted-oauth-scopes": response.headers.get(
-              "x-accepted-oauth-scopes",
-            ),
-            "www-authenticate": response.headers.get("www-authenticate"),
-            "x-github-request-id": response.headers.get("x-github-request-id"),
-            "x-ratelimit-remaining": response.headers.get(
-              "x-ratelimit-remaining",
-            ),
-            "x-ratelimit-resource": response.headers.get(
-              "x-ratelimit-resource",
-            ),
-          };
           console.error(
-            `get_doc_content: GitHub API returned ${response.status} for ${repo}/${path}: ` +
-              `token=${describeToken(token)} ` +
-              `headers=${JSON.stringify(diagHeaders)} ` +
-              `body=${body}`,
+            `get_doc_content: GitHub API returned ${response.status} for ${repo}/${path}: ${body}`,
           );
           return {
             content: [
