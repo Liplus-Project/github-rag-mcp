@@ -4,7 +4,7 @@
   "display_name": "GitHub RAG MCP",
   "version": "0.1.0",
   "description": "Semantic search for GitHub issues and PRs via Cloudflare Worker + Vectorize.",
-  "long_description": "GitHub RAG MCP provides AI with ambient context about GitHub issue/PR state via semantic and structured search. Issues and PRs are indexed into Cloudflare Vectorize with BGE-M3 embeddings, enabling natural language search with optional metadata filters. Counterpart to github-webhook-mcp (push-based notifications) — together they give AI a complete view of GitHub project state.",
+  "long_description": "GitHub RAG MCP is a memory-DB surface over GitHub project state: issues, PRs, releases, repository docs, commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments are indexed into Cloudflare Vectorize (BGE-M3 dense) + D1 FTS5 (BM25 sparse) and fused via RRF + cross-encoder rerank. A single consolidated tool (search_issues) handles hybrid semantic search, time-ordered activity scan, and inline doc content fetch, selected via its query / sort / include_content axes. Counterpart to github-webhook-mcp (push-based notifications) — together they give AI a complete view of GitHub project state.",
   "author": {
     "name": "Liplus Project",
     "url": "https://github.com/Liplus-Project"
@@ -42,19 +42,7 @@
   "tools": [
     {
       "name": "search_issues",
-      "description": "3-tier hybrid search (dense + sparse BM25 + cross-encoder rerank) for GitHub issues, PRs, releases, documentation, and commit diffs with structured filters."
-    },
-    {
-      "name": "get_issue_context",
-      "description": "Get aggregated context for a single issue/PR including related PRs, branch status, and CI status."
-    },
-    {
-      "name": "get_doc_content",
-      "description": "Retrieve the content of a document file (.md) from a GitHub repository."
-    },
-    {
-      "name": "list_recent_activity",
-      "description": "List recent issue/PR activity across tracked repositories."
+      "description": "Unified search across GitHub issues, PRs, releases, docs, commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments. Three modes selected via query/sort axes: (1) hybrid semantic search (dense BGE-M3 + sparse BM25 fused via RRF + cross-encoder rerank), (2) time-ordered activity scan (empty query + sort), (3) doc content fetch (include_content=true inlines raw file content for top doc results). Structured filters: repo, state, labels, milestone, assignee, type."
     }
   ],
   "compatibility": {
