@@ -50,3 +50,18 @@ crons = ["0 * * * *"]
 # Environment variables
 [vars]
 POLL_REPOS = "Liplus-Project/github-webhook-mcp,Liplus-Project/github-rag-mcp,Liplus-Project/liplus-desktop,Liplus-Project/liplus-language,Liplus-Project/dipper_ai"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
