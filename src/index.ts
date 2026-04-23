@@ -38,6 +38,9 @@ import { RagMcpAgentV2 } from "./mcp.js";
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
 
+// Durable Object: MCP server — legacy stub (retained for migration compatibility only).
+export { RagMcpAgent } from "./mcp.js";
+
 // Durable Object: MCP server (tools: search_issues, get_issue_context, list_recent_activity)
 export { RagMcpAgentV2 } from "./mcp.js";
 
