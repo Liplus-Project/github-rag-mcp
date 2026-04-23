@@ -81,11 +81,71 @@ GitHub webhooks + GitHub API
 
 ## MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `search_issues` | issue / pull request / release / documentation / commit diff を 3 段 hybrid retrieval (dense + sparse → RRF 合成 → cross-encoder rerank) と structured filter で検索する |
-| `get_issue_context` | 単一 issue / pull request の集約状態を返す。linked PR、branch、CI、sub-issue、related release を含む |
-| `list_recent_activity` | 追跡対象 repository の recent activity を返す。issue、PR、release、documentation 更新を含む |
+この MCP サーバーが公開するツールは 1 つに統合されています。意味検索、時系列 activity scan、doc 本文取得のいずれも `search_issues` のパラメータ経由で扱えます。以前の build で分かれていた `get_issue_context` / `get_doc_content` / `list_recent_activity` は削除され、用途は下記パラメータに吸収されました。
+
+### `search_issues`
+
+GitHub の issue / pull request / release / documentation / commit diff を対象にした統合検索ツールです。
+
+`query` と `sort` の組み合わせで、以下の 3 モードを切り替えます。
+
+1. **ハイブリッド意味検索 (既定)** — dense BGE-M3 (Vectorize) + sparse BM25 (D1 FTS5) を Reciprocal Rank Fusion (RRF, k=60) で合成し、`@cf/baai/bge-reranker-base` cross-encoder で rerank。自然言語 `query` を渡します。
+2. **時系列 activity scan** — `query` を省略または空にし、`sort` を `"updated_desc"` / `"created_desc"` に設定します。`since` / `until` を併用して窓を絞れます。従来の `list_recent_activity` を置き換えます。
+3. **doc 本文取得** — `include_content: true` を指定すると、`type="doc"` 結果の本文が GitHub contents API 経由で取得され、該当行の `content` フィールドに inline されます。API fan-out を抑えるため先頭の数件に絞られます。従来の `get_doc_content` を置き換えます。
+
+structured filter (`repo` / `state` / `labels` / `milestone` / `assignee` / `type`) はすべてのモードで有効です。
+
+#### パラメータ
+
+| 名前 | 型 | 説明 |
+|------|----|------|
+| `query` | string (省略可) | 自然言語クエリ。省略または空文字で scan モード。 |
+| `repo` | string | repository (`owner/repo`) で絞り込み。 |
+| `state` | `"open"` / `"closed"` / `"all"` | state で絞り込み (既定 `all`)。 |
+| `labels` | string[] | label 名で AND 絞り込み。 |
+| `milestone` | string | milestone title で絞り込み。 |
+| `assignee` | string | assignee login で絞り込み。 |
+| `type` | `"issue"` / `"pull_request"` / `"release"` / `"doc"` / `"diff"` / `"all"` | type で絞り込み (既定 `all`)。 |
+| `top_k` | number | 最大件数 (既定 10、上限 50)。 |
+| `fusion` | `"rrf"` / `"dense_only"` / `"sparse_only"` | fusion 戦略 (既定 `rrf`)。scan モードでは無視。 |
+| `rerank` | boolean | cross-encoder rerank (既定 `true`)。scan モードでは無視。 |
+| `sort` | `"relevance"` / `"updated_desc"` / `"created_desc"` | 並び順。query ありの既定は `relevance`、query なしの既定は `updated_desc`。時系列指定は ranker score を上書きします。 |
+| `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。 |
+| `until` | ISO 8601 文字列 | `updated_at < until` の結果だけを残します。 |
+| `include_content` | boolean | 上位 doc 結果に本文を inline する (既定 `false`)。 |
+
+#### 使用例
+
+特定トピックの意味検索:
+
+```json
+{
+  "query": "rerank latency budget",
+  "repo": "Liplus-Project/github-rag-mcp",
+  "top_k": 5
+}
+```
+
+直近 24 時間の時系列 activity scan:
+
+```json
+{
+  "sort": "updated_desc",
+  "since": "2026-04-22T00:00:00Z",
+  "top_k": 20
+}
+```
+
+意味検索しつつ doc 上位の本文を inline 取得:
+
+```json
+{
+  "query": "memory philosophy",
+  "type": "doc",
+  "include_content": true,
+  "top_k": 3
+}
+```
 
 ## Repository Structure
 

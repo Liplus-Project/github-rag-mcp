@@ -1,11 +1,11 @@
 /**
- * RagMcpAgent — MCP server Durable Object exposing semantic search tools.
+ * RagMcpAgent — MCP server Durable Object exposing a single consolidated
+ * semantic search tool.
  *
  * Tools:
- *   search_issues       — semantic + structured search via Vectorize + Workers AI
- *   get_issue_context   — aggregated issue view with related PRs, branch, CI
- *   get_doc_content     — retrieve .md document content from a repository
- *   list_recent_activity — recent changes across tracked repositories
+ *   search_issues — hybrid search + time-ordered activity scan + inline doc
+ *                    content fetch. Single entry point for GitHub issue / PR /
+ *                    release / doc / commit-diff retrieval.
  *
  * Extends McpAgent from "agents/mcp" (same pattern as github-webhook-mcp).
  * Per-user: each authenticated user gets their own DO instance via
@@ -46,19 +46,14 @@ function githubHeaders(token: string): Record<string, string> {
   };
 }
 
-/** Classify activity type based on issue timestamps and state */
-function classifyActivity(
-  record: IssueRecord,
-  since: string,
-): "created" | "updated" | "closed" {
-  if (record.state === "closed" && record.updatedAt >= since) {
-    return "closed";
-  }
-  if (record.createdAt >= since) {
-    return "created";
-  }
-  return "updated";
-}
+/**
+ * Upper bound on how many top-ranked doc rows get their raw content inlined
+ * when include_content=true. Separate (and smaller) from top_k to keep
+ * GitHub contents API fan-out bounded even when the caller requests a large
+ * top_k for generic scanning. Callers that need more should page via
+ * additional queries rather than lifting this cap.
+ */
+const INCLUDE_CONTENT_MAX_DOCS = 5;
 
 export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
   // @ts-expect-error -- McpServer version mismatch between top-level SDK and agents' bundled copy (same issue as webhook-mcp; wrangler resolves at bundle time)
@@ -86,16 +81,27 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Hybrid search (dense + sparse + cross-encoder reranker) for GitHub issues, PRs, releases, repository documentation, and commit diffs. " +
-        "Dense retrieval uses BGE-M3 embeddings over Vectorize; sparse retrieval uses BM25 over D1 FTS5 " +
-        "with a porter tokenizer for natural-language surfaces and a trigram tokenizer for commit diffs. " +
-        "The two rankers are combined via Reciprocal Rank Fusion (RRF, k=60). " +
-        "By default, the fused candidates are then re-scored with a cross-encoder reranker " +
-        "(@cf/baai/bge-reranker-base) — set rerank: false to skip this stage. " +
-        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply to both sides. " +
-        "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files and non-.md files that are not present in the live document index.",
+      "Unified search across GitHub issues, PRs, releases, repository documentation, and commit diffs. " +
+        "Three modes via the query / sort axes:\n" +
+        "  1. Hybrid semantic search (default): dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, " +
+        "fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with a cross-encoder " +
+        "(@cf/baai/bge-reranker-base; set rerank: false to skip).\n" +
+        "  2. Time-ordered activity scan: pass an empty (or omitted) query with sort=\"updated_desc\" or \"created_desc\"; " +
+        "optionally narrow via since / until to list recent issue / PR / release / doc / diff activity.\n" +
+        "  3. Doc content fetch: pass include_content: true to inline the raw file content of top doc results " +
+        "(fetched from the GitHub contents API; capped at the first few doc rows).\n" +
+        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across all modes. " +
+        "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files " +
+        "and non-.md files that are not present in the live document index.",
       {
-        query: z.string().describe("Natural language search query"),
+        query: z
+          .string()
+          .optional()
+          .describe(
+            "Natural language search query. When omitted or empty, the tool " +
+              "switches to metadata-only scan mode and results are ordered " +
+              "by the timestamp implied by sort (default sort=\"updated_desc\" for empty query).",
+          ),
         repo: z
           .string()
           .optional()
@@ -136,7 +142,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           .describe(
             "Fusion strategy. Default: rrf (Reciprocal Rank Fusion over dense + sparse). " +
               "dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only. " +
-              "Use rrf unless debugging a specific ranker.",
+              "Use rrf unless debugging a specific ranker. Ignored in metadata-only scan mode (empty query).",
           ),
         rerank: z
           .boolean()
@@ -147,21 +153,320 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
               "When enabled, the fused (or single-ranker) candidates are overfetched (top_k × 5, max 50), " +
               "post-filtered, then re-scored by the cross-encoder before being trimmed to top_k. " +
               "Set false to disable (faster, no Workers AI rerank cost; recommended for debugging or " +
-              "when query is a short identifier where lexical match is already decisive).",
+              "when query is a short identifier where lexical match is already decisive). " +
+              "Ignored in metadata-only scan mode (empty query).",
+          ),
+        sort: z
+          .enum(["relevance", "updated_desc", "created_desc"])
+          .optional()
+          .describe(
+            "Result ordering. Default: \"relevance\" when query is non-empty, \"updated_desc\" when query is empty. " +
+              "\"updated_desc\" / \"created_desc\" force time-ordered output and override ranker scores.",
+          ),
+        since: z
+          .string()
+          .optional()
+          .describe(
+            "ISO 8601 timestamp (inclusive) — keep only results whose updated_at >= since. " +
+              "Pair with sort=\"updated_desc\" + empty query for an activity scan.",
+          ),
+        until: z
+          .string()
+          .optional()
+          .describe(
+            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until.",
+          ),
+        include_content: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When true and a result row is type=\"doc\", fetch the file content from the GitHub " +
+              "contents API and inline it as a \"content\" field on that row. Capped at the first " +
+              `${INCLUDE_CONTENT_MAX_DOCS} doc rows in the result set to bound API fan-out. ` +
+              "Non-doc rows are unaffected.",
           ),
       },
-      async ({ query, repo, state, labels, milestone, assignee, type, top_k, fusion, rerank }) => {
+      async ({
+        query,
+        repo,
+        state,
+        labels,
+        milestone,
+        assignee,
+        type,
+        top_k,
+        fusion,
+        rerank,
+        sort,
+        since,
+        until,
+        include_content,
+      }) => {
         const requestedTopK = top_k ?? 10;
         const fusionMode = fusion ?? "rrf";
         const rerankEnabled = rerank ?? true;
+        const trimmedQuery = (query ?? "").trim();
+        const isScanMode = trimmedQuery.length === 0;
+        const effectiveSort =
+          sort ?? (isScanMode ? "updated_desc" : "relevance");
+        const includeContent = include_content ?? false;
+
+        // ── Scan mode (empty query): pull time-ordered metadata ─────
+        // Skip Vectorize / FTS5 / reranker entirely and aggregate from
+        // IssueStore's recency endpoints. This path subsumes the former
+        // list_recent_activity tool; `since` acts as the window floor and
+        // `until` as the upper bound (applied after the store returns).
+        if (isScanMode) {
+          const store = this.getStore();
+          const effectiveSince =
+            since ??
+            new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+          // Overfetch so the `until` filter + type filter can drop rows
+          // without starving the final page. Bounded at 100 (the store's
+          // per-endpoint cap).
+          const storeLimit = Math.min(requestedTopK * 5, 100);
+
+          const buildParams = (): URLSearchParams => {
+            const p = new URLSearchParams();
+            p.set("since", effectiveSince);
+            p.set("limit", String(storeLimit));
+            if (repo) p.set("repo", repo);
+            return p;
+          };
+
+          type ScanRow = {
+            type: "issue" | "pull_request" | "release" | "doc" | "diff";
+            repo: string;
+            number: number;
+            title: string;
+            state: string;
+            labels: string[];
+            milestone: string;
+            assignees: string[];
+            url: string;
+            updated_at: string;
+            created_at: string;
+            tag_name?: string;
+            prerelease?: boolean;
+            doc_path?: string;
+            commit_sha?: string;
+            file_path?: string;
+            file_status?: string;
+            commit_date?: string;
+            commit_author?: string;
+          };
+          const rows: ScanRow[] = [];
+
+          const wantType = (t: ScanRow["type"]): boolean =>
+            !type || type === "all" || type === t;
+
+          // Issues / PRs
+          if (wantType("issue") || wantType("pull_request")) {
+            try {
+              const res = await store.fetch(
+                new Request(`http://store/recent?${buildParams().toString()}`),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as IssueRecord[];
+                for (const r of records) {
+                  if (!wantType(r.type)) continue;
+                  rows.push({
+                    type: r.type,
+                    repo: r.repo,
+                    number: r.number,
+                    title: r.title,
+                    state: r.state,
+                    labels: r.labels,
+                    milestone: r.milestone,
+                    assignees: r.assignees,
+                    url: `https://github.com/${r.repo}/issues/${r.number}`,
+                    updated_at: r.updatedAt,
+                    created_at: r.createdAt,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical; continue with other sources.
+            }
+          }
+
+          // Releases
+          if (wantType("release")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-releases?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as ReleaseRecord[];
+                for (const r of records) {
+                  rows.push({
+                    type: "release",
+                    repo: r.repo,
+                    number: 0,
+                    title: r.name || r.tagName,
+                    state: "published",
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${r.repo}/releases/tag/${r.tagName}`,
+                    updated_at: r.publishedAt,
+                    created_at: r.createdAt,
+                    tag_name: r.tagName,
+                    prerelease: r.prerelease,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // Docs
+          if (wantType("doc")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-docs?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as DocRecord[];
+                for (const d of records) {
+                  rows.push({
+                    type: "doc",
+                    repo: d.repo,
+                    number: 0,
+                    title: d.path,
+                    state: "active",
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${d.repo}/blob/main/${d.path}`,
+                    updated_at: d.updatedAt,
+                    created_at: d.updatedAt,
+                    doc_path: d.path,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // Diffs
+          if (wantType("diff")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-diffs?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as DiffRecord[];
+                for (const diff of records) {
+                  const shortSha = diff.commitSha.slice(0, 7);
+                  rows.push({
+                    type: "diff",
+                    repo: diff.repo,
+                    number: 0,
+                    title: `${shortSha} ${diff.filePath}`,
+                    state: "active",
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${diff.repo}/commit/${diff.commitSha}`,
+                    updated_at: diff.commitDate,
+                    created_at: diff.indexedAt,
+                    commit_sha: diff.commitSha,
+                    file_path: diff.filePath,
+                    file_status: diff.fileStatus,
+                    commit_date: diff.commitDate,
+                    commit_author: diff.commitAuthor,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // State / milestone / assignee / labels post-filters (best-effort
+          // over the metadata we have; assignees / labels are already arrays).
+          let filteredRows = rows;
+          if (state && state !== "all") {
+            filteredRows = filteredRows.filter((r) => r.state === state);
+          }
+          if (milestone) {
+            filteredRows = filteredRows.filter((r) => r.milestone === milestone);
+          }
+          if (assignee) {
+            filteredRows = filteredRows.filter((r) =>
+              r.assignees.includes(assignee),
+            );
+          }
+          if (labels && labels.length > 0) {
+            filteredRows = filteredRows.filter((r) =>
+              labels.every((l) => r.labels.includes(l)),
+            );
+          }
+          if (until) {
+            filteredRows = filteredRows.filter((r) => r.updated_at < until);
+          }
+
+          // Time sort. "created_desc" sorts by created_at; "updated_desc"
+          // (default for scan mode) sorts by updated_at. "relevance" has no
+          // meaning in scan mode and falls back to updated_desc.
+          const sortKey: "updated_at" | "created_at" =
+            effectiveSort === "created_desc" ? "created_at" : "updated_at";
+          filteredRows.sort((a, b) => {
+            const av = (a[sortKey] as string) ?? "";
+            const bv = (b[sortKey] as string) ?? "";
+            return bv.localeCompare(av);
+          });
+
+          const pageRows = filteredRows.slice(0, requestedTopK);
+
+          // Optional doc content inlining (scan mode).
+          type ScanResultRow = ScanRow & { content?: string };
+          const items: ScanResultRow[] = pageRows;
+          if (includeContent) {
+            await this.inlineDocContent(items, repo);
+          }
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    count: items.length,
+                    mode: "scan",
+                    sort: effectiveSort,
+                    since: effectiveSince,
+                    until: until ?? null,
+                    results: items,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
+
+        // ── Search mode (non-empty query): existing hybrid pipeline ─
         // Overfetch on both sides when label/assignee post-filter is needed.
         // Also overfetch when the reranker is enabled, so the cross-encoder
         // sees enough candidates (issue #91 default: top_k × 5, capped at 50).
         // RERANK_MAX_CANDIDATES is the AI-side upper bound; we mirror it here
         // so dense and sparse fetch enough rows to feed the reranker.
         const needsPostFilter = (labels && labels.length > 0) || !!assignee;
+        const needsTimeFilter = !!since || !!until;
         const internalTopK =
-          needsPostFilter || rerankEnabled
+          needsPostFilter || needsTimeFilter || rerankEnabled
             ? Math.min(requestedTopK * 5, RERANK_MAX_CANDIDATES)
             : requestedTopK;
 
@@ -178,7 +483,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             ? Promise.resolve({ hits: [] })
             : (async () => {
                 const aiResult = await this.env.AI.run("@cf/baai/bge-m3", {
-                  text: [query],
+                  text: [trimmedQuery],
                 });
                 const vectors = (aiResult as { data: Array<number[]> }).data;
                 if (!vectors || vectors.length === 0) {
@@ -225,7 +530,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
                 }
                 if (milestone) ftsFilter.milestone = milestone;
                 try {
-                  return await queryFts(this.env.DB_FTS, query, internalTopK, ftsFilter);
+                  return await queryFts(this.env.DB_FTS, trimmedQuery, internalTopK, ftsFilter);
                 } catch (err) {
                   console.error(
                     "search_issues: D1 FTS5 query failed:",
@@ -301,7 +606,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           }
         }
 
-        // ── Post-filter: labels (AND) and assignee ───────────────
+        // ── Post-filter: labels (AND), assignee, and time window ─
         // Applied after fusion on the combined view so both dense-only and sparse-only
         // hits are filtered consistently. Prefers dense metadata when available
         // (has expanded label_0..3 / assignee_0..1 slots), falls back to sparse row
@@ -353,6 +658,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           return out;
         };
 
+        const resolveUpdatedAt = (vectorId: string): string => {
+          const p = payload.get(vectorId);
+          return p?.meta?.updated_at ?? p?.ftsRow?.updatedAt ?? "";
+        };
+
         let filtered = fused;
         if (labels && labels.length > 0) {
           filtered = filtered.filter((f) => {
@@ -366,10 +676,17 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             return all.has(assignee);
           });
         }
+        if (since) {
+          filtered = filtered.filter((f) => resolveUpdatedAt(f.vectorId) >= since);
+        }
+        if (until) {
+          filtered = filtered.filter((f) => resolveUpdatedAt(f.vectorId) < until);
+        }
 
         // ── Reranker (3rd tier): cross-encoder re-scoring ────────
         // Only invoked when:
         //   - rerank is enabled (default true),
+        //   - sort is "relevance" (time-sorted callers do not need ranker score),
         //   - more than one candidate survived post-filter (single-element
         //     reranking would not change order),
         //   - we have content text to feed (sparse FtsRow has it; dense-only
@@ -380,7 +697,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         // shape it returns null, in which case we keep the post-filter order.
         const rerankScores = new Map<string, number>();
         let rerankApplied = false;
-        if (rerankEnabled && filtered.length > 1) {
+        if (
+          rerankEnabled &&
+          effectiveSort === "relevance" &&
+          filtered.length > 1
+        ) {
           const rerankInput = filtered.map((f) => {
             const p = payload.get(f.vectorId);
             // Prefer sparse content (always populated when present), fall back
@@ -391,7 +712,7 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
 
           const reranked = await rerankCandidates(
             this.env,
-            query,
+            trimmedQuery,
             rerankInput,
             // Ask the reranker to return all rows so we can attach scores even
             // to candidates that drop below requestedTopK; we trim ourselves.
@@ -420,11 +741,61 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           }
         }
 
-        // Trim to requested top-K after fusion + post-filter (+ rerank).
+        // ── Time sort (override ranker order) ─────────────────────
+        // When the caller asked for time-ordered output even on a semantic
+        // query, re-sort `filtered` by the requested timestamp column.
+        // Rows missing the column fall to the tail (empty string sorts low
+        // under localeCompare-desc semantics).
+        if (effectiveSort === "updated_desc" || effectiveSort === "created_desc") {
+          const resolveTimeKey = (vectorId: string): string => {
+            const p = payload.get(vectorId);
+            if (effectiveSort === "updated_desc") {
+              return p?.meta?.updated_at ?? p?.ftsRow?.updatedAt ?? "";
+            }
+            // created_desc: VectorMetadata has no created_at; FTS hit has no
+            // createdAt either, so both collapse to updated_at as the best
+            // available proxy. Documented in the schema description.
+            return p?.meta?.updated_at ?? p?.ftsRow?.updatedAt ?? "";
+          };
+          filtered = [...filtered].sort((a, b) => {
+            const av = resolveTimeKey(a.vectorId);
+            const bv = resolveTimeKey(b.vectorId);
+            return bv.localeCompare(av);
+          });
+        }
+
+        // Trim to requested top-K after fusion + post-filter (+ rerank / time sort).
         filtered = filtered.slice(0, requestedTopK);
 
         // ── Format results ───────────────────────────────────────
-        const items = filtered.map((f) => {
+        type ResultItem = {
+          number: number;
+          title: string;
+          state: string;
+          type: string;
+          labels: string[];
+          milestone: string;
+          assignees: string[];
+          score: number;
+          dense_score: number | null;
+          sparse_score: number | null;
+          dense_rank: number | null;
+          sparse_rank: number | null;
+          rerank_score: number | null;
+          url: string;
+          updated_at: string;
+          repo: string;
+          tag_name?: string;
+          doc_path?: string;
+          commit_sha?: string;
+          file_path?: string;
+          file_status?: string;
+          commit_date?: string;
+          commit_author?: string;
+          content?: string;
+        };
+
+        const items: ResultItem[] = filtered.map((f) => {
           const p = payload.get(f.vectorId);
           const meta = p?.meta;
           const ftsRow = p?.ftsRow;
@@ -492,11 +863,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         // Enrich with titles from IssueStore / release store / doc store
         const store = this.getStore();
         for (const item of items) {
-          if (item.type === "release" && item.repo && (item as Record<string, unknown>).tag_name) {
+          if (item.type === "release" && item.repo && item.tag_name) {
             try {
               const res = await store.fetch(
                 new Request(
-                  `http://store/release?repo=${encodeURIComponent(item.repo)}&tag_name=${encodeURIComponent((item as Record<string, unknown>).tag_name as string)}`,
+                  `http://store/release?repo=${encodeURIComponent(item.repo)}&tag_name=${encodeURIComponent(item.tag_name)}`,
                 ),
               );
               if (res.ok) {
@@ -506,14 +877,14 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             } catch {
               // Best-effort enrichment
             }
-          } else if (item.type === "doc" && item.repo && (item as Record<string, unknown>).doc_path) {
+          } else if (item.type === "doc" && item.repo && item.doc_path) {
             // Use the file path as the title for docs
-            item.title = (item as Record<string, unknown>).doc_path as string;
+            item.title = item.doc_path;
           } else if (item.type === "diff") {
             // Title = "{short-sha} {file_path}" so the result list remains
             // scannable without making an additional API call.
-            const fp = (item as Record<string, unknown>).file_path as string;
-            const sha = (item as Record<string, unknown>).commit_sha as string;
+            const fp = item.file_path ?? "";
+            const sha = item.commit_sha ?? "";
             const shortSha = sha ? sha.slice(0, 7) : "";
             item.title = [shortSha, fp].filter(Boolean).join(" ");
           } else if (item.repo && item.number) {
@@ -533,6 +904,11 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           }
         }
 
+        // Optional doc content inlining (search mode).
+        if (includeContent) {
+          await this.inlineDocContent(items);
+        }
+
         return {
           content: [
             {
@@ -540,18 +916,22 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
               text: JSON.stringify(
                 {
                   count: items.length,
+                  mode: "search",
                   fusion: fusionMode,
+                  sort: effectiveSort,
                   dense_candidates: denseResult.hits.length,
                   sparse_candidates: sparseHits.length,
                   // rerank metadata:
                   //   - rerank_requested: caller-facing flag (default true)
                   //   - rerank_applied: whether the cross-encoder actually
                   //     ran and re-scored. False when disabled, when there
-                  //     was ≤1 candidate to rerank, or when the AI call
-                  //     errored / returned an unexpected shape (graceful
-                  //     fallback to fusion order).
+                  //     was ≤1 candidate to rerank, when sort != "relevance",
+                  //     or when the AI call errored / returned an unexpected
+                  //     shape (graceful fallback to fusion order).
                   rerank_requested: rerankEnabled,
                   rerank_applied: rerankApplied,
+                  since: since ?? null,
+                  until: until ?? null,
                   results: items,
                 },
                 null,
@@ -562,559 +942,53 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
         };
       },
     );
+  }
 
-    // ── get_issue_context ──────────────────────────────────────
-    this.server.tool(
-      "get_issue_context",
-      "Get aggregated context for a single issue/PR including related PRs, branch status, and CI status.",
-      {
-        repo: z
-          .string()
-          .describe("Repository (owner/repo)"),
-        number: z
-          .number()
-          .int()
-          .positive()
-          .describe("Issue or PR number"),
-      },
-      async ({ repo, number }) => {
-        const token = this.getGitHubToken();
-        const headers = githubHeaders(token);
+  /**
+   * Inline raw file content on up to INCLUDE_CONTENT_MAX_DOCS doc rows.
+   * Mutates the rows in place (adds a `content` field). Non-doc rows and
+   * rows beyond the cap are left untouched.
+   *
+   * Scope note: top-N doc fetch is a fan-out bound for GitHub contents API.
+   * Callers needing more doc bodies should page by repeating the search.
+   */
+  private async inlineDocContent<
+    T extends {
+      type: string;
+      repo?: string;
+      doc_path?: string;
+      content?: string;
+    },
+  >(rows: T[], fallbackRepo?: string): Promise<void> {
+    const docRows = rows.filter((r) => r.type === "doc");
+    if (docRows.length === 0) return;
+    const toFetch = docRows.slice(0, INCLUDE_CONTENT_MAX_DOCS);
 
-        // 1. Read basic info from IssueStore
-        const store = this.getStore();
-        const storeRes = await store.fetch(
-          new Request(
-            `http://store/issue?repo=${encodeURIComponent(repo)}&number=${number}`,
-          ),
-        );
+    const token = this.getGitHubToken();
+    const headers = githubHeaders(token);
 
-        let issueData: IssueRecord | null = null;
-        if (storeRes.ok) {
-          issueData = (await storeRes.json()) as IssueRecord;
-        }
-
-        // 2. Fetch issue/PR details from GitHub API (for body and additional context)
-        let ghIssue: Record<string, unknown> | null = null;
-        let apiFetchError: string | null = null;
+    await Promise.all(
+      toFetch.map(async (row) => {
+        const docPath = row.doc_path;
+        const itemRepo = row.repo ?? fallbackRepo ?? "";
+        if (!docPath || !itemRepo) return;
+        const url = new URL(`${GITHUB_API}/repos/${itemRepo}/contents/${docPath}`);
         try {
-          const issueRes = await fetch(
-            `${GITHUB_API}/repos/${repo}/issues/${number}`,
-            { headers },
-          );
-          if (issueRes.ok) {
-            ghIssue = (await issueRes.json()) as Record<string, unknown>;
-          } else {
-            apiFetchError = `GitHub API returned ${issueRes.status} ${issueRes.statusText}`;
-            console.error(
-              `get_issue_context: failed to fetch ${repo}#${number} from GitHub API: ${apiFetchError}`,
-            );
-          }
-        } catch (err) {
-          apiFetchError = err instanceof Error ? err.message : String(err);
-          console.error(
-            `get_issue_context: error fetching ${repo}#${number} from GitHub API: ${apiFetchError}`,
-          );
-        }
-
-        // 3. Fetch linked PRs via timeline events
-        const linkedPRs: Array<{
-          number: number;
-          title: string;
-          state: string;
-          branch: string;
-        }> = [];
-        try {
-          const timelineRes = await fetch(
-            `${GITHUB_API}/repos/${repo}/issues/${number}/timeline?per_page=100`,
-            { headers: { ...headers, Accept: "application/vnd.github.mockingbird-preview+json" } },
-          );
-          if (timelineRes.ok) {
-            const events = (await timelineRes.json()) as Array<{
-              event?: string;
-              source?: { issue?: { number: number; title: string; state: string; pull_request?: { url: string }; head?: { ref: string } } };
-            }>;
-            for (const event of events) {
-              if (
-                event.event === "cross-referenced" &&
-                event.source?.issue?.pull_request
-              ) {
-                linkedPRs.push({
-                  number: event.source.issue.number,
-                  title: event.source.issue.title,
-                  state: event.source.issue.state,
-                  branch: event.source.issue.head?.ref ?? "",
-                });
-              }
-            }
-          }
+          const res = await fetch(url.toString(), { headers });
+          if (!res.ok) return;
+          const data = (await res.json()) as {
+            content?: string;
+            encoding?: string;
+          };
+          if (!data.content) return;
+          // GitHub returns base64-encoded content; decode via Uint8Array for UTF-8 safety.
+          const binary = atob(data.content.replace(/\n/g, ""));
+          const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+          row.content = new TextDecoder().decode(bytes);
         } catch {
-          // Non-critical
+          // Best-effort inline; a failed fetch leaves `content` unset.
         }
-
-        // 4. If this is a PR, fetch branch and CI status
-        let branchStatus: {
-          name: string;
-          ahead: number;
-          behind: number;
-        } | null = null;
-        let ciStatus: Array<{
-          name: string;
-          conclusion: string | null;
-          status: string;
-          url: string;
-        }> = [];
-
-        const isPR =
-          issueData?.type === "pull_request" ||
-          !!(ghIssue as Record<string, unknown> | null)?.pull_request;
-
-        if (isPR) {
-          try {
-            const prRes = await fetch(
-              `${GITHUB_API}/repos/${repo}/pulls/${number}`,
-              { headers },
-            );
-            if (prRes.ok) {
-              const pr = (await prRes.json()) as {
-                head: { ref: string; sha: string };
-                base: { ref: string };
-              };
-              branchStatus = {
-                name: pr.head.ref,
-                ahead: 0,
-                behind: 0,
-              };
-
-              // Fetch CI check runs for the head SHA
-              const checksRes = await fetch(
-                `${GITHUB_API}/repos/${repo}/commits/${pr.head.sha}/check-runs`,
-                { headers },
-              );
-              if (checksRes.ok) {
-                const checksData = (await checksRes.json()) as {
-                  check_runs: Array<{
-                    name: string;
-                    conclusion: string | null;
-                    status: string;
-                    html_url: string;
-                  }>;
-                };
-                ciStatus = checksData.check_runs.map((cr) => ({
-                  name: cr.name,
-                  conclusion: cr.conclusion,
-                  status: cr.status,
-                  url: cr.html_url,
-                }));
-              }
-            }
-          } catch {
-            // Non-critical
-          }
-        }
-
-        // 5. Fetch sub-issues if this is a parent issue (via GitHub sub-issues API)
-        let subIssues: Array<{
-          number: number;
-          title: string;
-          state: string;
-        }> = [];
-        try {
-          const subRes = await fetch(
-            `${GITHUB_API}/repos/${repo}/issues/${number}/sub_issues?per_page=50`,
-            { headers },
-          );
-          if (subRes.ok) {
-            const subData = (await subRes.json()) as Array<{
-              number: number;
-              title: string;
-              state: string;
-            }>;
-            subIssues = subData.map((s) => ({
-              number: s.number,
-              title: s.title,
-              state: s.state,
-            }));
-          }
-        } catch {
-          // Sub-issues API may not be available
-        }
-
-        // 6. Find related releases (for closed issues, find releases published after close)
-        let relatedReleases: Array<{
-          tag_name: string;
-          name: string;
-          prerelease: boolean;
-          published_at: string;
-          url: string;
-        }> = [];
-
-        const issueState = issueData?.state ?? (ghIssue as Record<string, unknown> | null)?.state ?? "";
-        if (issueState === "closed") {
-          // Use updated_at as proxy for close time
-          const closeTime = issueData?.updatedAt ?? "";
-          if (closeTime) {
-            try {
-              const releasesRes = await store.fetch(
-                new Request(
-                  `http://store/releases-after?repo=${encodeURIComponent(repo)}&after=${encodeURIComponent(closeTime)}&limit=3`,
-                ),
-              );
-              if (releasesRes.ok) {
-                const releases = (await releasesRes.json()) as ReleaseRecord[];
-                relatedReleases = releases.map((r) => ({
-                  tag_name: r.tagName,
-                  name: r.name,
-                  prerelease: r.prerelease,
-                  published_at: r.publishedAt,
-                  url: `https://github.com/${repo}/releases/tag/${r.tagName}`,
-                }));
-              }
-            } catch {
-              // Non-critical
-            }
-          }
-        }
-
-        // 7. Aggregate result
-        const result: Record<string, unknown> = {
-          repo,
-          number,
-          title: issueData?.title ?? (ghIssue as Record<string, unknown> | null)?.title ?? "",
-          body: (ghIssue as Record<string, unknown> | null)?.body ?? null,
-          state: issueData?.state ?? (ghIssue as Record<string, unknown> | null)?.state ?? "",
-          type: issueData?.type ?? (isPR ? "pull_request" : "issue"),
-          labels: issueData?.labels ?? [],
-          milestone: issueData?.milestone ?? "",
-          assignees: issueData?.assignees ?? [],
-          created_at: issueData?.createdAt ?? "",
-          updated_at: issueData?.updatedAt ?? "",
-          url: `https://github.com/${repo}/issues/${number}`,
-          linked_prs: linkedPRs,
-          branch: branchStatus,
-          ci: ciStatus,
-          sub_issues: subIssues,
-          releases: relatedReleases,
-        };
-
-        if (apiFetchError) {
-          result.api_error = apiFetchError;
-        }
-
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(result, null, 2) },
-          ],
-        };
-      },
-    );
-
-    // ── get_doc_content ─────────────────────────────────────────
-    this.server.tool(
-      "get_doc_content",
-      "Retrieve the content of a document file (.md) from a GitHub repository. " +
-        "Use this to read documents found via search_issues with type: \"doc\". " +
-        "Returns the raw file content fetched from the repository.",
-      {
-        repo: z
-          .string()
-          .describe("Repository (owner/repo)"),
-        path: z
-          .string()
-          .describe(
-            "File path in the repository (e.g. \"docs/0-requirements.md\")",
-          ),
-        ref: z
-          .string()
-          .optional()
-          .describe(
-            "Git ref (branch, tag, or commit SHA) to fetch from. Defaults to the repository's default branch.",
-          ),
-      },
-      async ({ repo, path, ref }) => {
-        const token = this.getGitHubToken();
-        const headers = githubHeaders(token);
-
-        const url = new URL(`${GITHUB_API}/repos/${repo}/contents/${path}`);
-        if (ref) {
-          url.searchParams.set("ref", ref);
-        }
-
-        let response: Response;
-        try {
-          response = await fetch(url.toString(), { headers });
-        } catch (err) {
-          const message =
-            err instanceof Error ? err.message : String(err);
-          console.error(
-            `get_doc_content: network error fetching ${repo}/${path}: ${message}`,
-          );
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to fetch document: network error — ${message}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        if (!response.ok) {
-          const body = await response.text().catch(() => "");
-          console.error(
-            `get_doc_content: GitHub API returned ${response.status} for ${repo}/${path}: ${body}`,
-          );
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to fetch document: HTTP ${response.status} — ${body}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const data = (await response.json()) as {
-          content?: string;
-          encoding?: string;
-          name?: string;
-          path?: string;
-          size?: number;
-          sha?: string;
-          html_url?: string;
-        };
-
-        if (!data.content) {
-          console.error(
-            `get_doc_content: no content field in response for ${repo}/${path}`,
-          );
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: "Document response did not contain file content. The path may point to a directory or an unsupported file type.",
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // GitHub returns base64-encoded content; decode via Uint8Array for UTF-8 safety
-        const binary = atob(data.content.replace(/\n/g, ""));
-        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-        const decoded = new TextDecoder().decode(bytes);
-
-        const result = {
-          repo,
-          path: data.path ?? path,
-          sha: data.sha ?? "",
-          size: data.size ?? 0,
-          url: data.html_url ?? `https://github.com/${repo}/blob/main/${path}`,
-          content: decoded,
-        };
-
-        return {
-          content: [
-            { type: "text" as const, text: JSON.stringify(result, null, 2) },
-          ],
-        };
-      },
-    );
-
-    // ── list_recent_activity ───────────────────────────────────
-    this.server.tool(
-      "list_recent_activity",
-      "List recent issue/PR/release/documentation activity across tracked repositories. " +
-        "Returns changes classified as created, updated, or closed.",
-      {
-        repo: z
-          .string()
-          .optional()
-          .describe("Filter by repository (owner/repo)"),
-        since: z
-          .string()
-          .optional()
-          .describe(
-            "ISO 8601 timestamp for activity start (default: 24 hours ago)",
-          ),
-        limit: z
-          .number()
-          .min(1)
-          .max(100)
-          .optional()
-          .default(20)
-          .describe("Max results (default: 20, max: 100)"),
-      },
-      async ({ repo, since, limit }) => {
-        const effectiveSince =
-          since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-        const effectiveLimit = limit ?? 20;
-
-        // Query IssueStore for recent activity
-        const store = this.getStore();
-        const params = new URLSearchParams();
-        params.set("since", effectiveSince);
-        params.set("limit", String(effectiveLimit));
-        if (repo) {
-          params.set("repo", repo);
-        }
-
-        const res = await store.fetch(
-          new Request(`http://store/recent?${params.toString()}`),
-        );
-
-        if (!res.ok) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to fetch recent activity: ${res.status}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const records = (await res.json()) as IssueRecord[];
-
-        // Classify activity and format results
-        const activities: Array<Record<string, unknown>> = records.map((record) => ({
-          activity_type: classifyActivity(record, effectiveSince),
-          number: record.number,
-          title: record.title,
-          type: record.type,
-          state: record.state,
-          labels: record.labels,
-          repo: record.repo,
-          url: `https://github.com/${record.repo}/issues/${record.number}`,
-          updated_at: record.updatedAt,
-          created_at: record.createdAt,
-        }));
-
-        // Fetch recent releases too
-        const releaseParams = new URLSearchParams();
-        releaseParams.set("since", effectiveSince);
-        releaseParams.set("limit", String(effectiveLimit));
-        if (repo) {
-          releaseParams.set("repo", repo);
-        }
-
-        const releaseRes = await store.fetch(
-          new Request(`http://store/recent-releases?${releaseParams.toString()}`),
-        );
-
-        if (releaseRes.ok) {
-          const releases = (await releaseRes.json()) as ReleaseRecord[];
-          for (const release of releases) {
-            activities.push({
-              activity_type: "created",
-              number: 0,
-              title: release.name || release.tagName,
-              type: "release",
-              state: "published",
-              labels: [],
-              repo: release.repo,
-              tag_name: release.tagName,
-              prerelease: release.prerelease,
-              url: `https://github.com/${release.repo}/releases/tag/${release.tagName}`,
-              updated_at: release.publishedAt,
-              created_at: release.createdAt,
-            });
-          }
-        }
-
-        // Fetch recent docs too
-        const docParams = new URLSearchParams();
-        docParams.set("since", effectiveSince);
-        docParams.set("limit", String(effectiveLimit));
-        if (repo) {
-          docParams.set("repo", repo);
-        }
-
-        const docRes = await store.fetch(
-          new Request(`http://store/recent-docs?${docParams.toString()}`),
-        );
-
-        if (docRes.ok) {
-          const docs = (await docRes.json()) as DocRecord[];
-          for (const doc of docs) {
-            activities.push({
-              activity_type: "updated",
-              number: 0,
-              title: doc.path,
-              type: "doc",
-              state: "active",
-              labels: [],
-              repo: doc.repo,
-              doc_path: doc.path,
-              url: `https://github.com/${doc.repo}/blob/main/${doc.path}`,
-              updated_at: doc.updatedAt,
-              created_at: doc.updatedAt,
-            });
-          }
-        }
-
-        // Fetch recent commit diffs too
-        const diffParams = new URLSearchParams();
-        diffParams.set("since", effectiveSince);
-        diffParams.set("limit", String(effectiveLimit));
-        if (repo) {
-          diffParams.set("repo", repo);
-        }
-
-        const diffRes = await store.fetch(
-          new Request(`http://store/recent-diffs?${diffParams.toString()}`),
-        );
-
-        if (diffRes.ok) {
-          const diffs = (await diffRes.json()) as DiffRecord[];
-          for (const diff of diffs) {
-            const shortSha = diff.commitSha.slice(0, 7);
-            activities.push({
-              activity_type: "updated",
-              number: 0,
-              title: `${shortSha} ${diff.filePath}`,
-              type: "diff",
-              state: "active",
-              labels: [],
-              repo: diff.repo,
-              commit_sha: diff.commitSha,
-              file_path: diff.filePath,
-              file_status: diff.fileStatus,
-              url: `https://github.com/${diff.repo}/commit/${diff.commitSha}`,
-              updated_at: diff.commitDate,
-              created_at: diff.indexedAt,
-            });
-          }
-        }
-
-        // Sort combined activities by updated_at descending and apply limit
-        activities.sort((a, b) => {
-          const aTime = (a.updated_at as string) ?? "";
-          const bTime = (b.updated_at as string) ?? "";
-          return bTime.localeCompare(aTime);
-        });
-        const limitedActivities = activities.slice(0, effectiveLimit);
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  count: limitedActivities.length,
-                  since: effectiveSince,
-                  activities: limitedActivities,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
-      },
+      }),
     );
   }
 }

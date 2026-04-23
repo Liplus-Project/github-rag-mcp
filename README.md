@@ -81,11 +81,71 @@ See:
 
 ## MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `search_issues` | 3-tier hybrid retrieval (dense + sparse → RRF fusion → cross-encoder rerank) across issues, pull requests, releases, documentation, and commit diffs with structured filters. |
-| `get_issue_context` | Aggregated state for one issue or pull request, including linked PRs, branch information, CI state, sub-issues, and related releases. |
-| `list_recent_activity` | Recent activity across tracked repositories, including issue, PR, release, and documentation updates. |
+This MCP server exposes a single consolidated tool. All retrieval modes — semantic search, time-ordered activity scan, and inline doc content fetch — are reached through `search_issues` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
+
+### `search_issues`
+
+Unified search across GitHub issues, pull requests, releases, repository documentation, and commit diffs.
+
+Three modes are selected by the combination of `query` and `sort`:
+
+1. **Hybrid semantic search (default)** — dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with the `@cf/baai/bge-reranker-base` cross-encoder. Pass a natural-language `query`.
+2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent issue / PR / release / doc / diff activity. This subsumes the previous `list_recent_activity` tool.
+3. **Doc content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API and inlined as a `content` field. Capped at the first few doc rows to bound API fan-out. This subsumes the previous `get_doc_content` tool.
+
+Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode.
+
+#### Parameters
+
+| Name | Type | Description |
+|------|------|-------------|
+| `query` | string (optional) | Natural-language query. Omit or empty = scan mode. |
+| `repo` | string | Filter by repository (`owner/repo`). |
+| `state` | `"open"` \| `"closed"` \| `"all"` | Filter by state (default `all`). |
+| `labels` | string[] | Filter by label names (AND). |
+| `milestone` | string | Filter by milestone title. |
+| `assignee` | string | Filter by assignee login. |
+| `type` | `"issue"` \| `"pull_request"` \| `"release"` \| `"doc"` \| `"diff"` \| `"all"` | Filter by type (default `all`). |
+| `top_k` | number | Max results (default 10, max 50). |
+| `fusion` | `"rrf"` \| `"dense_only"` \| `"sparse_only"` | Fusion strategy (default `rrf`). Ignored in scan mode. |
+| `rerank` | boolean | Cross-encoder rerank (default `true`). Ignored in scan mode. |
+| `sort` | `"relevance"` \| `"updated_desc"` \| `"created_desc"` | Result ordering. Default `relevance` with a query, `updated_desc` without. Time sorts override ranker score. |
+| `since` | ISO 8601 string | Keep only results with `updated_at >= since`. |
+| `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
+| `include_content` | boolean | Inline raw content on top doc results (default `false`). |
+
+#### Examples
+
+Semantic search for a specific topic:
+
+```json
+{
+  "query": "rerank latency budget",
+  "repo": "Liplus-Project/github-rag-mcp",
+  "top_k": 5
+}
+```
+
+Time-ordered activity scan across the last 24 hours:
+
+```json
+{
+  "sort": "updated_desc",
+  "since": "2026-04-22T00:00:00Z",
+  "top_k": 20
+}
+```
+
+Semantic search with inline doc content on the top doc hits:
+
+```json
+{
+  "query": "memory philosophy",
+  "type": "doc",
+  "include_content": true,
+  "top_k": 3
+}
+```
 
 ## Repository Structure
 
