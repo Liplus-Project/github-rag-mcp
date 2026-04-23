@@ -15,7 +15,17 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Env, IssueRecord, ReleaseRecord, DocRecord, DiffRecord, VectorMetadata } from "./types.js";
+import type {
+  Env,
+  IssueRecord,
+  ReleaseRecord,
+  DocRecord,
+  DiffRecord,
+  IssueCommentRecord,
+  PRReviewRecord,
+  PRReviewCommentRecord,
+  VectorMetadata,
+} from "./types.js";
 import type { GitHubUserProps } from "./oauth.js";
 import {
   queryFts,
@@ -81,18 +91,21 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
     // ── search_issues ──────────────────────────────────────────
     this.server.tool(
       "search_issues",
-      "Unified search across GitHub issues, PRs, releases, repository documentation, and commit diffs. " +
+      "Unified search across GitHub issues, PRs, releases, repository documentation, commit diffs, " +
+        "issue/PR top-level comments, PR reviews, and PR inline review comments. " +
         "Three modes via the query / sort axes:\n" +
         "  1. Hybrid semantic search (default): dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, " +
         "fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with a cross-encoder " +
         "(@cf/baai/bge-reranker-base; set rerank: false to skip).\n" +
         "  2. Time-ordered activity scan: pass an empty (or omitted) query with sort=\"updated_desc\" or \"created_desc\"; " +
-        "optionally narrow via since / until to list recent issue / PR / release / doc / diff activity.\n" +
+        "optionally narrow via since / until to list recent activity across every type.\n" +
         "  3. Doc content fetch: pass include_content: true to inline the raw file content of top doc results " +
         "(fetched from the GitHub contents API; capped at the first few doc rows).\n" +
         "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across all modes. " +
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files " +
-        "and non-.md files that are not present in the live document index.",
+        "and non-.md files that are not present in the live document index. " +
+        "Use type: \"issue_comment\" / \"pr_review\" / \"pr_review_comment\" to retrieve comment-level judgment history " +
+        "(Master's feedback, AI responses, self-review now/later/accepted classifications).",
       {
         query: z
           .string()
@@ -124,10 +137,26 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           .optional()
           .describe("Filter by assignee login"),
         type: z
-          .enum(["issue", "pull_request", "release", "doc", "diff", "all"])
+          .enum([
+            "issue",
+            "pull_request",
+            "release",
+            "doc",
+            "diff",
+            "issue_comment",
+            "pr_review",
+            "pr_review_comment",
+            "all",
+          ])
           .optional()
           .default("all")
-          .describe("Filter by type (default: all). Use \"diff\" to search per-file commit diffs."),
+          .describe(
+            "Filter by type (default: all). " +
+              "\"diff\" = per-file commit diffs. " +
+              "\"issue_comment\" = top-level comments on issues and PRs. " +
+              "\"pr_review\" = PR review bodies (approve / request_changes / comment). " +
+              "\"pr_review_comment\" = inline per-line review comments on PR diffs.",
+          ),
         top_k: z
           .number()
           .min(1)
@@ -236,7 +265,15 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           };
 
           type ScanRow = {
-            type: "issue" | "pull_request" | "release" | "doc" | "diff";
+            type:
+              | "issue"
+              | "pull_request"
+              | "release"
+              | "doc"
+              | "diff"
+              | "issue_comment"
+              | "pr_review"
+              | "pr_review_comment";
             repo: string;
             number: number;
             title: string;
@@ -255,6 +292,14 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             file_status?: string;
             commit_date?: string;
             commit_author?: string;
+            /** Comment / review author login */
+            author?: string;
+            /** GitHub comment / review id (comment rows only) */
+            comment_id?: number;
+            /** GitHub review id (pr_review rows only) */
+            review_id?: number;
+            /** Inline review-comment line number (pr_review_comment rows only) */
+            line?: number;
           };
           const rows: ScanRow[] = [];
 
@@ -385,6 +430,108 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
                     file_status: diff.fileStatus,
                     commit_date: diff.commitDate,
                     commit_author: diff.commitAuthor,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // Issue / PR top-level comments
+          if (wantType("issue_comment")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-comments?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as IssueCommentRecord[];
+                for (const c of records) {
+                  rows.push({
+                    type: "issue_comment",
+                    repo: c.repo,
+                    number: c.number,
+                    title: `${c.author} on #${c.number}`,
+                    state: "active",
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${c.repo}/issues/${c.number}#issuecomment-${c.commentId}`,
+                    updated_at: c.updatedAt,
+                    created_at: c.createdAt,
+                    author: c.author,
+                    comment_id: c.commentId,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // PR reviews (approve / request_changes / comment body)
+          if (wantType("pr_review")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-reviews?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as PRReviewRecord[];
+                for (const r of records) {
+                  rows.push({
+                    type: "pr_review",
+                    repo: r.repo,
+                    number: r.number,
+                    title: `${r.author} ${r.state} on #${r.number}`,
+                    state: r.state,
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${r.repo}/pull/${r.number}#pullrequestreview-${r.reviewId}`,
+                    updated_at: r.updatedAt,
+                    created_at: r.submittedAt,
+                    author: r.author,
+                    review_id: r.reviewId,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // PR inline review comments
+          if (wantType("pr_review_comment")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-review-comments?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as PRReviewCommentRecord[];
+                for (const rc of records) {
+                  rows.push({
+                    type: "pr_review_comment",
+                    repo: rc.repo,
+                    number: rc.number,
+                    title: `${rc.author} @ ${rc.filePath}:${rc.line}`,
+                    state: "active",
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${rc.repo}/pull/${rc.number}#discussion_r${rc.commentId}`,
+                    updated_at: rc.updatedAt,
+                    created_at: rc.createdAt,
+                    author: rc.author,
+                    comment_id: rc.commentId,
+                    file_path: rc.filePath,
+                    line: rc.line,
+                    commit_sha: rc.commitId,
                   });
                 }
               }
@@ -792,6 +939,10 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           file_status?: string;
           commit_date?: string;
           commit_author?: string;
+          author?: string;
+          comment_id?: number;
+          review_id?: number;
+          line?: number;
           content?: string;
         };
 
@@ -815,6 +966,10 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
           const fileStatus = meta?.file_status ?? ftsRow?.fileStatus ?? "";
           const commitDate = meta?.commit_date ?? ftsRow?.commitDate ?? "";
           const commitAuthor = meta?.commit_author ?? ftsRow?.commitAuthor ?? "";
+          const author = meta?.author ?? "";
+          const commentId = meta?.comment_id ?? 0;
+          const reviewId = meta?.review_id ?? 0;
+          const line = meta?.line ?? 0;
 
           let url: string;
           if (itemType === "release" && tagName) {
@@ -823,6 +978,12 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             url = `https://github.com/${itemRepo}/blob/main/${docPath}`;
           } else if (itemType === "diff" && commitSha) {
             url = `https://github.com/${itemRepo}/commit/${commitSha}`;
+          } else if (itemType === "issue_comment" && commentId) {
+            url = `https://github.com/${itemRepo}/issues/${number}#issuecomment-${commentId}`;
+          } else if (itemType === "pr_review" && reviewId) {
+            url = `https://github.com/${itemRepo}/pull/${number}#pullrequestreview-${reviewId}`;
+          } else if (itemType === "pr_review_comment" && commentId) {
+            url = `https://github.com/${itemRepo}/pull/${number}#discussion_r${commentId}`;
           } else {
             url = `https://github.com/${itemRepo}/issues/${number}`;
           }
@@ -857,6 +1018,27 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
                   commit_author: commitAuthor,
                 }
               : {}),
+            ...(itemType === "issue_comment"
+              ? {
+                  author,
+                  comment_id: commentId,
+                }
+              : {}),
+            ...(itemType === "pr_review"
+              ? {
+                  author,
+                  review_id: reviewId,
+                }
+              : {}),
+            ...(itemType === "pr_review_comment"
+              ? {
+                  author,
+                  comment_id: commentId,
+                  file_path: filePath,
+                  line,
+                  commit_sha: commitSha,
+                }
+              : {}),
           };
         });
 
@@ -887,6 +1069,22 @@ export class RagMcpAgent extends McpAgent<Env, unknown, McpProps> {
             const sha = item.commit_sha ?? "";
             const shortSha = sha ? sha.slice(0, 7) : "";
             item.title = [shortSha, fp].filter(Boolean).join(" ");
+          } else if (item.type === "issue_comment") {
+            // Title = "{author} on #{number}" — enough context to skim results.
+            const author = item.author ?? "";
+            item.title = author ? `${author} on #${item.number}` : `comment on #${item.number}`;
+          } else if (item.type === "pr_review") {
+            // Title = "{author} {state} on #{number}" — review state gives
+            // the classification at a glance (APPROVED / CHANGES_REQUESTED / COMMENTED).
+            const author = item.author ?? "";
+            const state = item.state || "";
+            item.title = author ? `${author} ${state} on #${item.number}` : `review on #${item.number}`;
+          } else if (item.type === "pr_review_comment") {
+            // Title = "{author} @ {file_path}:{line}" — inline comment location.
+            const author = item.author ?? "";
+            const fp = item.file_path ?? "";
+            const line = item.line ?? 0;
+            item.title = author ? `${author} @ ${fp}:${line}` : `inline on #${item.number}`;
           } else if (item.repo && item.number) {
             try {
               const res = await store.fetch(

@@ -13,12 +13,21 @@ import {
   processAndUpsertRelease,
   processAndUpsertDoc,
   processAndUpsertCommitDiff,
+  ingestIssueComment,
+  ingestPRReview,
+  ingestPRReviewComment,
   vectorId,
   releaseVectorId,
   docVectorId,
+  issueCommentVectorId,
+  prReviewVectorId,
+  prReviewCommentVectorId,
   type GitHubIssueData,
   type GitHubReleaseData,
   type GitHubCommitDetail,
+  type GitHubCommentData,
+  type GitHubPRReviewData,
+  type GitHubPRReviewCommentData,
 } from "./pipeline.js";
 import { deleteFtsRow } from "./fts.js";
 
@@ -96,6 +105,12 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
       return handleReleaseEvent(payload, env, storeStub);
     case "push":
       return handlePushEvent(payload, env, storeStub);
+    case "issue_comment":
+      return handleIssueCommentEvent(payload, env, storeStub);
+    case "pull_request_review":
+      return handlePRReviewEvent(payload, env, storeStub);
+    case "pull_request_review_comment":
+      return handlePRReviewCommentEvent(payload, env, storeStub);
     default:
       return jsonResponse(202, {
         received: true,
@@ -538,6 +553,275 @@ async function handlePushEvent(
       filesEmbedded: diffsEmbedded,
       filesSkipped: diffsSkipped,
       filesFailed: diffsFailed,
+    },
+  });
+}
+
+// ── Comment / review handlers ───────────────────────────────
+
+/**
+ * Handle `issue_comment.*` webhook events (fires for both issues and PRs).
+ *
+ * For deleted: remove from IssueStore + Vectorize + FTS5.
+ * For created / edited: ingest via the shared comment pipeline.
+ */
+async function handleIssueCommentEvent(
+  payload: Record<string, unknown>,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<Response> {
+  const action = payload.action as string;
+  const repo = (payload.repository as { full_name: string }).full_name;
+  const raw = payload.comment as Record<string, unknown>;
+  const parent = payload.issue as Record<string, unknown>;
+
+  const commentId = raw.id as number;
+  const parentNumber = parent.number as number;
+
+  // Deletion: drop from Vectorize + FTS5 + store
+  if (action === "deleted") {
+    const vid = await issueCommentVectorId(repo, commentId);
+    try {
+      await env.VECTORIZE.deleteByIds([vid]);
+    } catch (err) {
+      console.error(
+        `Failed to delete comment vector ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await deleteFtsRow(env.DB_FTS, vid);
+    } catch (err) {
+      console.error(
+        `Failed to delete FTS5 row ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await storeStub.fetch(
+        new Request(
+          `http://store/comment?repo=${encodeURIComponent(repo)}&comment_id=${commentId}`,
+          { method: "DELETE" },
+        ),
+      );
+    } catch (err) {
+      console.error(
+        `Failed to delete comment record ${repo}#${commentId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    return jsonResponse(202, {
+      received: true,
+      event: "issue_comment",
+      action,
+      repo,
+      number: parentNumber,
+      commentId,
+      result: "deleted",
+    });
+  }
+
+  const comment: GitHubCommentData = {
+    id: commentId,
+    body: (raw.body as string | null) ?? null,
+    user: (raw.user as { login: string } | null) ?? null,
+    created_at: raw.created_at as string,
+    updated_at: raw.updated_at as string,
+  };
+
+  const result = await ingestIssueComment(env, storeStub, repo, parentNumber, comment);
+
+  return jsonResponse(202, {
+    received: true,
+    event: "issue_comment",
+    action,
+    repo,
+    number: parentNumber,
+    commentId,
+    result: {
+      embedded: result.embedded,
+      skippedUnchanged: result.skippedUnchanged,
+      filtered: result.filtered,
+      failed: result.failed,
+    },
+  });
+}
+
+/**
+ * Handle `pull_request_review.*` webhook events.
+ *
+ * For dismissed: remove the review from Vectorize + FTS5 + store (the
+ * dismissed body is no longer useful judgment history).
+ * For submitted / edited: ingest via the shared review pipeline.
+ */
+async function handlePRReviewEvent(
+  payload: Record<string, unknown>,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<Response> {
+  const action = payload.action as string;
+  const repo = (payload.repository as { full_name: string }).full_name;
+  const raw = payload.review as Record<string, unknown>;
+  const parent = payload.pull_request as Record<string, unknown>;
+
+  const reviewId = raw.id as number;
+  const parentNumber = parent.number as number;
+
+  if (action === "dismissed") {
+    const vid = await prReviewVectorId(repo, reviewId);
+    try {
+      await env.VECTORIZE.deleteByIds([vid]);
+    } catch (err) {
+      console.error(
+        `Failed to delete review vector ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await deleteFtsRow(env.DB_FTS, vid);
+    } catch (err) {
+      console.error(
+        `Failed to delete FTS5 row ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await storeStub.fetch(
+        new Request(
+          `http://store/review?repo=${encodeURIComponent(repo)}&review_id=${reviewId}`,
+          { method: "DELETE" },
+        ),
+      );
+    } catch (err) {
+      console.error(
+        `Failed to delete review record ${repo}#${reviewId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    return jsonResponse(202, {
+      received: true,
+      event: "pull_request_review",
+      action,
+      repo,
+      number: parentNumber,
+      reviewId,
+      result: "deleted",
+    });
+  }
+
+  const review: GitHubPRReviewData = {
+    id: reviewId,
+    body: (raw.body as string | null) ?? null,
+    user: (raw.user as { login: string } | null) ?? null,
+    state: (raw.state as string) ?? "",
+    submitted_at: (raw.submitted_at as string | null) ?? null,
+  };
+
+  const result = await ingestPRReview(env, storeStub, repo, parentNumber, review);
+
+  return jsonResponse(202, {
+    received: true,
+    event: "pull_request_review",
+    action,
+    repo,
+    number: parentNumber,
+    reviewId,
+    result: {
+      embedded: result.embedded,
+      skippedUnchanged: result.skippedUnchanged,
+      filtered: result.filtered,
+      failed: result.failed,
+    },
+  });
+}
+
+/**
+ * Handle `pull_request_review_comment.*` webhook events (inline diff comments).
+ *
+ * For deleted: remove from Vectorize + FTS5 + store.
+ * For created / edited: ingest via the shared review-comment pipeline.
+ */
+async function handlePRReviewCommentEvent(
+  payload: Record<string, unknown>,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<Response> {
+  const action = payload.action as string;
+  const repo = (payload.repository as { full_name: string }).full_name;
+  const raw = payload.comment as Record<string, unknown>;
+  const parent = payload.pull_request as Record<string, unknown>;
+
+  const commentId = raw.id as number;
+  const parentNumber = parent.number as number;
+
+  if (action === "deleted") {
+    const vid = await prReviewCommentVectorId(repo, commentId);
+    try {
+      await env.VECTORIZE.deleteByIds([vid]);
+    } catch (err) {
+      console.error(
+        `Failed to delete review comment vector ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await deleteFtsRow(env.DB_FTS, vid);
+    } catch (err) {
+      console.error(
+        `Failed to delete FTS5 row ${vid}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    try {
+      await storeStub.fetch(
+        new Request(
+          `http://store/review-comment?repo=${encodeURIComponent(repo)}&comment_id=${commentId}`,
+          { method: "DELETE" },
+        ),
+      );
+    } catch (err) {
+      console.error(
+        `Failed to delete review comment record ${repo}#${commentId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    return jsonResponse(202, {
+      received: true,
+      event: "pull_request_review_comment",
+      action,
+      repo,
+      number: parentNumber,
+      commentId,
+      result: "deleted",
+    });
+  }
+
+  const comment: GitHubPRReviewCommentData = {
+    id: commentId,
+    body: (raw.body as string | null) ?? null,
+    user: (raw.user as { login: string } | null) ?? null,
+    path: (raw.path as string | null) ?? null,
+    line: (raw.line as number | null) ?? null,
+    original_line: (raw.original_line as number | null) ?? null,
+    commit_id: (raw.commit_id as string | null) ?? null,
+    created_at: raw.created_at as string,
+    updated_at: raw.updated_at as string,
+  };
+
+  const result = await ingestPRReviewComment(env, storeStub, repo, parentNumber, comment);
+
+  return jsonResponse(202, {
+    received: true,
+    event: "pull_request_review_comment",
+    action,
+    repo,
+    number: parentNumber,
+    commentId,
+    result: {
+      embedded: result.embedded,
+      skippedUnchanged: result.skippedUnchanged,
+      filtered: result.filtered,
+      failed: result.failed,
     },
   });
 }
