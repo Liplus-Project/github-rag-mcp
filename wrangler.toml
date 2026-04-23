@@ -13,6 +13,14 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["RagMcpAgent", "IssueStore"]
 
+# v2: force reset RagMcpAgent to clear in-memory init() cache (tool schema enum).
+# IssueStore is preserved; indexed content (Vectorize + D1 FTS5) is untouched.
+# Required when init()-time schema definitions drift from deployed source (issue #109).
+[[migrations]]
+tag = "v2"
+deleted_classes = ["RagMcpAgent"]
+new_sqlite_classes = ["RagMcpAgent"]
+
 # KV namespace for OAuth provider (token, client, grant storage)
 [[kv_namespaces]]
 binding = "OAUTH_KV"
