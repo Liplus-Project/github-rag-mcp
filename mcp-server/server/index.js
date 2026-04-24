@@ -420,7 +420,8 @@ const TOOLS = [
     name: "search_issues",
     title: "Search Issues",
     description:
-      "Unified search across GitHub issues, PRs, releases, documentation, and commit diffs. Three modes: " +
+      "Unified search across GitHub issues, PRs, releases, documentation, commit diffs, " +
+      "issue/PR top-level comments, PR reviews, and PR inline review comments. Three modes: " +
       "(1) hybrid semantic search — dense BGE-M3 + sparse BM25 over D1 FTS5 fused via RRF, then re-scored " +
       "by @cf/baai/bge-reranker-base (toggle with rerank: false); " +
       "(2) time-ordered activity scan — omit or empty query with sort=\"updated_desc\" / \"created_desc\", " +
@@ -460,9 +461,23 @@ const TOOLS = [
         },
         type: {
           type: "string",
-          enum: ["issue", "pull_request", "release", "doc", "diff", "all"],
+          enum: [
+            "issue",
+            "pull_request",
+            "release",
+            "doc",
+            "diff",
+            "issue_comment",
+            "pr_review",
+            "pr_review_comment",
+            "all",
+          ],
           description:
-            "Filter by type (default: all). Use \"diff\" to search per-file commit diffs (judgment history).",
+            "Filter by type (default: all). " +
+            "\"diff\" = per-file commit diffs. " +
+            "\"issue_comment\" = top-level comments on issues and PRs. " +
+            "\"pr_review\" = PR review bodies (approve / request_changes / comment). " +
+            "\"pr_review_comment\" = inline per-line review comments on PR diffs.",
         },
         top_k: {
           type: "number",
