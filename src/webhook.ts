@@ -13,6 +13,7 @@ import {
   processAndUpsertRelease,
   processAndUpsertDoc,
   processAndUpsertCommitDiff,
+  fetchCommitDetail,
   ingestIssueComment,
   ingestPRReview,
   ingestPRReviewComment,
@@ -24,7 +25,6 @@ import {
   prReviewCommentVectorId,
   type GitHubIssueData,
   type GitHubReleaseData,
-  type GitHubCommitDetail,
   type GitHubCommentData,
   type GitHubPRReviewData,
   type GitHubPRReviewCommentData,
@@ -175,38 +175,6 @@ async function fetchFileContent(
     bytes[i] = binary.charCodeAt(i);
   }
   return new TextDecoder("utf-8").decode(bytes);
-}
-
-/**
- * Fetch a commit with per-file patches via the GitHub REST API.
- * Returns the commit detail including `files[]` with inline `patch` fields.
- * Throws on non-2xx responses.
- */
-async function fetchCommitDetail(
-  repo: string,
-  sha: string,
-  token: string,
-): Promise<GitHubCommitDetail> {
-  const url = `https://api.github.com/repos/${repo}/commits/${sha}`;
-
-  const resp = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "github-rag-mcp/0.1.0",
-    },
-    cache: "no-store",
-  } as RequestInit);
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(
-      `GitHub Commits API error ${resp.status} for ${repo}@${sha}: ${text}`,
-    );
-  }
-
-  return (await resp.json()) as GitHubCommitDetail;
 }
 
 // ── Per-event handlers ──────────────────────────────────────

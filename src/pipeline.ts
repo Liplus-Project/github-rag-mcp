@@ -842,6 +842,39 @@ export interface DiffUpsertResult {
 }
 
 /**
+ * Fetch a single commit with per-file patches via the GitHub REST API.
+ * Returns the commit detail including `files[]` with inline `patch` fields.
+ * Throws on non-2xx responses. Shared between webhook (new-commit path) and
+ * poller (historical backfill path).
+ */
+export async function fetchCommitDetail(
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<GitHubCommitDetail> {
+  const url = `https://api.github.com/repos/${repo}/commits/${sha}`;
+
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "github-rag-mcp/0.1.0",
+    },
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(
+      `GitHub Commits API error ${resp.status} for ${repo}@${sha}: ${text}`,
+    );
+  }
+
+  return (await resp.json()) as GitHubCommitDetail;
+}
+
+/**
  * Normalise GitHub's file status string to our DiffFileStatus union.
  * Unknown values fall through to "changed" (the generic GitHub bucket).
  */

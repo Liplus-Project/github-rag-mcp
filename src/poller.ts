@@ -13,6 +13,8 @@ import {
   processAndUpsertIssue,
   processAndUpsertRelease,
   processAndUpsertDoc,
+  processAndUpsertCommitDiff,
+  fetchCommitDetail,
   ingestIssueComment,
   ingestPRReview,
   ingestPRReviewComment,
@@ -47,6 +49,19 @@ const MAX_COMMENT_BACKFILL_PARENTS = 20;
 /** Maximum number of comment-level items embedded per repo per run.
  *  Workers AI embed calls are the dominant cost for the comment surface. */
 const MAX_COMMENTS_EMBEDDED_PER_REPO = 30;
+
+/** Maximum number of commits fetched in the forward (webhook-redundancy) phase
+ *  of the diff poller per repo per run.
+ *  Forward is normally a no-op because the webhook path already indexes new
+ *  commits; this cap bounds the work when webhook delivery has stalled. */
+const MAX_DIFF_COMMITS_FORWARD_PER_RUN = 10;
+
+/** Maximum number of commits fetched in the backward (historical backfill) phase
+ *  of the diff poller per repo per run.
+ *  Backfill walks backward through repo history one hourly run at a time; the
+ *  cap keeps per-run API and embedding cost bounded so the total sweep spreads
+ *  over many runs (e.g. 10 commits/run × 24 runs/day = 240 commits/day). */
+const MAX_DIFF_COMMITS_BACKWARD_PER_RUN = 10;
 
 /** Sentinel value indicating GitHub returned 304 Not Modified */
 const NOT_MODIFIED = Symbol("NOT_MODIFIED");
@@ -958,6 +973,221 @@ async function pollComments(
   );
 }
 
+/** GitHub API commit list item — subset used by the diff poller. */
+interface GitHubCommitSummary {
+  sha: string;
+  commit: {
+    message?: string;
+    author?: { date?: string | null } | null;
+    committer?: { date?: string | null } | null;
+  };
+}
+
+/**
+ * Fetch a single page of commits from `GET /repos/{repo}/commits`.
+ * Supports `since` (inclusive lower bound on committer date) and `until`
+ * (inclusive upper bound) filters; the two are combined by GitHub with AND.
+ * Results are ordered newest-first by committer date.
+ * Throws on non-2xx responses so the caller can log and fall back.
+ */
+async function fetchRepoCommits(
+  repo: string,
+  token: string,
+  opts: { since?: string; until?: string; per_page: number },
+): Promise<GitHubCommitSummary[]> {
+  const url = new URL(`https://api.github.com/repos/${repo}/commits`);
+  url.searchParams.set("per_page", String(opts.per_page));
+  if (opts.since) url.searchParams.set("since", opts.since);
+  if (opts.until) url.searchParams.set("until", opts.until);
+
+  const resp = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "github-rag-mcp/0.1.0",
+    },
+    cache: "no-store",
+  } as RequestInit);
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(
+      `GitHub Commits list API error ${resp.status} for ${repo}: ${text}`,
+    );
+  }
+
+  return (await resp.json()) as GitHubCommitSummary[];
+}
+
+/** Read a watermark record by its namespaced key; returns null when absent. */
+async function readWatermark(
+  storeStub: DurableObjectStub,
+  key: string,
+): Promise<{ lastPolledAt: string } | null> {
+  const resp = await storeStub.fetch(
+    new Request(`http://store/watermark?repo=${encodeURIComponent(key)}`),
+  );
+  if (!resp.ok) return null;
+  const wm = (await resp.json()) as { repo: string; lastPolledAt: string };
+  return { lastPolledAt: wm.lastPolledAt };
+}
+
+/** Upsert a watermark record under the given namespaced key. */
+async function writeWatermark(
+  storeStub: DurableObjectStub,
+  key: string,
+  lastPolledAt: string,
+): Promise<void> {
+  await storeStub.fetch(
+    new Request("http://store/watermark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: key, lastPolledAt }),
+    }),
+  );
+}
+
+/** Extract the best-available ISO timestamp from a commit summary. */
+function commitDateOf(summary: GitHubCommitSummary): string | undefined {
+  return (
+    summary.commit.author?.date ??
+    summary.commit.committer?.date ??
+    undefined
+  );
+}
+
+/**
+ * Poll historical and recent commit diffs for a repository and upsert them
+ * through the shared commit-diff pipeline.
+ *
+ * Two phases run per cron tick:
+ *
+ * 1. **Forward** (webhook redundancy): fetch commits with `since=lastPolledAt`
+ *    so the poller re-covers any commits missed while webhook delivery was
+ *    stalled. The first run uses "one hour ago" as the initial since so the
+ *    initial fetch stays bounded; subsequent runs advance the forward
+ *    watermark to the current poll start time unconditionally.
+ *
+ * 2. **Backward** (historical backfill): fetch commits with
+ *    `until=oldestUnprocessedDate` so the poller walks backward through the
+ *    repo's history one tick at a time. The first run uses "now" as the
+ *    initial until; subsequent runs advance the backward watermark to the
+ *    commit_date of the oldest commit processed in this run. When the repo's
+ *    history is exhausted the API returns 0 commits and the watermark stops
+ *    advancing — subsequent runs will repeatedly return 0 commits, which is
+ *    acceptable idle-state behavior.
+ *
+ * Each phase is capped at a small commit count (see MAX_DIFF_COMMITS_*) to
+ * spread cost across many cron ticks. `processAndUpsertCommitDiff` upserts
+ * on the (repo, commit_sha, file_path) primary key, so overlap with webhook
+ * or with the opposite phase is idempotent.
+ */
+export async function pollDiffs(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  const pollStartTime = new Date().toISOString();
+
+  // ── Forward phase ───────────────────────────────────────────
+  const fwdKey = `diffs:${repo}`;
+  const fwdWm = await readWatermark(storeStub, fwdKey);
+  // First run: start one hour ago so the initial forward sweep covers the
+  // last cron interval without pulling the whole history into this phase.
+  const sinceFwd =
+    fwdWm?.lastPolledAt ??
+    new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  let fwdProcessed = 0;
+  let fwdFailed = 0;
+  try {
+    const fwdCommits = await fetchRepoCommits(repo, env.GITHUB_TOKEN, {
+      since: sinceFwd,
+      per_page: MAX_DIFF_COMMITS_FORWARD_PER_RUN,
+    });
+    for (const summary of fwdCommits) {
+      try {
+        const detail = await fetchCommitDetail(
+          repo,
+          summary.sha,
+          env.GITHUB_TOKEN,
+        );
+        await processAndUpsertCommitDiff(env, storeStub, repo, detail);
+        fwdProcessed++;
+      } catch (err) {
+        fwdFailed++;
+        console.error(
+          `pollDiffs: forward commit ${repo}@${summary.sha} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      `pollDiffs: forward list failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  // Advance the forward watermark regardless of partial failures so the next
+  // run continues from pollStartTime instead of reprocessing the same window.
+  // Upstream upsert is idempotent on (repo, commit_sha, file_path).
+  await writeWatermark(storeStub, fwdKey, pollStartTime);
+
+  // ── Backward phase ──────────────────────────────────────────
+  const bwdKey = `diffs_backfill:${repo}`;
+  const bwdWm = await readWatermark(storeStub, bwdKey);
+  // First run: start walking backward from the current time.
+  const untilBwd = bwdWm?.lastPolledAt ?? pollStartTime;
+
+  let bwdProcessed = 0;
+  let bwdFailed = 0;
+  let oldestSeenDate: string | undefined;
+  try {
+    const bwdCommits = await fetchRepoCommits(repo, env.GITHUB_TOKEN, {
+      until: untilBwd,
+      per_page: MAX_DIFF_COMMITS_BACKWARD_PER_RUN,
+    });
+    // GitHub returns commits newest-first; the last entry is the oldest in
+    // this page and becomes the next-run watermark.
+    for (const summary of bwdCommits) {
+      try {
+        const detail = await fetchCommitDetail(
+          repo,
+          summary.sha,
+          env.GITHUB_TOKEN,
+        );
+        await processAndUpsertCommitDiff(env, storeStub, repo, detail);
+        bwdProcessed++;
+        const d = commitDateOf(summary);
+        if (d) oldestSeenDate = d;
+      } catch (err) {
+        bwdFailed++;
+        console.error(
+          `pollDiffs: backward commit ${repo}@${summary.sha} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      `pollDiffs: backward list failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  // Only advance the backward watermark when we actually saw a commit. If the
+  // API returned 0 commits the repo's history is exhausted (or the token lost
+  // access); leaving the watermark alone avoids silently skipping a window.
+  if (oldestSeenDate) {
+    await writeWatermark(storeStub, bwdKey, oldestSeenDate);
+  }
+
+  console.log(
+    `${repo} diffs: forward [processed=${fwdProcessed}, failed=${fwdFailed}], ` +
+      `backward [processed=${bwdProcessed}, failed=${bwdFailed}]`,
+  );
+}
+
 /**
  * Main scheduled handler — called by Cron Trigger hourly as fallback.
  * Polls all configured repositories for issue/PR updates.
@@ -1030,6 +1260,15 @@ export async function handleScheduled(
     } catch (err) {
       console.error(
         `Failed to poll comments for ${repo}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    try {
+      await pollDiffs(repo, env, storeStub);
+    } catch (err) {
+      console.error(
+        `Failed to poll diffs for ${repo}:`,
         err instanceof Error ? err.message : String(err),
       );
     }
