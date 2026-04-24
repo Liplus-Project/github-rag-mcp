@@ -253,6 +253,7 @@ Rationale:
 Implementation constraints and known limitations:
 
 - bge-reranker-base inherits BAAI's 512-token context window. Each `(query, candidate content)` pair is truncated by character budget (query: 200 chars max, pair total: 1700 chars max) since no tokenizer is available in Workers.
+- Workers AI requires every `contexts[].text` to be at least one character long (error 5006: "Length of '/contexts/N/text' must be >= 1 not met"). Dense-only candidates that lack an FTS row have empty content, so they are filtered out of the rerank input before the call; if 0 or 1 non-empty candidates remain the call is skipped entirely.
 - The reranker processes at most 50 candidates per call — chosen as the join point between the Workers AI Free tier neuron budget (10,000/day) and industry median (50–75 candidates).
 - bge-reranker-base is English-centric and not multilingual. Japanese issue/PR content may see degraded quality. This is observed at runtime; switching to `bge-reranker-v2-m3` or an external reranker (Voyage / Cohere) is tracked as a separate issue when needed.
 - On reranker call failure or unexpected response shape, the system falls back gracefully to the post-filter (RRF) order and reports `rerank_applied: false`.
