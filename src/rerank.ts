@@ -97,9 +97,12 @@ type RerankerResponse =
  *
  * Behavior:
  * - Returns a new array sorted by reranker score, descending. Length is
- *   `min(candidates.length, topK ?? candidates.length, RERANK_MAX_CANDIDATES_after_clamp)`.
- * - Empty `candidates` returns an empty array immediately (no AI call).
- * - Single-element `candidates` returns a passthrough with a synthesized
+ *   `min(nonEmpty.length, topK ?? nonEmpty.length, RERANK_MAX_CANDIDATES_after_clamp)`,
+ *   where `nonEmpty` is the input with empty / whitespace-only content removed.
+ * - Candidates with empty content are silently excluded — Workers AI rejects
+ *   any `contexts[].text` shorter than one character with error 5006.
+ * - Empty input (or all-empty content) returns an empty array immediately (no AI call).
+ * - A single non-empty candidate returns a passthrough with a synthesized
  *   score of 1, to avoid burning a Workers AI call on a one-element list.
  * - Any thrown error from `env.AI.run` or any malformed response returns
  *   `null` so the caller can keep the original (pre-rerank) order.
@@ -116,13 +119,21 @@ export async function rerankCandidates(
   candidates: RerankCandidate[],
   topK?: number,
 ): Promise<RerankResult[] | null> {
-  if (candidates.length === 0) return [];
-  if (candidates.length === 1) {
-    return [{ id: candidates[0].id, score: 1 }];
+  // Drop candidates whose content is empty or whitespace-only. Workers AI's
+  // `@cf/baai/bge-reranker-base` rejects requests where any `contexts[].text`
+  // is shorter than one character with error 5006 ("Length of
+  // '/contexts/N/text' must be >= 1 not met"). Passing the call through
+  // unfiltered would make the entire rerank return null and leave the caller
+  // with the pre-rerank order even for candidates that do have signal.
+  const nonEmptyCandidates = candidates.filter((c) => c.content.trim() !== "");
+
+  if (nonEmptyCandidates.length === 0) return [];
+  if (nonEmptyCandidates.length === 1) {
+    return [{ id: nonEmptyCandidates[0].id, score: 1 }];
   }
 
   // Defensive clamp on candidate count.
-  const trimmedCandidates = candidates.slice(0, RERANK_MAX_CANDIDATES);
+  const trimmedCandidates = nonEmptyCandidates.slice(0, RERANK_MAX_CANDIDATES);
 
   // Build (query, contexts) payload with per-pair truncation. The query is
   // shared across all pairs; we still truncate it once up front.

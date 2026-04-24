@@ -253,6 +253,7 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 実装制約と既知の限界:
 
 - bge-reranker-base は context window 512 tokens（BAAI 元仕様）。`(query, candidate content)` pair が超過しないよう char-budget ベースで truncate（query 200 chars 上限、pair 合計 1700 chars 上限）
+- Workers AI は `contexts[].text` に length >= 1 を要求（エラー 5006: "Length of '/contexts/N/text' must be >= 1 not met"）。sparse hit が無い dense-only 候補は content が空文字になるため、rerank 入力から事前に除外する（除外件数が 0 / 1 の場合は AI 呼び出しをスキップして passthrough）
 - reranker は最大 50 件 / 1 検索（Workers AI Free tier 10,000 neurons/day と業界中央値の整合点）
 - bge-reranker-base は英語ベース・多言語非対応。日本語 issue/PR では精度低下リスクあり（runtime 観察対象、将来的に bge-reranker-v2-m3 提供開始時または外部 reranker への切替を別 issue で検討）
 - reranker 呼び出し失敗・想定外レスポンス時は graceful fallback（fusion 順を維持、`rerank_applied: false` で通知）

@@ -218,27 +218,38 @@ export async function queryFts(
   // then picks the best BM25 score across both. `bm25()` returns negative values
   // in D1's FTS5 (larger-magnitude negative = better match), so ASC orders
   // best-first regardless of sign.
+  //
+  // Per-branch `ORDER BY score ASC LIMIT ?` must live inside a subquery because
+  // SQLite's compound SELECT (UNION ALL) forbids LIMIT directly on its arms —
+  // D1 rejects such queries with `D1_ERROR: LIMIT clause should come after
+  // UNION ALL not before` (observed via Workers Observability, 2026-04-24).
   const sql = `
     SELECT * FROM (
-      SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
-             d.milestone, d.assignees, d.updated_at,
-             d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
-             d.commit_date, d.commit_author, d.content,
-             bm25(search_docs_nat_fts) AS score
-        FROM search_docs_nat_fts f
-        JOIN search_docs d ON d.rowid = f.rowid
-       WHERE search_docs_nat_fts MATCH ?${whereSql}
-       LIMIT ?
+      SELECT * FROM (
+        SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
+               d.milestone, d.assignees, d.updated_at,
+               d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
+               d.commit_date, d.commit_author, d.content,
+               bm25(search_docs_nat_fts) AS score
+          FROM search_docs_nat_fts f
+          JOIN search_docs d ON d.rowid = f.rowid
+         WHERE search_docs_nat_fts MATCH ?${whereSql}
+         ORDER BY score ASC
+         LIMIT ?
+      )
       UNION ALL
-      SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
-             d.milestone, d.assignees, d.updated_at,
-             d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
-             d.commit_date, d.commit_author, d.content,
-             bm25(search_docs_code_fts) AS score
-        FROM search_docs_code_fts f
-        JOIN search_docs d ON d.rowid = f.rowid
-       WHERE search_docs_code_fts MATCH ?${whereSql}
-       LIMIT ?
+      SELECT * FROM (
+        SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
+               d.milestone, d.assignees, d.updated_at,
+               d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
+               d.commit_date, d.commit_author, d.content,
+               bm25(search_docs_code_fts) AS score
+          FROM search_docs_code_fts f
+          JOIN search_docs d ON d.rowid = f.rowid
+         WHERE search_docs_code_fts MATCH ?${whereSql}
+         ORDER BY score ASC
+         LIMIT ?
+      )
     )
     ORDER BY score ASC
     LIMIT ?
