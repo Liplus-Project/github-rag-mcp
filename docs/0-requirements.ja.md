@@ -111,10 +111,17 @@ Responsibilities:
 
 - webhook 取りこぼしを補償する
 - 新しい repository の backfill を行う
-- issue、pull request、release、docs の変更を再取得する
+- issue、pull request、release、docs、issue/PR comments、commit diff の変更を再取得する
 - 一時障害後も store を収束させる
 
 現在の deployment では hourly で実行する。
+
+commit diff poller は 2-phase 構成:
+
+- **forward phase** — `since=lastPolledAt` で直近 commit を再取得する（webhook 取りこぼし時の redundancy）。watermark namespace は `diffs:${repo}`。
+- **backward phase** — `until=oldestUnprocessedDate` で履歴を徐々に遡行する（新規 deployment や webhook 起動前の commit を backfill する経路）。watermark namespace は `diffs_backfill:${repo}`。
+
+1 run あたり上限は forward / backward それぞれ 10 commits。`processAndUpsertCommitDiff` の upsert は `(repo, commit_sha, file_path)` で idempotent なので、webhook / 両 phase 間で overlap しても副作用はない。
 
 ### 4. Embedding Pipeline
 

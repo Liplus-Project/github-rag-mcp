@@ -111,10 +111,17 @@ Responsibilities:
 
 - repair missed webhook deliveries
 - backfill new repositories
-- refresh changed issues, pull requests, releases, and docs
+- refresh changed issues, pull requests, releases, docs, issue/PR comments, and commit diffs
 - keep the stores converged even after transient failures
 
 The poller runs hourly in the current deployment.
+
+The commit-diff poller runs in two phases:
+
+- **forward phase** — re-fetches recent commits using `since=lastPolledAt`, acting as redundancy when webhook delivery has stalled. Watermark namespace: `diffs:${repo}`.
+- **backward phase** — walks backward through history using `until=oldestUnprocessedDate`, backfilling commits that predate the webhook or a fresh deployment. Watermark namespace: `diffs_backfill:${repo}`.
+
+Each phase is capped at 10 commits per repo per run. Upserts through `processAndUpsertCommitDiff` are idempotent on `(repo, commit_sha, file_path)`, so overlap between webhook and either phase is safe.
 
 ### 4. Embedding Pipeline
 
