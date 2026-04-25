@@ -53,15 +53,17 @@ const MAX_COMMENTS_EMBEDDED_PER_REPO = 30;
 /** Maximum number of commits fetched in the forward (webhook-redundancy) phase
  *  of the diff poller per repo per run.
  *  Forward is normally a no-op because the webhook path already indexes new
- *  commits; this cap bounds the work when webhook delivery has stalled. */
-const MAX_DIFF_COMMITS_FORWARD_PER_RUN = 10;
+ *  commits; this cap bounds the work when webhook delivery has stalled.
+ *  Sized so that (forward + backward) × per-commit fan-out stays well under the
+ *  Cloudflare Workers per-invocation subrequest limit (issue #124). */
+const MAX_DIFF_COMMITS_FORWARD_PER_RUN = 5;
 
 /** Maximum number of commits fetched in the backward (historical backfill) phase
  *  of the diff poller per repo per run.
  *  Backfill walks backward through repo history one hourly run at a time; the
  *  cap keeps per-run API and embedding cost bounded so the total sweep spreads
- *  over many runs (e.g. 10 commits/run × 24 runs/day = 240 commits/day). */
-const MAX_DIFF_COMMITS_BACKWARD_PER_RUN = 10;
+ *  over many runs (e.g. 5 commits/run × 24 runs/day = 120 commits/day per repo). */
+const MAX_DIFF_COMMITS_BACKWARD_PER_RUN = 5;
 
 /** Sentinel value indicating GitHub returned 304 Not Modified */
 const NOT_MODIFIED = Symbol("NOT_MODIFIED");
