@@ -114,12 +114,13 @@ Responsibilities:
 - refresh changed issues, pull requests, releases, docs, issue/PR comments, and commit diffs
 - keep the stores converged even after transient failures
 
-The poller runs hourly in the current deployment, split across two cron triggers so each invocation gets its own Cloudflare Workers subrequest budget. Bundling every surface into one invocation hits the per-Worker limit on the busiest repository:
+The poller runs hourly in the current deployment, split across three cron triggers so each invocation gets its own Cloudflare Workers subrequest budget. Each upsert fans out to Store DO + Vectorize + D1 FTS + AI embed (up to four internal subrequests), so even the comments + diffs combination overshoots the per-Worker ceiling on busy repositories; the heavy surfaces run one-per-cron, staggered by 15 minutes:
 
 - **`0 * * * *` (light)** — issues, pull requests, releases, docs
-- **`30 * * * *` (heavy)** — issue/PR comments, commit diffs
+- **`15 * * * *` (comments)** — issue / PR comments only
+- **`30 * * * *` (diffs)** — commit diffs only
 
-Dispatch is performed inside `handleScheduled` by inspecting `controller.cron`.
+Dispatch is performed inside `handleScheduled` by inspecting `controller.cron`. Unknown cron expressions fall through to a no-op log to prevent silent regressions when triggers are added later.
 
 The commit-diff poller runs in two phases:
 

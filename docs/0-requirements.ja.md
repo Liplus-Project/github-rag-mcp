@@ -114,12 +114,13 @@ Responsibilities:
 - issue、pull request、release、docs、issue/PR comments、commit diff の変更を再取得する
 - 一時障害後も store を収束させる
 
-現在の deployment では hourly で 2 つの cron trigger に分けて実行する。1 つの cron invocation に全 surface を詰め込むと Cloudflare Workers の per-Worker subrequest 上限に達するため、light / heavy で分割する:
+現在の deployment では hourly で 3 つの cron trigger に分けて実行する。各 upsert が Store DO + Vectorize + D1 FTS + AI embed と最大 4 internal fetch を生むため、heavy 同居 (comments + diffs) でも per-Worker subrequest 上限を超える。surface 単独単位で 15 分ずつずらして発火させる:
 
 - **`0 * * * *` (light)** — issues / pull requests / releases / docs
-- **`30 * * * *` (heavy)** — issue/PR comments / commit diffs
+- **`15 * * * *` (comments)** — issue/PR comments のみ
+- **`30 * * * *` (diffs)** — commit diffs のみ
 
-各 invocation は独立した subrequest 予算を持つので、後段 repo が尾切れする問題が発生しない。dispatch は `controller.cron` で `handleScheduled` 内で行う。
+各 invocation は独立した subrequest 予算を持つ。dispatch は `controller.cron` で `handleScheduled` 内で行う。未知の cron 表現は no-op log で silent regression を防止する。
 
 commit diff poller は 2-phase 構成:
 
