@@ -11,6 +11,7 @@ import type {
   IssueRecord,
   ReleaseRecord,
   DocRecord,
+  WikiDocRecord,
   DiffRecord,
   DiffFileStatus,
   IssueCommentRecord,
@@ -229,6 +230,15 @@ export function releaseVectorId(
  */
 export function docVectorId(repo: string, path: string): Promise<string> {
   return stableVectorId("d", repo, path);
+}
+
+/**
+ * Build Vectorize vector ID for a wiki page.
+ * Deterministic SHA-256-based ID under the "w" prefix.
+ * Wiki page names are URL slugs (dash-separated), unique within a repo's wiki.
+ */
+export function wikiDocVectorId(repo: string, pageName: string): Promise<string> {
+  return stableVectorId("w", repo, pageName);
 }
 
 /**
@@ -803,6 +813,125 @@ export async function processAndUpsertDoc(
   } catch (err) {
     console.error(
       `Failed to embed doc ${repo}/${path}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true };
+  }
+}
+
+// ── Wiki doc surface ─────────────────────────────────────────
+
+/**
+ * Compute SHA-256 over UTF-8 bytes of the wiki content. Used as the change
+ * detection signal in lieu of git blob SHAs (the wiki git protocol is not
+ * exposed via REST, so we hash content directly).
+ */
+export async function sha256Hex(text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return hex;
+}
+
+/**
+ * Embed and upsert a single wiki page.
+ *
+ * Mirrors `processAndUpsertDoc` but writes vector / FTS / store records under
+ * the `wiki_doc` type. Vector ID prefix `"w:"` keeps wiki rows in their own
+ * namespace so they never collide with repo doc rows even when page name and
+ * doc path coincide.
+ *
+ * @param env         Worker env bindings (AI, VECTORIZE, DB_FTS)
+ * @param storeStub   Durable Object stub for IssueStore
+ * @param repo        Repository in "owner/repo" format (the wiki belongs to {repo}.wiki)
+ * @param pageName    GitHub Wiki page slug (dash-separated, e.g., "Home" or "Foo-Bar")
+ * @param extension   Markup file extension that serves the page (e.g., "md", "markdown", "org")
+ * @param content     Raw markup content fetched from raw.githubusercontent.com/wiki
+ * @returns UpsertResult indicating what happened
+ */
+export async function processAndUpsertWikiDoc(
+  env: Env,
+  storeStub: DurableObjectStub,
+  repo: string,
+  pageName: string,
+  extension: string,
+  content: string,
+): Promise<UpsertResult> {
+  const now = new Date().toISOString();
+
+  try {
+    // Generate embedding (use page name as title surrogate, content as body)
+    const embeddingInput = prepareEmbeddingInput(pageName, content);
+    const embedding = await generateEmbedding(env.AI, embeddingInput);
+
+    const metadata: Record<string, string | number> = {
+      repo,
+      number: 0,
+      type: "wiki_doc",
+      state: "active",
+      labels: "",
+      milestone: "",
+      assignees: "",
+      updated_at: now,
+      wiki_path: pageName,
+      wiki_extension: extension,
+    };
+
+    const wvid = await wikiDocVectorId(repo, pageName);
+    await env.VECTORIZE.upsert([
+      {
+        id: wvid,
+        values: embedding,
+        metadata,
+      },
+    ]);
+
+    // Mirror into D1 FTS5. We reuse the existing `doc_path` column to store
+    // the wiki page slug — semantically the same kind of "where did this come
+    // from" field, distinguished by the row's `type='wiki_doc'`.
+    try {
+      await upsertFtsRow(env.DB_FTS, {
+        vectorId: wvid,
+        repo,
+        type: "wiki_doc",
+        state: "active",
+        labels: "",
+        milestone: "",
+        assignees: "",
+        updatedAt: now,
+        docPath: pageName,
+        content: embeddingInput,
+      });
+    } catch (ftsErr) {
+      console.error(
+        `Failed to upsert FTS5 row for wiki ${repo}/${pageName}:`,
+        ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+      );
+    }
+
+    const contentHash = await sha256Hex(content);
+    const record: WikiDocRecord = {
+      repo,
+      pageName,
+      extension,
+      contentHash,
+      updatedAt: now,
+    };
+
+    await storeStub.fetch(
+      new Request("http://store/upsert-wiki-doc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(record),
+      }),
+    );
+
+    return { embedded: true, skippedUnchanged: false, metadataUpdated: false, failed: false };
+  } catch (err) {
+    console.error(
+      `Failed to embed wiki doc ${repo}/${pageName}:`,
       err instanceof Error ? err.message : String(err),
     );
     return { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true };

@@ -7,17 +7,26 @@
  * Stores structured metadata in IssueStore Durable Object.
  */
 
-import type { Env, IssueRecord, ReleaseRecord, DocRecord } from "./types.js";
+import type {
+  Env,
+  IssueRecord,
+  ReleaseRecord,
+  DocRecord,
+  WikiDocRecord,
+} from "./types.js";
 import {
   docVectorId,
+  wikiDocVectorId,
   processAndUpsertIssue,
   processAndUpsertRelease,
   processAndUpsertDoc,
+  processAndUpsertWikiDoc,
   processAndUpsertCommitDiff,
   fetchCommitDetail,
   ingestIssueComment,
   ingestPRReview,
   ingestPRReviewComment,
+  sha256Hex,
   type GitHubIssueData,
   type GitHubReleaseData,
   type GitHubCommentData,
@@ -776,6 +785,268 @@ async function pollDocs(
   );
 }
 
+// ── Wiki doc poller ──────────────────────────────────────────
+
+/**
+ * Wiki page markup file extensions that GitHub Wiki natively supports
+ * (https://github.com/gollum/gollum). Sorted by popularity so the first hit
+ * on a fresh page is usually the first probe.
+ */
+const WIKI_EXTENSIONS = [
+  "md",
+  "markdown",
+  "mediawiki",
+  "org",
+  "rst",
+  "rest",
+  "textile",
+  "pod",
+  "asciidoc",
+  "creole",
+] as const;
+
+/** Maximum wiki pages embedded per repo per cron run.
+ *  Caps Workers AI embed budget the same way MAX_EMBEDDINGS_PER_RUN does for
+ *  repository docs. Remaining changed pages are picked up on the next cron. */
+const MAX_WIKI_EMBEDDINGS_PER_RUN = 30;
+
+/**
+ * Probe whether a repo has a wiki at all.
+ *
+ * GitHub does not expose wiki content through the REST API, but the wiki git
+ * repo is publicly addressable at `https://github.com/{repo}.wiki.git`. The
+ * git smart-HTTP discovery endpoint returns 200 when the wiki exists and 404
+ * when it does not (or wiki is disabled for the repo). This costs one HTTP
+ * round-trip per repo per poll without parsing any git protocol bytes.
+ */
+async function wikiExists(repo: string): Promise<boolean> {
+  const url = `https://github.com/${repo}.wiki.git/info/refs?service=git-upload-pack`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "User-Agent": "github-rag-mcp/0.1.0" },
+    });
+    return resp.status === 200;
+  } catch (err) {
+    console.error(
+      `wikiExists probe failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
+}
+
+/**
+ * Enumerate wiki page slugs by scraping the `/{repo}/wiki/_pages` HTML index.
+ *
+ * GitHub renders this page as a flat list of every wiki page, with each link
+ * shaped `<a ... href="/{repo}/wiki/{page-slug}">`. We extract the slugs with
+ * a tolerant regex and reject the special pseudo-pages (`_pages`, `_history`,
+ * `_new`, `_access`, etc.) that share the underscore prefix convention.
+ *
+ * If the index is empty or the request fails, we return [] so the caller can
+ * fall through to the no-op path.
+ */
+async function listWikiPages(repo: string): Promise<string[]> {
+  const url = `https://github.com/${repo}/wiki/_pages`;
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        Accept: "text/html",
+        "User-Agent": "github-rag-mcp/0.1.0",
+      },
+    });
+    if (!resp.ok) {
+      return [];
+    }
+    const html = await resp.text();
+    // Match `href="/{repo}/wiki/PageName"` — capture the page slug. Both the
+    // repo and the slug may contain dots, dashes, and percent-escapes that we
+    // unwrap with decodeURIComponent below. The character class excludes URL
+    // delimiters that would terminate the slug naturally.
+    const escapedRepo = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`href="/${escapedRepo}/wiki/([^"#?]+)"`, "g");
+    const pages = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      let slug: string;
+      try {
+        slug = decodeURIComponent(m[1]);
+      } catch {
+        slug = m[1];
+      }
+      if (!slug || slug.startsWith("_")) continue;
+      pages.add(slug);
+    }
+    return Array.from(pages);
+  } catch (err) {
+    console.error(
+      `listWikiPages failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return [];
+  }
+}
+
+/**
+ * Fetch a wiki page's raw markup content.
+ *
+ * GitHub serves wiki content from `raw.githubusercontent.com/wiki/{repo}/master/{page}.{ext}`.
+ * If `preferredExtension` is provided (i.e. the page is already known from a
+ * previous poll), try it first to skip the multi-extension probe. Otherwise
+ * iterate through every supported extension until one returns 200.
+ *
+ * Returns null when no extension matches (page may have been deleted, renamed,
+ * or moved to an unsupported format).
+ */
+async function fetchWikiContent(
+  repo: string,
+  pageName: string,
+  preferredExtension?: string,
+): Promise<{ content: string; extension: string } | null> {
+  const probes = preferredExtension
+    ? [preferredExtension, ...WIKI_EXTENSIONS.filter((e) => e !== preferredExtension)]
+    : Array.from(WIKI_EXTENSIONS);
+
+  for (const ext of probes) {
+    const url = `https://raw.githubusercontent.com/wiki/${repo}/master/${encodeURIComponent(pageName)}.${ext}`;
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "github-rag-mcp/0.1.0" },
+      });
+      if (resp.ok) {
+        return { content: await resp.text(), extension: ext };
+      }
+    } catch (err) {
+      console.error(
+        `fetchWikiContent probe ${ext} failed for ${repo}/${pageName}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * Poll a single repository's wiki for content updates.
+ *
+ * Strategy: enumerate page slugs, fetch each page's raw content, hash the
+ * body, and only embed pages whose hash differs from the stored value
+ * (or new pages). Deleted pages — present in the store but absent from the
+ * current `_pages` index — are removed from Vectorize, D1 FTS5, and the
+ * structured store, mirroring the doc poller's deletion path.
+ */
+async function pollWiki(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  // Cheap existence probe so repos without wiki incur a single HEAD-equivalent
+  // round-trip per cron run instead of three (probe + index + content).
+  const hasWiki = await wikiExists(repo);
+  if (!hasWiki) {
+    console.log(`${repo} wiki: not enabled or not accessible — skip`);
+    return;
+  }
+
+  const pageSlugs = await listWikiPages(repo);
+  if (pageSlugs.length === 0) {
+    console.log(`${repo} wiki: 0 pages discovered`);
+  }
+
+  // Snapshot the existing wiki doc records so we can detect deletes and pick
+  // a per-page preferred extension on subsequent polls.
+  const existingResp = await storeStub.fetch(
+    new Request(`http://store/wiki-docs?repo=${encodeURIComponent(repo)}`),
+  );
+  const existing: WikiDocRecord[] = existingResp.ok
+    ? ((await existingResp.json()) as WikiDocRecord[])
+    : [];
+  const existingMap = new Map(existing.map((w) => [w.pageName, w]));
+  const currentSlugs = new Set(pageSlugs);
+  const deleted = existing.filter((w) => !currentSlugs.has(w.pageName));
+
+  let embedded = 0;
+  let skipped = 0;
+  let failed = 0;
+  let removed = 0;
+
+  for (const pageName of pageSlugs) {
+    if (embedded >= MAX_WIKI_EMBEDDINGS_PER_RUN) {
+      console.warn(
+        `Wiki embedding batch limit reached for ${repo} (${MAX_WIKI_EMBEDDINGS_PER_RUN}). ` +
+          `Remaining wiki pages will be retried next cron run.`,
+      );
+      break;
+    }
+
+    const prior = existingMap.get(pageName);
+    const fetched = await fetchWikiContent(repo, pageName, prior?.extension);
+    if (!fetched) {
+      // The slug was discovered in `_pages` but no extension served. Treat as
+      // a transient miss and skip — the next poll will retry without spending
+      // an embedding budget here.
+      console.warn(`No content fetched for ${repo}/wiki/${pageName} (all extensions 404)`);
+      failed++;
+      continue;
+    }
+
+    const contentHash = await sha256Hex(fetched.content);
+    if (prior && prior.contentHash === contentHash && prior.extension === fetched.extension) {
+      skipped++;
+      continue;
+    }
+
+    const result = await processAndUpsertWikiDoc(
+      env,
+      storeStub,
+      repo,
+      pageName,
+      fetched.extension,
+      fetched.content,
+    );
+
+    if (result.embedded) {
+      embedded++;
+    } else if (result.failed) {
+      failed++;
+    }
+  }
+
+  // Handle deleted pages: remove from Vectorize, FTS5, and the store.
+  for (const wikiDoc of deleted) {
+    try {
+      const wvid = await wikiDocVectorId(repo, wikiDoc.pageName);
+      await env.VECTORIZE.deleteByIds([wvid]);
+      try {
+        await deleteFtsRow(env.DB_FTS, wvid);
+      } catch (ftsErr) {
+        console.error(
+          `Failed to delete FTS5 row for wiki ${repo}/${wikiDoc.pageName}:`,
+          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+      }
+      await storeStub.fetch(
+        new Request(
+          `http://store/wiki-doc?repo=${encodeURIComponent(repo)}&page=${encodeURIComponent(wikiDoc.pageName)}`,
+          { method: "DELETE" },
+        ),
+      );
+      removed++;
+    } catch (err) {
+      console.error(
+        `Failed to delete wiki vector ${repo}/${wikiDoc.pageName}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  console.log(
+    `${repo} wiki: ${pageSlugs.length} pages, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${removed} deleted`,
+  );
+}
+
 // ── Comment / review backfill ────────────────────────────────
 
 /** Identify whether an issue record represents a pull request (has the PR surface) */
@@ -1196,6 +1467,8 @@ const LIGHT_CRON = "0 * * * *";
 const COMMENTS_CRON = "15 * * * *";
 /** Cron expression that triggers the diffs-only dispatch. */
 const DIFFS_CRON = "30 * * * *";
+/** Cron expression that triggers the wiki-only dispatch. */
+const WIKI_CRON = "45 * * * *";
 
 /**
  * Run the lightweight surfaces (issues, releases, docs) for one repo.
@@ -1276,6 +1549,27 @@ async function runDiffsSurface(
 }
 
 /**
+ * Run the wiki-content surface for one repo.
+ * Lives in its own cron invocation because each wiki page upsert fans out to
+ * Workers AI embed + Vectorize + D1 FTS + Store DO, and wiki page enumeration
+ * additionally requires an HTML scrape that can be heavy on busy wikis.
+ */
+async function runWikiSurface(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  try {
+    await pollWiki(repo, env, storeStub);
+  } catch (err) {
+    console.error(
+      `Failed to poll wiki for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
  * Main scheduled handler — dispatched by cron expression so each invocation
  * gets its own Cloudflare Workers subrequest budget.
  *
@@ -1343,6 +1637,13 @@ export async function handleScheduled(
   if (controller.cron === DIFFS_CRON) {
     for (const repo of repos) {
       await runDiffsSurface(repo, env, storeStub);
+    }
+    return;
+  }
+
+  if (controller.cron === WIKI_CRON) {
+    for (const repo of repos) {
+      await runWikiSurface(repo, env, storeStub);
     }
     return;
   }

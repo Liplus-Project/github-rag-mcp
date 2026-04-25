@@ -38,6 +38,29 @@ export interface DocRecord {
 }
 
 /**
+ * Stored wiki page record in Durable Object SQLite.
+ *
+ * GitHub Wiki content lives in a separate git repo (`{repo}.wiki.git`) and is
+ * not exposed through the GitHub REST API. We enumerate pages by scraping the
+ * `/{repo}/wiki/_pages` HTML index and fetch raw content via
+ * `https://raw.githubusercontent.com/wiki/{repo}/master/{page}.{ext}`.
+ *
+ * `pageName` matches the GitHub Wiki page identifier (URL slug, dash-separated
+ * for spaces). `extension` records which markup file extension actually serves
+ * the page so subsequent polls can hit the right raw URL directly without
+ * trying every supported extension. `contentHash` is a SHA-256 over the raw
+ * content body and drives change detection (no git blob SHA is available
+ * without invoking the git smart-HTTP protocol).
+ */
+export interface WikiDocRecord {
+  repo: string;
+  pageName: string;
+  extension: string;
+  contentHash: string;
+  updatedAt: string;
+}
+
+/**
  * Stored top-level comment record (issues + PRs) in Durable Object SQLite.
  * `number` is the parent issue or PR number (issues and PRs share the same number space).
  */
@@ -125,6 +148,7 @@ export interface VectorMetadata {
     | "pull_request"
     | "release"
     | "doc"
+    | "wiki_doc"
     | "diff"
     | "issue_comment"
     | "pr_review"
@@ -138,6 +162,10 @@ export interface VectorMetadata {
   tag_name?: string;
   /** Document file path (docs only) */
   doc_path?: string;
+  /** Wiki page name / slug (wiki_doc only) */
+  wiki_path?: string;
+  /** Wiki page file extension (wiki_doc only, e.g., "md", "markdown", "org", "rst") */
+  wiki_extension?: string;
   /** Commit SHA (diffs only) */
   commit_sha?: string;
   /** File path inside the commit (diffs only) */

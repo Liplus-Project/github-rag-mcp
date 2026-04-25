@@ -85,13 +85,13 @@ This MCP server exposes a single consolidated tool. All retrieval modes — sema
 
 ### `search`
 
-Unified search across GitHub issues, pull requests, releases, repository documentation, commit diffs, and comment / review surfaces (top-level comments on issues and PRs, PR review bodies, and PR inline review comments).
+Unified search across GitHub issues, pull requests, releases, repository documentation, GitHub Wiki pages, commit diffs, and comment / review surfaces (top-level comments on issues and PRs, PR review bodies, and PR inline review comments).
 
 Three modes are selected by the combination of `query` and `sort`:
 
 1. **Hybrid semantic search (default)** — dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with the `@cf/baai/bge-reranker-base` cross-encoder. Pass a natural-language `query`.
 2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent activity across every type. This subsumes the previous `list_recent_activity` tool.
-3. **Doc content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API and inlined as a `content` field. Capped at the first few doc rows to bound API fan-out. This subsumes the previous `get_doc_content` tool.
+3. **Doc / wiki content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API; for `type: "wiki_doc"` rows, the raw markup is fetched from `raw.githubusercontent.com/wiki/`. Both are inlined as a `content` field. Capped at the first few rows of each type to bound API fan-out. This subsumes the previous `get_doc_content` tool.
 
 Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode.
 

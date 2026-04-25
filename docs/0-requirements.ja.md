@@ -111,14 +111,15 @@ Responsibilities:
 
 - webhook 取りこぼしを補償する
 - 新しい repository の backfill を行う
-- issue、pull request、release、docs、issue/PR comments、commit diff の変更を再取得する
+- issue、pull request、release、docs、GitHub Wiki page、issue/PR comments、commit diff の変更を再取得する
 - 一時障害後も store を収束させる
 
-現在の deployment では hourly で 3 つの cron trigger に分けて実行する。各 upsert が Store DO + Vectorize + D1 FTS + AI embed と最大 4 internal fetch を生むため、heavy 同居 (comments + diffs) でも per-Worker subrequest 上限を超える。surface 単独単位で 15 分ずつずらして発火させる:
+現在の deployment では hourly で 4 つの cron trigger に分けて実行する。各 upsert が Store DO + Vectorize + D1 FTS + AI embed と最大 4 internal fetch を生むため、heavy 同居 (comments + diffs) でも per-Worker subrequest 上限を超える。surface 単独単位で 15 分ずつずらして発火させる:
 
 - **`0 * * * *` (light)** — issues / pull requests / releases / docs
 - **`15 * * * *` (comments)** — issue/PR comments のみ
 - **`30 * * * *` (diffs)** — commit diffs のみ
+- **`45 * * * *` (wiki)** — GitHub Wiki page のみ
 
 各 invocation は独立した subrequest 予算を持つ。dispatch は `controller.cron` で `handleScheduled` 内で行う。未知の cron 表現は no-op log で silent regression を防止する。
 
@@ -128,6 +129,14 @@ commit diff poller は 2-phase 構成:
 - **backward phase** — `until=oldestUnprocessedDate` で履歴を徐々に遡行する（新規 deployment や webhook 起動前の commit を backfill する経路）。watermark namespace は `diffs_backfill:${repo}`。
 
 1 run あたり上限は forward / backward それぞれ 10 commits。`processAndUpsertCommitDiff` の upsert は `(repo, commit_sha, file_path)` で idempotent なので、webhook / 両 phase 間で overlap しても副作用はない。
+
+wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込み経路。Wiki は別 git repo (`{repo}.wiki.git`) に存在し、REST API も webhook event も持たないため、poller が repo ごとに 3 段の HTTP 呼び出しで処理する:
+
+1. `https://github.com/{repo}.wiki.git/info/refs?service=git-upload-pack` を打って wiki 存在検出（200 = 存在、404 = 無効化済 or 未設置 = skip）。
+2. `/{repo}/wiki/_pages` HTML を scrape して page slug を列挙（`/{repo}/wiki/{slug}` 形式の link を tolerant な regex で拾う、`_pages` / `_history` / `_new` 等の特殊 pseudo-page は除外）。
+3. 各 slug について `https://raw.githubusercontent.com/wiki/{repo}/master/{slug}.{ext}` から raw markup を取得。markup 拡張子は probe 順 (`md` → `markdown` → `mediawiki` → `org` → `rst` → `rest` → `textile` → `pod` → `asciidoc` → `creole`) で検出、次回以降は前回ヒット拡張子を再利用して probe を省略。
+
+変更検出は SHA-256 content hash（wiki git smart-HTTP を叩かないと git blob SHA は取れないため、content 直接 hash）。hash 差分のある page だけ re-embed、`_pages` index に消えた page は Vectorize / D1 FTS5 / structured store から削除。1 cron run あたりの per-repo 上限は `MAX_WIKI_EMBEDDINGS_PER_RUN`（既定 30）で、初回 bulk import が複数 cron に分散する。
 
 ### 4. Embedding Pipeline
 
@@ -213,7 +222,8 @@ Durable Object + SQLite は次の structured record を保持する。
 
 - issue / pull request
 - release
-- documentation file state
+- documentation file state（repo `docs/` 等の `.md` ファイル）
+- GitHub Wiki page state（page slug、拡張子、content hash）
 - commit diff file state（1 row = 1 file-in-commit）
 - polling watermark
 

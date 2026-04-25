@@ -17,7 +17,7 @@
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
- *   IssueStore   -- Issue/PR state store (SQLite-backed)
+ *   IssueStore   -- Issue/PR/wiki state store (SQLite-backed)
  *
  * Cron Trigger:
  *   Hourly (fallback) -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors

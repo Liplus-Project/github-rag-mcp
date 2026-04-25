@@ -57,8 +57,9 @@ binding = "AI"
 #   :00 — light surfaces  (issues, releases, docs)
 #   :15 — comments surface (pollComments)
 #   :30 — diffs surface    (pollDiffs)
+#   :45 — wiki surface     (pollWiki — issue #128)
 [triggers]
-crons = ["0 * * * *", "15 * * * *", "30 * * * *"]
+crons = ["0 * * * *", "15 * * * *", "30 * * * *", "45 * * * *"]
 
 # Required secrets (set via `wrangler secret put <NAME>`):
 # GITHUB_CLIENT_ID      — GitHub App OAuth client ID
