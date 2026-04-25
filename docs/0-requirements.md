@@ -280,13 +280,13 @@ Cost estimate:
 
 ### Fusion mode toggle
 
-`search_issues` accepts a `fusion` parameter:
+`search` accepts a `fusion` parameter:
 
 - `rrf` (default) — combine dense and sparse via RRF.
 - `dense_only` — query Vectorize only (debugging, semantic-heavy queries).
 - `sparse_only` — query D1 FTS5 BM25 only (debugging, exact-term / identifier queries).
 
-`search_issues` also accepts a `rerank` parameter:
+`search` also accepts a `rerank` parameter:
 
 - `true` (default) — re-score the RRF-fused candidates with bge-reranker-base.
 - `false` — skip rerank (faster, no Workers AI rerank cost; recommended for short-identifier queries where lexical match is already decisive, or for debugging).
@@ -295,7 +295,7 @@ The retrieval layer is intended to recover working state, not merely keyword mat
 
 ## MCP Tools
 
-### `search_issues`
+### `search`
 
 Purpose:
 

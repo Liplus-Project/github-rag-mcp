@@ -36,7 +36,7 @@ retrieval layer は **3-tier hybrid search**:
 
 ## MCP ツール
 
-### `search_issues`
+### `search`
 
 issue / pull request / release / documentation / **commit diff** を 3-tier hybrid search で引く。
 

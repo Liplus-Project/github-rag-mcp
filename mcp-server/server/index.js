@@ -7,7 +7,7 @@
  * Authenticates via OAuth 2.1 with PKCE (localhost callback).
  *
  * Tools are proxied to the Worker's MCP endpoint:
- *   search_issues — unified hybrid search / time-ordered activity scan /
+ *   search — unified hybrid search / time-ordered activity scan /
  *                   inline doc content fetch via Vectorize + Workers AI
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -417,8 +417,8 @@ const server = new Server(
 
 const TOOLS = [
   {
-    name: "search_issues",
-    title: "Search Issues",
+    name: "search",
+    title: "Search GitHub",
     description:
       "Unified search across GitHub issues, PRs, releases, documentation, commit diffs, " +
       "issue/PR top-level comments, PR reviews, and PR inline review comments. Three modes: " +
@@ -525,7 +525,7 @@ const TOOLS = [
       },
     },
     annotations: {
-      title: "Search Issues",
+      title: "Search GitHub",
       readOnlyHint: true,
     },
   },

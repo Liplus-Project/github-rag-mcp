@@ -280,7 +280,7 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 
 ### 切替オプション
 
-`search_issues` の `fusion` パラメータで retrieval mode を切り替え可能:
+`search` の `fusion` パラメータで retrieval mode を切り替え可能:
 
 - `rrf` (default) — dense + sparse を RRF で合成
 - `dense_only` — Vectorize のみ（debug、semantic 特化クエリ）
@@ -295,7 +295,7 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 
 ## MCP Tools
 
-### `search_issues`
+### `search`
 
 Purpose:
 

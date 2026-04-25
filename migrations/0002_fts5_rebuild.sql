@@ -3,7 +3,7 @@
 -- Layer = L4 Operations (sparse retrieval surface recovery)
 --
 -- Context:
---   Observed on 2026-04-24: `search_issues` sparse path and FTS upserts both
+--   Observed on 2026-04-24: `search` sparse path and FTS upserts both
 --   failed with `D1_ERROR: database disk image is malformed: SQLITE_CORRUPT
 --   (extended: SQLITE_CORRUPT_VTAB)`. The content-owner table `search_docs`
 --   was intact (1109 rows, direct bm25 queries via `wrangler d1 execute`
