@@ -1188,23 +1188,107 @@ export async function pollDiffs(
   );
 }
 
+/** Cron expression that triggers the light-surface dispatch (issues / releases / docs). */
+const LIGHT_CRON = "0 * * * *";
+/** Cron expression that triggers the heavy-surface dispatch (comments / diffs). */
+const HEAVY_CRON = "30 * * * *";
+
 /**
- * Main scheduled handler — called by Cron Trigger hourly as fallback.
- * Polls all configured repositories for issue/PR updates.
+ * Run the lightweight surfaces (issues, releases, docs) for one repo.
+ * Errors in any one call are logged but do not stop subsequent surfaces or repos.
+ */
+async function runLightSurfaces(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  try {
+    await pollRepo(repo, env, storeStub);
+  } catch (err) {
+    console.error(
+      `Failed to poll ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  try {
+    await pollReleases(repo, env, storeStub);
+  } catch (err) {
+    console.error(
+      `Failed to poll releases for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  try {
+    await pollDocs(repo, env, storeStub);
+  } catch (err) {
+    console.error(
+      `Failed to poll docs for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * Run the heavy surfaces (comments, commit diffs) for one repo.
+ * These two consume the bulk of the Workers subrequest budget so they live
+ * in a separate cron invocation from the light surfaces (see issue #120).
+ */
+async function runHeavySurfaces(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
+  try {
+    await pollComments(repo, env, storeStub);
+  } catch (err) {
+    console.error(
+      `Failed to poll comments for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  try {
+    await pollDiffs(repo, env, storeStub);
+  } catch (err) {
+    console.error(
+      `Failed to poll diffs for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * Main scheduled handler — dispatched by cron expression so each invocation
+ * gets its own Cloudflare Workers subrequest budget.
+ *
+ * Two cron triggers fire hourly, staggered by 30 minutes:
+ *
+ *   - `LIGHT_CRON` (`:00`)  → issues / releases / docs across all repos
+ *   - `HEAVY_CRON` (`:30`)  → comments / diffs across all repos
+ *
+ * Bundling all surfaces into a single invocation exhausts the per-Worker
+ * subrequest limit on busy repositories and surfaces "Too many subrequests"
+ * failures on whichever repo lands at the tail of POLL_REPOS. Splitting the
+ * heavy comment + diff polling into its own cron leaves each invocation with
+ * a fresh budget.
+ *
+ * Unrecognised cron expressions fall through to a no-op log so that adding a
+ * future cron line in `wrangler.toml` does not silently re-introduce the
+ * "every surface in one invocation" pattern.
  */
 export async function handleScheduled(
   controller: ScheduledController,
   env: Env,
   ctx: ExecutionContext,
 ): Promise<void> {
-  console.log("[poller] Running hourly fallback sync");
   console.log(
-    "Cron trigger fired:",
+    "[poller] Cron trigger fired:",
     controller.cron,
     new Date(controller.scheduledTime).toISOString(),
   );
 
-  // Parse repository list from env
   const repos = env.POLL_REPOS
     ? env.POLL_REPOS.split(",")
         .map((r) => r.trim())
@@ -1225,52 +1309,21 @@ export async function handleScheduled(
   const storeId = env.ISSUE_STORE.idFromName("global");
   const storeStub = env.ISSUE_STORE.get(storeId);
 
-  // Poll each repository sequentially to stay within rate limits
-  for (const repo of repos) {
-    try {
-      await pollRepo(repo, env, storeStub);
-    } catch (err) {
-      console.error(
-        `Failed to poll ${repo}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-      // Continue polling other repos even if one fails
+  if (controller.cron === LIGHT_CRON) {
+    for (const repo of repos) {
+      await runLightSurfaces(repo, env, storeStub);
     }
-
-    try {
-      await pollReleases(repo, env, storeStub);
-    } catch (err) {
-      console.error(
-        `Failed to poll releases for ${repo}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-
-    try {
-      await pollDocs(repo, env, storeStub);
-    } catch (err) {
-      console.error(
-        `Failed to poll docs for ${repo}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-
-    try {
-      await pollComments(repo, env, storeStub);
-    } catch (err) {
-      console.error(
-        `Failed to poll comments for ${repo}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-
-    try {
-      await pollDiffs(repo, env, storeStub);
-    } catch (err) {
-      console.error(
-        `Failed to poll diffs for ${repo}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+    return;
   }
+
+  if (controller.cron === HEAVY_CRON) {
+    for (const repo of repos) {
+      await runHeavySurfaces(repo, env, storeStub);
+    }
+    return;
+  }
+
+  console.warn(
+    `[poller] Unknown cron expression "${controller.cron}" — no dispatch configured`,
+  );
 }

@@ -49,9 +49,14 @@ migrations_dir = "migrations"
 [ai]
 binding = "AI"
 
-# Cron Triggers — hourly fallback poll (primary updates via webhook)
+# Cron Triggers — hourly fallback poll (primary updates via webhook).
+# Split into two invocations so each gets its own Workers subrequest budget;
+# bundling all surfaces into a single invocation hits the per-Worker limit on
+# the last (busiest) repo. See issue #120.
+#   :00 — light surfaces (issues, releases, docs)
+#   :30 — heavy surfaces (comments, diffs)
 [triggers]
-crons = ["0 * * * *"]
+crons = ["0 * * * *", "30 * * * *"]
 
 # Required secrets (set via `wrangler secret put <NAME>`):
 # GITHUB_CLIENT_ID      — GitHub App OAuth client ID
