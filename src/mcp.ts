@@ -3,7 +3,7 @@
  * semantic search tool.
  *
  * Tools:
- *   search_issues — hybrid search + time-ordered activity scan + inline doc
+ *   search — hybrid search + time-ordered activity scan + inline doc
  *                    content fetch. Single entry point for GitHub issue / PR /
  *                    release / doc / commit-diff retrieval.
  *
@@ -103,9 +103,9 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
   }
 
   async init() {
-    // ── search_issues ──────────────────────────────────────────
+    // ── search ──────────────────────────────────────────
     this.server.tool(
-      "search_issues",
+      "search",
       "Unified search across GitHub issues, PRs, releases, repository documentation, commit diffs, " +
         "issue/PR top-level comments, PR reviews, and PR inline review comments. " +
         "Three modes via the query / sort axes:\n" +
@@ -695,7 +695,7 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
                   return await queryFts(this.env.DB_FTS, trimmedQuery, internalTopK, ftsFilter);
                 } catch (err) {
                   console.error(
-                    "search_issues: D1 FTS5 query failed:",
+                    "search: D1 FTS5 query failed:",
                     err instanceof Error ? err.message : String(err),
                   );
                   return [];

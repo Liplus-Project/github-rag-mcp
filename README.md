@@ -81,9 +81,9 @@ See:
 
 ## MCP Tools
 
-This MCP server exposes a single consolidated tool. All retrieval modes — semantic search, time-ordered activity scan, and inline doc content fetch — are reached through `search_issues` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
+This MCP server exposes a single consolidated tool. All retrieval modes — semantic search, time-ordered activity scan, and inline doc content fetch — are reached through `search` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
 
-### `search_issues`
+### `search`
 
 Unified search across GitHub issues, pull requests, releases, repository documentation, commit diffs, and comment / review surfaces (top-level comments on issues and PRs, PR review bodies, and PR inline review comments).
 

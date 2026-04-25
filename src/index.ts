@@ -16,7 +16,7 @@
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
- *   RagMcpAgentV2  -- MCP server (tools: search_issues, get_issue_context, list_recent_activity)
+ *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
  *   IssueStore   -- Issue/PR state store (SQLite-backed)
  *
  * Cron Trigger:
@@ -41,7 +41,7 @@ export { IssueStore } from "./store.js";
 // Durable Object: MCP server — legacy stub (retained for migration compatibility only).
 export { RagMcpAgent } from "./mcp.js";
 
-// Durable Object: MCP server (tools: search_issues, get_issue_context, list_recent_activity)
+// Durable Object: MCP server (tools: search, get_issue_context, list_recent_activity)
 export { RagMcpAgentV2 } from "./mcp.js";
 
 // McpAgent.serve() returns a fetch handler for MCP protocol.

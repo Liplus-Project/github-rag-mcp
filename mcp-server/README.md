@@ -86,9 +86,9 @@ Delete these files to force a fresh authorization flow.
 
 | Tool | Description |
 |---|---|
-| `search_issues` | 3-tier hybrid search (dense BGE-M3 + sparse BM25 + cross-encoder rerank) over issues, pull requests, releases, documentation, and commit diffs, with structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`, `top_k`, `fusion`, `rerank`). |
+| `search` | 3-tier hybrid search (dense BGE-M3 + sparse BM25 + cross-encoder rerank) over issues, pull requests, releases, documentation, and commit diffs, with structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`, `top_k`, `fusion`, `rerank`). |
 | `get_issue_context` | Aggregated state for a single issue or PR, including related PRs, branch, and CI status. |
-| `get_doc_content` | Fetch the raw content of a `.md` document from a tracked repository (use after `search_issues` with `type: "doc"`). |
+| `get_doc_content` | Fetch the raw content of a `.md` document from a tracked repository (use after `search` with `type: "doc"`). |
 | `list_recent_activity` | Recent created / updated / closed activity across tracked repositories. |
 
 All tools are read-only.
