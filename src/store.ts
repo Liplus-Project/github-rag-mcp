@@ -10,6 +10,7 @@ import type {
   IssueRecord,
   ReleaseRecord,
   DocRecord,
+  WikiDocRecord,
   DiffRecord,
   DiffFileStatus,
   IssueCommentRecord,
@@ -53,6 +54,16 @@ type DocRow = {
   repo: string;
   path: string;
   blob_sha: string;
+  updated_at: string;
+};
+
+/** Row shape returned by SQLite for the wiki_docs table */
+type WikiDocRow = {
+  [key: string]: SqlStorageValue;
+  repo: string;
+  page_name: string;
+  extension: string;
+  content_hash: string;
   updated_at: string;
 };
 
@@ -196,6 +207,16 @@ function rowToDocRecord(row: DocRow): DocRecord {
   };
 }
 
+function rowToWikiDocRecord(row: WikiDocRow): WikiDocRecord {
+  return {
+    repo: row.repo,
+    pageName: row.page_name,
+    extension: row.extension,
+    contentHash: row.content_hash,
+    updatedAt: row.updated_at,
+  };
+}
+
 function rowToDiffRecord(row: DiffRow): DiffRecord {
   return {
     repo: row.repo,
@@ -286,6 +307,26 @@ export class IssueStore implements DurableObject {
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS idx_docs_repo
         ON docs (repo, updated_at DESC);
+    `);
+
+    // Wiki page records — content hash drives change detection (no git blob SHA
+    // available without invoking git smart HTTP). `extension` records which
+    // markup file extension actually serves the page so subsequent polls can
+    // hit the right raw URL directly.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS wiki_docs (
+        repo         TEXT NOT NULL,
+        page_name    TEXT NOT NULL,
+        extension    TEXT NOT NULL DEFAULT 'md',
+        content_hash TEXT NOT NULL DEFAULT '',
+        updated_at   TEXT NOT NULL,
+        PRIMARY KEY (repo, page_name)
+      );
+    `);
+
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idx_wiki_docs_repo
+        ON wiki_docs (repo, updated_at DESC);
     `);
 
     this.sql.exec(`
@@ -628,6 +669,72 @@ export class IssueStore implements DurableObject {
 
     const cursor = this.sql.exec<DocRow>(query, ...params);
     return [...cursor].map(rowToDocRecord);
+  }
+
+  // ---- Wiki doc CRUD ----
+
+  upsertWikiDoc(record: WikiDocRecord): void {
+    this.sql.exec(
+      `INSERT INTO wiki_docs (repo, page_name, extension, content_hash, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (repo, page_name) DO UPDATE SET
+         extension    = excluded.extension,
+         content_hash = excluded.content_hash,
+         updated_at   = excluded.updated_at`,
+      record.repo,
+      record.pageName,
+      record.extension,
+      record.contentHash,
+      record.updatedAt,
+    );
+  }
+
+  getWikiDoc(repo: string, pageName: string): WikiDocRecord | null {
+    const cursor = this.sql.exec<WikiDocRow>(
+      `SELECT * FROM wiki_docs WHERE repo = ? AND page_name = ?`,
+      repo,
+      pageName,
+    );
+    const rows = [...cursor];
+    if (rows.length === 0) return null;
+    return rowToWikiDocRecord(rows[0]);
+  }
+
+  listWikiDocsByRepo(repo: string): WikiDocRecord[] {
+    const cursor = this.sql.exec<WikiDocRow>(
+      `SELECT * FROM wiki_docs WHERE repo = ? ORDER BY page_name ASC`,
+      repo,
+    );
+    return [...cursor].map(rowToWikiDocRecord);
+  }
+
+  getRecentWikiDocs(
+    opts?: { since?: string; limit?: number; repo?: string },
+  ): WikiDocRecord[] {
+    const limit = opts?.limit ?? 20;
+    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let query: string;
+    let params: (string | number)[];
+
+    if (opts?.repo) {
+      query = `SELECT * FROM wiki_docs WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [opts.repo, since, limit];
+    } else {
+      query = `SELECT * FROM wiki_docs WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
+      params = [since, limit];
+    }
+
+    const cursor = this.sql.exec<WikiDocRow>(query, ...params);
+    return [...cursor].map(rowToWikiDocRecord);
+  }
+
+  deleteWikiDoc(repo: string, pageName: string): void {
+    this.sql.exec(
+      `DELETE FROM wiki_docs WHERE repo = ? AND page_name = ?`,
+      repo,
+      pageName,
+    );
   }
 
   /**
@@ -1191,6 +1298,57 @@ export class IssueStore implements DurableObject {
           repo,
         });
         return Response.json(items);
+      }
+
+      // POST /upsert-wiki-doc — upsert a single wiki doc record
+      if (request.method === "POST" && path === "/upsert-wiki-doc") {
+        const record = (await request.json()) as WikiDocRecord;
+        this.upsertWikiDoc(record);
+        return new Response("ok", { status: 200 });
+      }
+
+      // GET /wiki-doc?repo=...&page=... — get a single wiki doc record
+      if (request.method === "GET" && path === "/wiki-doc") {
+        const repo = url.searchParams.get("repo");
+        const pageName = url.searchParams.get("page");
+        if (!repo || !pageName) {
+          return new Response("missing repo or page", { status: 400 });
+        }
+        const wikiDoc = this.getWikiDoc(repo, pageName);
+        if (!wikiDoc) return new Response("not found", { status: 404 });
+        return Response.json(wikiDoc);
+      }
+
+      // GET /wiki-docs?repo=... — list wiki docs by repo
+      if (request.method === "GET" && path === "/wiki-docs") {
+        const repo = url.searchParams.get("repo");
+        if (!repo) return new Response("missing repo", { status: 400 });
+        const wikiDocs = this.listWikiDocsByRepo(repo);
+        return Response.json(wikiDocs);
+      }
+
+      // GET /recent-wiki-docs?since=...&limit=...&repo=... — recent wiki doc activity
+      if (request.method === "GET" && path === "/recent-wiki-docs") {
+        const since = url.searchParams.get("since") ?? undefined;
+        const limit = url.searchParams.get("limit");
+        const repo = url.searchParams.get("repo") ?? undefined;
+        const items = this.getRecentWikiDocs({
+          since,
+          limit: limit ? parseInt(limit, 10) : undefined,
+          repo,
+        });
+        return Response.json(items);
+      }
+
+      // DELETE /wiki-doc?repo=...&page=... — delete a wiki doc record
+      if (request.method === "DELETE" && path === "/wiki-doc") {
+        const repo = url.searchParams.get("repo");
+        const pageName = url.searchParams.get("page");
+        if (!repo || !pageName) {
+          return new Response("missing repo or page", { status: 400 });
+        }
+        this.deleteWikiDoc(repo, pageName);
+        return new Response("ok", { status: 200 });
       }
 
       // DELETE /doc?repo=...&path=... — delete a doc record

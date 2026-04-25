@@ -111,14 +111,15 @@ Responsibilities:
 
 - repair missed webhook deliveries
 - backfill new repositories
-- refresh changed issues, pull requests, releases, docs, issue/PR comments, and commit diffs
+- refresh changed issues, pull requests, releases, docs, GitHub Wiki pages, issue/PR comments, and commit diffs
 - keep the stores converged even after transient failures
 
-The poller runs hourly in the current deployment, split across three cron triggers so each invocation gets its own Cloudflare Workers subrequest budget. Each upsert fans out to Store DO + Vectorize + D1 FTS + AI embed (up to four internal subrequests), so even the comments + diffs combination overshoots the per-Worker ceiling on busy repositories; the heavy surfaces run one-per-cron, staggered by 15 minutes:
+The poller runs hourly in the current deployment, split across four cron triggers so each invocation gets its own Cloudflare Workers subrequest budget. Each upsert fans out to Store DO + Vectorize + D1 FTS + AI embed (up to four internal subrequests), so even the comments + diffs combination overshoots the per-Worker ceiling on busy repositories; the heavy surfaces run one-per-cron, staggered by 15 minutes:
 
 - **`0 * * * *` (light)** — issues, pull requests, releases, docs
 - **`15 * * * *` (comments)** — issue / PR comments only
 - **`30 * * * *` (diffs)** — commit diffs only
+- **`45 * * * *` (wiki)** — GitHub Wiki pages only
 
 Dispatch is performed inside `handleScheduled` by inspecting `controller.cron`. Unknown cron expressions fall through to a no-op log to prevent silent regressions when triggers are added later.
 
@@ -128,6 +129,14 @@ The commit-diff poller runs in two phases:
 - **backward phase** — walks backward through history using `until=oldestUnprocessedDate`, backfilling commits that predate the webhook or a fresh deployment. Watermark namespace: `diffs_backfill:${repo}`.
 
 Each phase is capped at 10 commits per repo per run. Upserts through `processAndUpsertCommitDiff` are idempotent on `(repo, commit_sha, file_path)`, so overlap between webhook and either phase is safe.
+
+The wiki poller runs in the `:45` cron and is the only ingestion path for GitHub Wiki content. Wiki pages live in a separate git repo (`{repo}.wiki.git`) that GitHub does not expose through the REST API or webhook events; the poller therefore performs three lightweight HTTP calls per repo:
+
+1. Probe `https://github.com/{repo}.wiki.git/info/refs?service=git-upload-pack` to detect whether the wiki exists (200 = present, 404 = disabled or absent — skip the rest).
+2. Scrape the public `/{repo}/wiki/_pages` HTML index for page slugs (the link href shape `/{repo}/wiki/{slug}` is stable enough for a tolerant regex; underscore-prefixed pseudo-pages like `_pages` / `_history` / `_new` are filtered out).
+3. For each slug, fetch the raw markup body from `https://raw.githubusercontent.com/wiki/{repo}/master/{slug}.{ext}`. Markup extension is detected via probe order (`md` → `markdown` → `mediawiki` → `org` → `rst` → `rest` → `textile` → `pod` → `asciidoc` → `creole`); subsequent polls reuse the previously found extension to skip the probe.
+
+Change detection uses a content SHA-256 hash (no git blob SHA is available without invoking the wiki git smart-HTTP protocol). Pages whose hash differs from the stored value are re-embedded; pages absent from the current `_pages` index but present in the store are deleted from Vectorize, D1 FTS5, and the structured state store. Per-repo wiki embedding is capped (`MAX_WIKI_EMBEDDINGS_PER_RUN`, default 30) so a one-time bulk import spreads across multiple cron runs.
 
 ### 4. Embedding Pipeline
 
@@ -159,14 +168,15 @@ Responsibilities:
 Vectorize is the dense side of hybrid retrieval. It stores semantic embeddings and metadata for:
 
 - repository
-- item type (`issue` / `pull_request` / `release` / `doc` / `diff`)
+- item type (`issue` / `pull_request` / `release` / `doc` / `wiki_doc` / `diff` / `issue_comment` / `pr_review` / `pr_review_comment`)
 - state
 - labels (individual slots label_0..3 + CSV fallback)
 - milestone
 - assignees (individual slots assignee_0..1 + CSV fallback)
 - update timestamp
 - release tag name
-- documentation path
+- documentation path (doc rows)
+- wiki page slug + extension (wiki_doc rows)
 - commit SHA, file path, file status, commit date, commit author, blob SHA (diff only)
 
 Metadata indexes (10/10 slots used):
@@ -191,7 +201,7 @@ Rationale:
 Schema overview:
 
 - `search_docs` — external content table (source of truth, `vector_id` primary key).
-- `search_docs_nat_fts` — FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc).
+- `search_docs_nat_fts` — FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc / wiki_doc / comment / review surfaces).
 - `search_docs_code_fts` — FTS5 virtual table with trigram tokenizer for code / SHA / identifier surfaces (diff).
 
 Tokenizer selection:
@@ -213,7 +223,8 @@ Durable Object with SQLite stores structured records for:
 
 - issues and pull requests
 - releases
-- documentation file state
+- documentation file state (repo `docs/` and other tracked `.md`)
+- GitHub Wiki page state (page slug, extension, content hash)
 - commit diff file state (one row per file-in-commit)
 - polling watermarks
 

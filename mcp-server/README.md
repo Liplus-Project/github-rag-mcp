@@ -1,6 +1,6 @@
 # github-rag-mcp
 
-Stdio MCP proxy that bridges local MCP clients (Claude Desktop, Claude Code, etc.) to a remote [github-rag-mcp](https://github.com/Liplus-Project/github-rag-mcp) Cloudflare Worker for semantic and structured search over GitHub issues, pull requests, releases, documentation, and commit diffs.
+Stdio MCP proxy that bridges local MCP clients (Claude Desktop, Claude Code, etc.) to a remote [github-rag-mcp](https://github.com/Liplus-Project/github-rag-mcp) Cloudflare Worker for semantic and structured search over GitHub issues, pull requests, releases, documentation, GitHub Wiki pages, and commit diffs.
 
 This package is the **client-side proxy only**. The actual indexing pipeline (Vectorize + D1 FTS5 + Workers AI BGE-M3 + cross-encoder rerank) runs on the Worker. See the [main repository](https://github.com/Liplus-Project/github-rag-mcp) for architecture and self-hosting instructions.
 
@@ -86,7 +86,7 @@ Delete these files to force a fresh authorization flow.
 
 | Tool | Description |
 |---|---|
-| `search` | 3-tier hybrid search (dense BGE-M3 + sparse BM25 + cross-encoder rerank) over issues, pull requests, releases, documentation, and commit diffs, with structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`, `top_k`, `fusion`, `rerank`). |
+| `search` | 3-tier hybrid search (dense BGE-M3 + sparse BM25 + cross-encoder rerank) over issues, pull requests, releases, documentation, **GitHub Wiki pages**, and commit diffs, with structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`, `top_k`, `fusion`, `rerank`). |
 | `get_issue_context` | Aggregated state for a single issue or PR, including related PRs, branch, and CI status. |
 | `get_doc_content` | Fetch the raw content of a `.md` document from a tracked repository (use after `search` with `type: "doc"`). |
 | `list_recent_activity` | Recent created / updated / closed activity across tracked repositories. |

@@ -21,6 +21,7 @@ import type {
   IssueRecord,
   ReleaseRecord,
   DocRecord,
+  WikiDocRecord,
   DiffRecord,
   IssueCommentRecord,
   PRReviewRecord,
@@ -106,17 +107,19 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
     // ── search ──────────────────────────────────────────
     this.server.tool(
       "search",
-      "Unified search across GitHub issues, PRs, releases, repository documentation, commit diffs, " +
-        "issue/PR top-level comments, PR reviews, and PR inline review comments. " +
+      "Unified search across GitHub issues, PRs, releases, repository documentation, GitHub Wiki pages, " +
+        "commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments. " +
         "Three modes via the query / sort axes:\n" +
         "  1. Hybrid semantic search (default): dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, " +
         "fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with a cross-encoder " +
         "(@cf/baai/bge-reranker-base; set rerank: false to skip).\n" +
         "  2. Time-ordered activity scan: pass an empty (or omitted) query with sort=\"updated_desc\" or \"created_desc\"; " +
         "optionally narrow via since / until to list recent activity across every type.\n" +
-        "  3. Doc content fetch: pass include_content: true to inline the raw file content of top doc results " +
-        "(fetched from the GitHub contents API; capped at the first few doc rows).\n" +
+        "  3. Doc content fetch: pass include_content: true to inline the raw file content of top doc and wiki_doc results " +
+        "(docs via GitHub Contents API, wiki_docs via raw.githubusercontent.com/wiki; capped at the first few rows of each).\n" +
         "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across all modes. " +
+        "Use type: \"doc\" for repository docs (files in /docs/ etc.) and type: \"wiki_doc\" for GitHub Wiki pages — " +
+        "both surfaces co-exist and a same-name page in both is returned as two separate hits. " +
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files " +
         "and non-.md files that are not present in the live document index. " +
         "Use type: \"issue_comment\" / \"pr_review\" / \"pr_review_comment\" to retrieve comment-level judgment history " +
@@ -157,6 +160,7 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             "pull_request",
             "release",
             "doc",
+            "wiki_doc",
             "diff",
             "issue_comment",
             "pr_review",
@@ -167,6 +171,8 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           .default("all")
           .describe(
             "Filter by type (default: all). " +
+              "\"doc\" = repository docs (files in /docs/ etc.). " +
+              "\"wiki_doc\" = GitHub Wiki pages (separate from repo docs; both surfaces co-exist). " +
               "\"diff\" = per-file commit diffs. " +
               "\"issue_comment\" = top-level comments on issues and PRs. " +
               "\"pr_review\" = PR review bodies (approve / request_changes / comment). " +
@@ -285,6 +291,7 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
               | "pull_request"
               | "release"
               | "doc"
+              | "wiki_doc"
               | "diff"
               | "issue_comment"
               | "pr_review"
@@ -302,6 +309,10 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             tag_name?: string;
             prerelease?: boolean;
             doc_path?: string;
+            /** Wiki page slug (wiki_doc rows only) */
+            wiki_path?: string;
+            /** Wiki page extension (wiki_doc rows only, e.g. "md", "org") */
+            wiki_extension?: string;
             commit_sha?: string;
             file_path?: string;
             file_status?: string;
@@ -408,6 +419,39 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
                     updated_at: d.updatedAt,
                     created_at: d.updatedAt,
                     doc_path: d.path,
+                  });
+                }
+              }
+            } catch {
+              // Non-critical.
+            }
+          }
+
+          // Wiki docs
+          if (wantType("wiki_doc")) {
+            try {
+              const res = await store.fetch(
+                new Request(
+                  `http://store/recent-wiki-docs?${buildParams().toString()}`,
+                ),
+              );
+              if (res.ok) {
+                const records = (await res.json()) as WikiDocRecord[];
+                for (const w of records) {
+                  rows.push({
+                    type: "wiki_doc",
+                    repo: w.repo,
+                    number: 0,
+                    title: w.pageName,
+                    state: "active",
+                    labels: [],
+                    milestone: "",
+                    assignees: [],
+                    url: `https://github.com/${w.repo}/wiki/${encodeURIComponent(w.pageName)}`,
+                    updated_at: w.updatedAt,
+                    created_at: w.updatedAt,
+                    wiki_path: w.pageName,
+                    wiki_extension: w.extension,
                   });
                 }
               }
@@ -949,6 +993,8 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           repo: string;
           tag_name?: string;
           doc_path?: string;
+          wiki_path?: string;
+          wiki_extension?: string;
           commit_sha?: string;
           file_path?: string;
           file_status?: string;
@@ -976,6 +1022,13 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           const updatedAt = meta?.updated_at ?? ftsRow?.updatedAt ?? "";
           const tagName = meta?.tag_name ?? ftsRow?.tagName ?? "";
           const docPath = meta?.doc_path ?? ftsRow?.docPath ?? "";
+          // wiki_doc rows reuse the FTS5 `doc_path` column for the page slug —
+          // the schema-level field is unified across "where did this come from",
+          // distinguished by the row's `type`. Vectorize metadata carries the
+          // dedicated `wiki_path` / `wiki_extension` fields so we prefer them
+          // when present and fall back to the FTS row when the dense hit lost.
+          const wikiPath = (meta?.wiki_path as string | undefined) ?? (itemType === "wiki_doc" ? ftsRow?.docPath ?? "" : "");
+          const wikiExtension = (meta?.wiki_extension as string | undefined) ?? "";
           const commitSha = meta?.commit_sha ?? ftsRow?.commitSha ?? "";
           const filePath = meta?.file_path ?? ftsRow?.filePath ?? "";
           const fileStatus = meta?.file_status ?? ftsRow?.fileStatus ?? "";
@@ -991,6 +1044,8 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             url = `https://github.com/${itemRepo}/releases/tag/${tagName}`;
           } else if (itemType === "doc" && docPath) {
             url = `https://github.com/${itemRepo}/blob/main/${docPath}`;
+          } else if (itemType === "wiki_doc" && wikiPath) {
+            url = `https://github.com/${itemRepo}/wiki/${encodeURIComponent(wikiPath)}`;
           } else if (itemType === "diff" && commitSha) {
             url = `https://github.com/${itemRepo}/commit/${commitSha}`;
           } else if (itemType === "issue_comment" && commentId) {
@@ -1024,6 +1079,12 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             repo: itemRepo,
             ...(itemType === "release" ? { tag_name: tagName } : {}),
             ...(itemType === "doc" ? { doc_path: docPath } : {}),
+            ...(itemType === "wiki_doc"
+              ? {
+                  wiki_path: wikiPath,
+                  ...(wikiExtension ? { wiki_extension: wikiExtension } : {}),
+                }
+              : {}),
             ...(itemType === "diff"
               ? {
                   commit_sha: commitSha,
@@ -1077,6 +1138,10 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           } else if (item.type === "doc" && item.repo && item.doc_path) {
             // Use the file path as the title for docs
             item.title = item.doc_path;
+          } else if (item.type === "wiki_doc" && item.repo && item.wiki_path) {
+            // Wiki page slug serves as the title; the row's url already points
+            // at the rendered wiki page so the slug is sufficient context.
+            item.title = item.wiki_path;
           } else if (item.type === "diff") {
             // Title = "{short-sha} {file_path}" so the result list remains
             // scannable without making an additional API call.
@@ -1158,30 +1223,42 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
   }
 
   /**
-   * Inline raw file content on up to INCLUDE_CONTENT_MAX_DOCS doc rows.
-   * Mutates the rows in place (adds a `content` field). Non-doc rows and
-   * rows beyond the cap are left untouched.
+   * Inline raw file content on up to INCLUDE_CONTENT_MAX_DOCS doc / wiki_doc rows.
+   * Mutates the rows in place (adds a `content` field). Non-doc rows and rows
+   * beyond the cap are left untouched.
    *
-   * Scope note: top-N doc fetch is a fan-out bound for GitHub contents API.
-   * Callers needing more doc bodies should page by repeating the search.
+   * Doc rows are fetched via the GitHub Contents REST API (authenticated).
+   * Wiki_doc rows are fetched from `raw.githubusercontent.com/wiki/...` —
+   * GitHub does not expose wiki content through REST, so the public raw URL
+   * is the only path. Both branches share the same INCLUDE_CONTENT_MAX_DOCS
+   * cap since they target the same surface (rendered documentation) from the
+   * caller's perspective.
+   *
+   * Scope note: top-N doc fetch is a fan-out bound. Callers needing more
+   * bodies should page by repeating the search.
    */
   private async inlineDocContent<
     T extends {
       type: string;
       repo?: string;
       doc_path?: string;
+      wiki_path?: string;
+      wiki_extension?: string;
       content?: string;
     },
   >(rows: T[], fallbackRepo?: string): Promise<void> {
     const docRows = rows.filter((r) => r.type === "doc");
-    if (docRows.length === 0) return;
-    const toFetch = docRows.slice(0, INCLUDE_CONTENT_MAX_DOCS);
+    const wikiRows = rows.filter((r) => r.type === "wiki_doc");
+    if (docRows.length === 0 && wikiRows.length === 0) return;
+
+    const docToFetch = docRows.slice(0, INCLUDE_CONTENT_MAX_DOCS);
+    const wikiToFetch = wikiRows.slice(0, INCLUDE_CONTENT_MAX_DOCS);
 
     const token = this.getGitHubToken();
     const headers = githubHeaders(token);
 
-    await Promise.all(
-      toFetch.map(async (row) => {
+    await Promise.all([
+      ...docToFetch.map(async (row) => {
         const docPath = row.doc_path;
         const itemRepo = row.repo ?? fallbackRepo ?? "";
         if (!docPath || !itemRepo) return;
@@ -1194,7 +1271,6 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             encoding?: string;
           };
           if (!data.content) return;
-          // GitHub returns base64-encoded content; decode via Uint8Array for UTF-8 safety.
           const binary = atob(data.content.replace(/\n/g, ""));
           const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
           row.content = new TextDecoder().decode(bytes);
@@ -1202,6 +1278,22 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           // Best-effort inline; a failed fetch leaves `content` unset.
         }
       }),
-    );
+      ...wikiToFetch.map(async (row) => {
+        const pageName = row.wiki_path;
+        const itemRepo = row.repo ?? fallbackRepo ?? "";
+        const ext = row.wiki_extension || "md";
+        if (!pageName || !itemRepo) return;
+        const url = `https://raw.githubusercontent.com/wiki/${itemRepo}/master/${encodeURIComponent(pageName)}.${ext}`;
+        try {
+          const res = await fetch(url, {
+            headers: { "User-Agent": "github-rag-mcp/0.1.0" },
+          });
+          if (!res.ok) return;
+          row.content = await res.text();
+        } catch {
+          // Best-effort inline; a failed fetch leaves `content` unset.
+        }
+      }),
+    ]);
   }
 }

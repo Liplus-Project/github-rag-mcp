@@ -2,7 +2,7 @@
 
 言語: [English](README.md) | 日本語
 
-Cloudflare Workers 上で動く、GitHub の issue / pull request / release / documentation 検索向け MCP サーバーです。
+Cloudflare Workers 上で動く、GitHub の issue / pull request / release / documentation / Wiki page / commit diff / comment 系 検索向け MCP サーバーです。
 
 `github-rag-mcp` は GitHub を AI の shared working memory として扱うために設計されています。会話を丸ごと保存して完全記憶を目指すのではなく、人間にも見える durable artifact から現在の状態を復元しやすくすることを重視します。
 
@@ -85,7 +85,7 @@ GitHub webhooks + GitHub API
 
 ### `search`
 
-GitHub の issue / pull request / release / documentation / commit diff / comment 系 (issue と PR の top-level comment、PR review 本文、PR インラインレビューコメント) を対象にした統合検索ツールです。
+GitHub の issue / pull request / release / documentation / **GitHub Wiki page** / commit diff / comment 系 (issue と PR の top-level comment、PR review 本文、PR インラインレビューコメント) を対象にした統合検索ツールです。
 
 `query` と `sort` の組み合わせで、以下の 3 モードを切り替えます。
 
@@ -123,7 +123,8 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `"issue"` | GitHub issue (title + body)。 |
 | `"pull_request"` | pull request 本文 (title + body)。 |
 | `"release"` | release notes (name + body)。 |
-| `"doc"` | Markdown documentation。 |
+| `"doc"` | repo の Markdown documentation。 |
+| `"wiki_doc"` | GitHub Wiki page。`doc` とは別 surface で同名 page があれば両方検索結果に出る。 |
 | `"diff"` | commit の per-file diff (commit message + file path + patch)。 |
 | `"issue_comment"` | issue と PR の top-level コメント。 |
 | `"pr_review"` | PR レビュー本文 (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`)。 |
