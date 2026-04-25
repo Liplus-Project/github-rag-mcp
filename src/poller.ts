@@ -1190,8 +1190,10 @@ export async function pollDiffs(
 
 /** Cron expression that triggers the light-surface dispatch (issues / releases / docs). */
 const LIGHT_CRON = "0 * * * *";
-/** Cron expression that triggers the heavy-surface dispatch (comments / diffs). */
-const HEAVY_CRON = "30 * * * *";
+/** Cron expression that triggers the comments-only dispatch. */
+const COMMENTS_CRON = "15 * * * *";
+/** Cron expression that triggers the diffs-only dispatch. */
+const DIFFS_CRON = "30 * * * *";
 
 /**
  * Run the lightweight surfaces (issues, releases, docs) for one repo.
@@ -1231,11 +1233,12 @@ async function runLightSurfaces(
 }
 
 /**
- * Run the heavy surfaces (comments, commit diffs) for one repo.
- * These two consume the bulk of the Workers subrequest budget so they live
- * in a separate cron invocation from the light surfaces (see issue #120).
+ * Run the comment-backfill surface for one repo.
+ * Lives in its own cron invocation because each comment upsert fans out to
+ * Store DO + Vectorize + D1 FTS + AI embed and the 5-repo aggregate alone
+ * approaches the per-Worker subrequest ceiling (issue #122).
  */
-async function runHeavySurfaces(
+async function runCommentsSurface(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
@@ -1248,7 +1251,18 @@ async function runHeavySurfaces(
       err instanceof Error ? err.message : String(err),
     );
   }
+}
 
+/**
+ * Run the commit-diff (forward + backward) surface for one repo.
+ * Same isolation rationale as `runCommentsSurface` — each diff upsert also
+ * fans out to several internal subrequests so it gets its own invocation.
+ */
+async function runDiffsSurface(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+): Promise<void> {
   try {
     await pollDiffs(repo, env, storeStub);
   } catch (err) {
@@ -1263,18 +1277,19 @@ async function runHeavySurfaces(
  * Main scheduled handler — dispatched by cron expression so each invocation
  * gets its own Cloudflare Workers subrequest budget.
  *
- * Two cron triggers fire hourly, staggered by 30 minutes:
+ * Three cron triggers fire hourly, staggered by 15 minutes:
  *
- *   - `LIGHT_CRON` (`:00`)  → issues / releases / docs across all repos
- *   - `HEAVY_CRON` (`:30`)  → comments / diffs across all repos
+ *   - `LIGHT_CRON`    (`:00`) → issues / releases / docs across all repos
+ *   - `COMMENTS_CRON` (`:15`) → issue / PR comments across all repos
+ *   - `DIFFS_CRON`    (`:30`) → commit diffs (forward + backward) across all repos
  *
- * Bundling all surfaces into a single invocation exhausts the per-Worker
- * subrequest limit on busy repositories and surfaces "Too many subrequests"
- * failures on whichever repo lands at the tail of POLL_REPOS. Splitting the
- * heavy comment + diff polling into its own cron leaves each invocation with
- * a fresh budget.
+ * Bundling all surfaces (or even just comments + diffs) into a single
+ * invocation exhausts the per-Worker subrequest limit on busy repositories
+ * because every upsert fans out to Store DO + Vectorize + D1 FTS + AI embed.
+ * Splitting heavy surfaces one-per-cron leaves each invocation with a fresh
+ * budget for its single surface across all repos.
  *
- * Unrecognised cron expressions fall through to a no-op log so that adding a
+ * Unrecognised cron expressions fall through to a no-op log so adding a
  * future cron line in `wrangler.toml` does not silently re-introduce the
  * "every surface in one invocation" pattern.
  */
@@ -1316,9 +1331,16 @@ export async function handleScheduled(
     return;
   }
 
-  if (controller.cron === HEAVY_CRON) {
+  if (controller.cron === COMMENTS_CRON) {
     for (const repo of repos) {
-      await runHeavySurfaces(repo, env, storeStub);
+      await runCommentsSurface(repo, env, storeStub);
+    }
+    return;
+  }
+
+  if (controller.cron === DIFFS_CRON) {
+    for (const repo of repos) {
+      await runDiffsSurface(repo, env, storeStub);
     }
     return;
   }

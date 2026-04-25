@@ -50,13 +50,15 @@ migrations_dir = "migrations"
 binding = "AI"
 
 # Cron Triggers — hourly fallback poll (primary updates via webhook).
-# Split into two invocations so each gets its own Workers subrequest budget;
-# bundling all surfaces into a single invocation hits the per-Worker limit on
-# the last (busiest) repo. See issue #120.
-#   :00 — light surfaces (issues, releases, docs)
-#   :30 — heavy surfaces (comments, diffs)
+# Each surface group runs in its own invocation so it gets a fresh Workers
+# subrequest budget. Bundling comments + diffs together still tripped the
+# per-Worker limit (issue #122) because each upsert fans out to Store DO +
+# Vectorize + D1 FTS + AI embed.
+#   :00 — light surfaces  (issues, releases, docs)
+#   :15 — comments surface (pollComments)
+#   :30 — diffs surface    (pollDiffs)
 [triggers]
-crons = ["0 * * * *", "30 * * * *"]
+crons = ["0 * * * *", "15 * * * *", "30 * * * *"]
 
 # Required secrets (set via `wrangler secret put <NAME>`):
 # GITHUB_CLIENT_ID      — GitHub App OAuth client ID
