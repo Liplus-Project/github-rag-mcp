@@ -788,27 +788,36 @@ async function pollDocs(
 // ── Wiki doc poller ──────────────────────────────────────────
 
 /**
- * Wiki page markup file extensions that GitHub Wiki natively supports
- * (https://github.com/gollum/gollum). Sorted by popularity so the first hit
- * on a fresh page is usually the first probe.
+ * Wiki page markup file extensions probed when no cached extension is available.
+ *
+ * GitHub Wiki natively supports more formats (mediawiki / org / rst / pod /
+ * textile / asciidoc / creole) but the per-page extension probe is a pure
+ * subrequest cost — every miss eats 1 of the Worker's 1000-per-invocation
+ * subrequest budget (issue #130). Markdown is the dominant format in
+ * practice; restricting the probe set to `md` + `markdown` keeps the
+ * worst-case subrequest fan-out predictable while still covering every wiki
+ * we currently care about. Once a page is ingested the actual extension is
+ * cached on its WikiDocRecord and reused on subsequent polls regardless of
+ * this probe-set narrowing.
+ *
+ * Follow-up: re-introduce the rarer extensions behind a per-repo opt-in flag
+ * so the bulk-import worst case stays bounded. Tracked in #130 follow-up.
  */
-const WIKI_EXTENSIONS = [
-  "md",
-  "markdown",
-  "mediawiki",
-  "org",
-  "rst",
-  "rest",
-  "textile",
-  "pod",
-  "asciidoc",
-  "creole",
-] as const;
+const WIKI_EXTENSIONS = ["md", "markdown"] as const;
 
 /** Maximum wiki pages embedded per repo per cron run.
  *  Caps Workers AI embed budget the same way MAX_EMBEDDINGS_PER_RUN does for
  *  repository docs. Remaining changed pages are picked up on the next cron. */
 const MAX_WIKI_EMBEDDINGS_PER_RUN = 30;
+
+/** Maximum wiki pages whose content we *probe* (HTTP fetch) per repo per cron
+ *  run. Distinct from MAX_WIKI_EMBEDDINGS_PER_RUN because probing alone
+ *  consumes Worker subrequests even when the page has not changed (we still
+ *  fetch the raw content to compare hashes). On bulk import this is the
+ *  dominant subrequest cost — cap it so 5+ repos with deep wikis cannot
+ *  exhaust the per-invocation 1000-subrequest ceiling (issue #130). Pages
+ *  beyond the cap are deferred to the next cron run. */
+const MAX_WIKI_PAGES_PROBED_PER_REPO_PER_RUN = 20;
 
 /**
  * Probe whether a repo has a wiki at all.
@@ -971,6 +980,7 @@ async function pollWiki(
   let skipped = 0;
   let failed = 0;
   let removed = 0;
+  let probed = 0;
 
   for (const pageName of pageSlugs) {
     if (embedded >= MAX_WIKI_EMBEDDINGS_PER_RUN) {
@@ -981,7 +991,16 @@ async function pollWiki(
       break;
     }
 
+    if (probed >= MAX_WIKI_PAGES_PROBED_PER_REPO_PER_RUN) {
+      console.warn(
+        `Wiki probe batch limit reached for ${repo} (${MAX_WIKI_PAGES_PROBED_PER_REPO_PER_RUN}). ` +
+          `Each probe consumes a Worker subrequest; bulk imports spread across multiple cron runs.`,
+      );
+      break;
+    }
+
     const prior = existingMap.get(pageName);
+    probed++;
     const fetched = await fetchWikiContent(repo, pageName, prior?.extension);
     if (!fetched) {
       // The slug was discovered in `_pages` but no extension served. Treat as
