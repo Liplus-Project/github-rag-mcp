@@ -1283,7 +1283,7 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         const itemRepo = row.repo ?? fallbackRepo ?? "";
         const ext = row.wiki_extension || "md";
         if (!pageName || !itemRepo) return;
-        const url = `https://raw.githubusercontent.com/wiki/${itemRepo}/master/${encodeURIComponent(pageName)}.${ext}`;
+        const url = `https://raw.githubusercontent.com/wiki/${itemRepo}/${encodeURIComponent(pageName)}.${ext}`;
         try {
           const res = await fetch(url, {
             headers: { "User-Agent": "github-rag-mcp/0.1.0" },
