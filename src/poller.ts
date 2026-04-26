@@ -901,7 +901,8 @@ async function listWikiPages(repo: string): Promise<string[]> {
 /**
  * Fetch a wiki page's raw markup content.
  *
- * GitHub serves wiki content from `raw.githubusercontent.com/wiki/{repo}/master/{page}.{ext}`.
+ * GitHub serves wiki content from `raw.githubusercontent.com/wiki/{repo}/{page}.{ext}`
+ * (no branch segment — wiki raw URLs route directly without referencing master/main).
  * If `preferredExtension` is provided (i.e. the page is already known from a
  * previous poll), try it first to skip the multi-extension probe. Otherwise
  * iterate through every supported extension until one returns 200.
@@ -919,7 +920,7 @@ async function fetchWikiContent(
     : Array.from(WIKI_EXTENSIONS);
 
   for (const ext of probes) {
-    const url = `https://raw.githubusercontent.com/wiki/${repo}/master/${encodeURIComponent(pageName)}.${ext}`;
+    const url = `https://raw.githubusercontent.com/wiki/${repo}/${encodeURIComponent(pageName)}.${ext}`;
     try {
       const resp = await fetch(url, {
         headers: { "User-Agent": "github-rag-mcp/0.1.0" },
