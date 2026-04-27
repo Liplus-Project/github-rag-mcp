@@ -59,6 +59,18 @@ const MAX_COMMENT_BACKFILL_PARENTS = 20;
  *  Workers AI embed calls are the dominant cost for the comment surface. */
 const MAX_COMMENTS_EMBEDDED_PER_REPO = 30;
 
+/** Maximum number of GitHub API *fetches* the comment poller issues per repo
+ *  per cron run. Distinct from MAX_COMMENTS_EMBEDDED_PER_REPO because each
+ *  parent fans out to up to 3 endpoints (issue comments + PR reviews + PR
+ *  review comments) and every fetch consumes 1 of the Worker's
+ *  1000-subrequest-per-invocation budget — even on parents whose comments are
+ *  unchanged and embed-skipped. With MAX_COMMENT_BACKFILL_PARENTS = 20 the
+ *  worst-case fan-out is 60 fetches per repo, which combined with diff / wiki
+ *  / issue pollers exhausts the budget on busy repos (issue #134, observed on
+ *  Liplus-Project/dipper_ai). Capping fetches keeps the comment surface's
+ *  worst-case bounded; remaining parents are picked up on the next cron. */
+const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 30;
+
 /** Maximum number of commits fetched in the forward (webhook-redundancy) phase
  *  of the diff poller per repo per run.
  *  Forward is normally a no-op because the webhook path already indexes new
@@ -1190,15 +1202,24 @@ async function pollComments(
   let reviewCommentsSkipped = 0;
   let reviewCommentsFiltered = 0;
   let fetchFailures = 0;
+  let fetchesIssued = 0;
+  let fetchBudgetExhausted = false;
 
   const embedBudget = (): boolean =>
     commentsEmbedded + reviewsEmbedded + reviewCommentsEmbedded < MAX_COMMENTS_EMBEDDED_PER_REPO;
 
+  const fetchBudget = (): boolean => fetchesIssued < MAX_COMMENT_FETCHES_PER_REPO_PER_RUN;
+
   for (const parent of parents) {
     if (!embedBudget()) break;
+    if (!fetchBudget()) {
+      fetchBudgetExhausted = true;
+      break;
+    }
 
     // Top-level comments (issues and PRs both route through /issues/{N}/comments)
     try {
+      fetchesIssued++;
       const comments = await fetchIssueComments(repo, parent.number, env.GITHUB_TOKEN);
       for (const c of comments) {
         if (!embedBudget()) break;
@@ -1219,8 +1240,13 @@ async function pollComments(
     if (!isPullRequestRecord(parent)) continue;
 
     if (!embedBudget()) break;
+    if (!fetchBudget()) {
+      fetchBudgetExhausted = true;
+      break;
+    }
 
     try {
+      fetchesIssued++;
       const reviews = await fetchPRReviews(repo, parent.number, env.GITHUB_TOKEN);
       for (const r of reviews) {
         if (!embedBudget()) break;
@@ -1238,8 +1264,13 @@ async function pollComments(
     }
 
     if (!embedBudget()) break;
+    if (!fetchBudget()) {
+      fetchBudgetExhausted = true;
+      break;
+    }
 
     try {
+      fetchesIssued++;
       const inline = await fetchPRReviewComments(repo, parent.number, env.GITHUB_TOKEN);
       for (const rc of inline) {
         if (!embedBudget()) break;
@@ -1257,8 +1288,17 @@ async function pollComments(
     }
   }
 
+  if (fetchBudgetExhausted) {
+    console.warn(
+      `pollComments: fetch budget reached for ${repo} ` +
+        `(${MAX_COMMENT_FETCHES_PER_REPO_PER_RUN} fetches). Each parent fans out to up ` +
+        `to 3 endpoints; remaining parents are deferred to the next cron run.`,
+    );
+  }
+
   console.log(
     `${repo} comments: scanned ${parents.length} parents, ` +
+      `fetches_issued=${fetchesIssued}/${MAX_COMMENT_FETCHES_PER_REPO_PER_RUN}, ` +
       `top-level [embedded=${commentsEmbedded}, skipped=${commentsSkipped}, filtered=${commentsFiltered}], ` +
       `reviews [embedded=${reviewsEmbedded}, skipped=${reviewsSkipped}, filtered=${reviewsFiltered}], ` +
       `inline [embedded=${reviewCommentsEmbedded}, skipped=${reviewCommentsSkipped}, filtered=${reviewCommentsFiltered}], ` +
