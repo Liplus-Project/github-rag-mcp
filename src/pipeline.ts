@@ -1183,9 +1183,25 @@ export async function processAndUpsertCommitDiff(
           content: inputs[i],
         });
       } catch (ftsErr) {
+        // Keep the high-level line for log searchability, then surface the underlying
+        // D1 error shape on a second line so the next cron run produces actionable
+        // context (error name, vector_id, content/path sizes). See #135.
         console.error(
           `Failed to upsert FTS5 row for diff ${repo}@${commitSha}/${f.filename}:`,
           ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+        console.error(
+          `FTS5 diff upsert detail (#135):`,
+          JSON.stringify({
+            errorName: ftsErr instanceof Error ? ftsErr.name : typeof ftsErr,
+            vectorId: v.id,
+            tokenizerKind: "code",
+            contentChars: inputs[i].length,
+            filePathChars: f.filename.length,
+            fileStatus: normaliseFileStatus(f.status),
+            commitSha,
+            repo,
+          }),
         );
       }
     }
