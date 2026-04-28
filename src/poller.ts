@@ -68,8 +68,21 @@ const MAX_COMMENTS_EMBEDDED_PER_REPO = 30;
  *  worst-case fan-out is 60 fetches per repo, which combined with diff / wiki
  *  / issue pollers exhausts the budget on busy repos (issue #134, observed on
  *  Liplus-Project/dipper_ai). Capping fetches keeps the comment surface's
- *  worst-case bounded; remaining parents are picked up on the next cron. */
-const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 30;
+ *  worst-case bounded; remaining parents are picked up on the next cron.
+ *
+ *  Numeric history (issue #134):
+ *    - PR #136 (merged 2026-04-27) introduced this cap at 30 as the initial
+ *      defense.
+ *    - 2026-04-28T15:15 UTC :15 cron observation (post-redeploy +33min): all
+ *      5 polled repos still hit `fetches_issued=30/30, fetch_failures=30,
+ *      Too many subrequests`. The cap fires (warn `pollComments: fetch budget
+ *      reached`), but the 1000-subrequest-per-invocation budget is exhausted
+ *      before fetches reach 30. Each fetch carries multi-subrequest overhead
+ *      (Vectorize embed + D1 FTS upsert + Workers AI + Store DO calls), so
+ *      5 repos × 30 fetches × ~3-5 subrequests easily blows past 1000.
+ *    - Lowered to 10: worst-case 5 × 10 = 50 fetches × ~5 subrequests ≈ 250,
+ *      leaving headroom for per-parent overhead and other pollers. */
+const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 10;
 
 /** Maximum number of commits fetched in the forward (webhook-redundancy) phase
  *  of the diff poller per repo per run.
