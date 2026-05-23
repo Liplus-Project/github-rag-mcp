@@ -1,6 +1,6 @@
 # github-rag-mcp
 
-Stdio MCP proxy that bridges local MCP clients (Claude Desktop, Claude Code, etc.) to a remote [github-rag-mcp](https://github.com/Liplus-Project/github-rag-mcp) Cloudflare Worker for semantic and structured search over GitHub issues, pull requests, releases, documentation, GitHub Wiki pages, and commit diffs.
+Stdio MCP proxy that bridges local MCP clients (Claude Desktop, Claude Code, etc.) to a remote [github-rag-mcp](https://github.com/Liplus-Project/github-rag-mcp) Cloudflare Worker for semantic and structured search over GitHub issues, pull requests, releases, documentation, GitHub Wiki pages, commit diffs, and comment / review surfaces (issue/PR top-level comments, PR review bodies, PR inline review comments).
 
 This package is the **client-side proxy only**. The actual indexing pipeline (Vectorize + D1 FTS5 + Workers AI BGE-M3 + cross-encoder rerank) runs on the Worker. See the [main repository](https://github.com/Liplus-Project/github-rag-mcp) for architecture and self-hosting instructions.
 
@@ -88,14 +88,15 @@ Delete these files to force a fresh authorization flow.
 
 ## Tools exposed
 
+A single consolidated tool, `search`, covers every retrieval mode. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters of `search`.
+
 | Tool | Description |
 |---|---|
-| `search` | 3-tier hybrid search (dense BGE-M3 + sparse BM25 + cross-encoder rerank) over issues, pull requests, releases, documentation, **GitHub Wiki pages**, and commit diffs, with structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`, `top_k`, `fusion`, `rerank`). |
-| `get_issue_context` | Aggregated state for a single issue or PR, including related PRs, branch, and CI status. |
-| `get_doc_content` | Fetch the raw content of a `.md` document from a tracked repository (use after `search` with `type: "doc"`). |
-| `list_recent_activity` | Recent created / updated / closed activity across tracked repositories. |
+| `search` | Unified search across GitHub issues, pull requests, releases, repository documentation, **GitHub Wiki pages**, commit diffs, and comment / review surfaces. Three modes are selected by the combination of `query` and `sort`: (1) **hybrid semantic search** — dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, fused via RRF, then re-scored with the `bge-reranker-base` cross-encoder; (2) **time-ordered activity scan** — leave `query` empty and set `sort` to `updated_desc` / `created_desc`, optionally narrowed with `since` / `until`; (3) **doc / wiki content fetch** — set `include_content: true` to inline raw markup on top `doc` and `wiki_doc` rows. Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`, `top_k`, `fusion`, `rerank`) apply in every mode. |
 
-All tools are read-only.
+The `type` filter accepts: `issue`, `pull_request`, `release`, `doc`, `wiki_doc`, `diff`, `issue_comment`, `pr_review`, `pr_review_comment`, or `all` (default).
+
+`search` is read-only. For the full parameter reference and examples, see the [main repository README](https://github.com/Liplus-Project/github-rag-mcp#search).
 
 ## Authentication flow
 
