@@ -28,8 +28,9 @@ import {
   createOAuthProvider,
   handleAuthorize,
   handleGitHubCallback,
-  type OAuthEnv,
-  type GitHubUserProps,
+  readGitHubProps,
+  readOAuthHelpers,
+  writeMcpProps,
 } from "./oauth.js";
 import { handleScheduled } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
@@ -127,36 +128,30 @@ const innerHandler: ExportedHandler<Env> = {
 
     // -- MCP endpoint (OAuth-protected, ctx.props set by OAuthProvider) --
     if (url.pathname.startsWith("/mcp")) {
-      const props = (ctx as unknown as { props: GitHubUserProps }).props;
+      const props = readGitHubProps(ctx);
       if (!props?.githubUserId) {
         return new Response("Unauthorized", { status: 401 });
       }
 
       // Rewrite ctx.props to McpProps shape expected by RagMcpAgentV2.
       // Pass the GitHub access token so the agent can make API calls.
-      (ctx as unknown as { props: { githubUserId: number; githubLogin: string; accessToken: string } }).props = {
+      writeMcpProps(ctx, {
         githubUserId: props.githubUserId,
         githubLogin: props.githubLogin,
         accessToken: props.githubAccessToken,
-      };
+      });
 
       return mcpHandler.fetch(request, env, ctx);
     }
 
     // -- OAuth authorize (redirect to GitHub) --
     if (url.pathname === "/oauth/authorize") {
-      const oauthHelpers = (
-        env as unknown as { OAUTH_PROVIDER: Parameters<typeof handleAuthorize>[2] }
-      ).OAUTH_PROVIDER;
-      return handleAuthorize(request, env, oauthHelpers);
+      return handleAuthorize(request, env, readOAuthHelpers(env));
     }
 
     // -- OAuth callback (GitHub redirects back here) --
     if (url.pathname === "/oauth/callback") {
-      const oauthHelpers = (
-        env as unknown as { OAUTH_PROVIDER: Parameters<typeof handleGitHubCallback>[2] }
-      ).OAUTH_PROVIDER;
-      return handleGitHubCallback(request, env, oauthHelpers);
+      return handleGitHubCallback(request, env, readOAuthHelpers(env));
     }
 
     return new Response("Not found", { status: 404 });
@@ -170,13 +165,11 @@ const innerHandler: ExportedHandler<Env> = {
 // OAuthProvider wraps the inner handler, adding OAuth endpoints
 // and protecting /mcp route with access token validation.
 // Note: OAuthProvider only wraps fetch. We re-export scheduled separately.
-const oauthWrapped = createOAuthProvider(
-  innerHandler as unknown as ExportedHandler<OAuthEnv & Record<string, unknown>>,
-);
+const oauthWrapped = createOAuthProvider(innerHandler);
 
 export default {
   fetch: (req: Request, env: Env, ctx: ExecutionContext) =>
-    oauthWrapped.fetch(req, env as unknown as OAuthEnv & Record<string, unknown>, ctx),
+    oauthWrapped.fetch(req, env, ctx),
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     await handleScheduled(controller, env, ctx);
   },

@@ -211,19 +211,22 @@ export interface VectorMetadata {
   assignee_1?: string;
 }
 
-/** Env bindings for the Worker */
-export interface Env {
+import type { OAuthEnv } from "./oauth.js";
+
+/**
+ * Env bindings for the Worker.
+ *
+ * Extends OAuthEnv so OAUTH_KV / GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET are
+ * inherited; this makes Env structurally compatible with the OAuthProvider
+ * boundary in oauth.ts without an ad-hoc cast at the wiring site.
+ */
+export interface Env extends OAuthEnv {
   MCP_OBJECT: DurableObjectNamespace;
   ISSUE_STORE: DurableObjectNamespace;
-  OAUTH_KV: KVNamespace;
   VECTORIZE: Vectorize;
   /** D1 database for full-text search (sparse side of hybrid retrieval, BM25 via FTS5) */
   DB_FTS: D1Database;
   AI: Ai;
-  /** GitHub App OAuth client ID (set via `wrangler secret put`) */
-  GITHUB_CLIENT_ID: string;
-  /** GitHub App OAuth client secret (set via `wrangler secret put`) */
-  GITHUB_CLIENT_SECRET: string;
   /** GitHub personal access token or installation token for API access (set via `wrangler secret put`) */
   GITHUB_TOKEN: string;
   /** Comma-separated list of repos to poll, e.g. "owner/repo1,owner/repo2" */

@@ -45,6 +45,45 @@ export interface OAuthEnv {
 }
 
 /**
+ * Props consumed by RagMcpAgentV2 on the /mcp route, after the inner handler
+ * rewrites ctx.props from GitHubUserProps. Distinct from GitHubUserProps so
+ * the MCP agent does not see GitHub refresh tokens it has no use for.
+ */
+export interface McpProps {
+  githubUserId: number;
+  githubLogin: string;
+  accessToken: string;
+}
+
+/**
+ * Read GitHubUserProps from ctx. OAuthProvider sets ctx.props after access
+ * token validation on protected routes, but the workers-types ExecutionContext
+ * declaration does not include `props`. Centralize the cast here so call
+ * sites stay type-safe.
+ */
+export function readGitHubProps(ctx: ExecutionContext): GitHubUserProps | undefined {
+  return (ctx as unknown as { props?: GitHubUserProps }).props;
+}
+
+/**
+ * Replace ctx.props with the McpProps shape RagMcpAgentV2 expects.
+ * Mirrors readGitHubProps on the write side.
+ */
+export function writeMcpProps(ctx: ExecutionContext, props: McpProps): void {
+  (ctx as unknown as { props: McpProps }).props = props;
+}
+
+/**
+ * Read OAUTH_PROVIDER helper that OAuthProvider injects into env on default
+ * routes. The library injects OAuthHelpers under a known key but its env
+ * generic does not declare it, so call sites would otherwise need an ad-hoc
+ * cast each time.
+ */
+export function readOAuthHelpers(env: OAuthEnv): OAuthHelpers {
+  return (env as unknown as OAuthEnv & { OAUTH_PROVIDER: OAuthHelpers }).OAUTH_PROVIDER;
+}
+
+/**
  * Handle the /oauth/authorize endpoint.
  *
  * This is the authorization endpoint referenced in OAuthProvider config.
@@ -170,7 +209,21 @@ export async function handleGitHubCallback(
 }
 
 /**
+ * Worker handler shape returned by createOAuthProvider. Hides the library's
+ * `OAuthEnv & Record<string, unknown>` index-signature requirement so
+ * downstream wiring can stay in terms of the caller's own Env type.
+ */
+export interface OAuthWrappedHandler<TEnv extends OAuthEnv> {
+  fetch: (request: Request, env: TEnv, ctx: ExecutionContext) => Promise<Response>;
+}
+
+/**
  * Create the OAuthProvider instance.
+ *
+ * Generic over TEnv so callers wire in their own Worker Env type without
+ * casting at the call site. All `Record<string, unknown>` index-signature
+ * gymnastics live here, at the single boundary between the caller's Env and
+ * the OAuthProvider library's generic constraint.
  *
  * The provider wraps the existing Worker default handler, adding OAuth
  * endpoints and protecting API routes. Non-OAuth routes pass through
@@ -178,17 +231,20 @@ export async function handleGitHubCallback(
  *
  * @param defaultHandler - The existing Worker fetch handler to wrap
  */
-export function createOAuthProvider(
-  defaultHandler: ExportedHandler<OAuthEnv & Record<string, unknown>>,
-): OAuthProvider<OAuthEnv & Record<string, unknown>> {
-  return new OAuthProvider<OAuthEnv & Record<string, unknown>>({
+export function createOAuthProvider<TEnv extends OAuthEnv>(
+  defaultHandler: ExportedHandler<TEnv>,
+): OAuthWrappedHandler<TEnv> {
+  type LibEnv = OAuthEnv & Record<string, unknown>;
+  const libHandler = defaultHandler as unknown as ExportedHandler<LibEnv>;
+
+  const provider = new OAuthProvider<LibEnv>({
     // API routes protected by OAuth access tokens
     apiRoute: ["/mcp"],
 
     // The existing Worker handler serves as both apiHandler and defaultHandler
-    apiHandler: defaultHandler as ExportedHandler<OAuthEnv & Record<string, unknown>> &
-      Pick<Required<ExportedHandler<OAuthEnv & Record<string, unknown>>>, "fetch">,
-    defaultHandler,
+    apiHandler: libHandler as ExportedHandler<LibEnv> &
+      Pick<Required<ExportedHandler<LibEnv>>, "fetch">,
+    defaultHandler: libHandler,
 
     // OAuth endpoints
     authorizeEndpoint: "/oauth/authorize",
@@ -212,4 +268,9 @@ export function createOAuthProvider(
       }
     },
   });
+
+  return {
+    fetch: (request, env, ctx) =>
+      provider.fetch(request, env as unknown as LibEnv, ctx),
+  };
 }
