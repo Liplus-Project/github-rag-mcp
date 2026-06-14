@@ -9,6 +9,7 @@
 
 import type { Env, DocRecord, WikiDocRecord } from "../types.js";
 import { upsertFtsRow } from "../fts.js";
+import { indexWikiEdges } from "../graph.js";
 import { prepareEmbeddingInput, sha256Hex } from "./hash.js";
 import { generateEmbedding } from "./embedding.js";
 import { docVectorId, wikiDocVectorId } from "./vector-id.js";
@@ -188,6 +189,18 @@ export async function processAndUpsertWikiDoc(
       console.error(
         `Failed to upsert FTS5 row for wiki ${repo}/${pageName}:`,
         ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+      );
+    }
+
+    // Extract + index graph "mention" edges to other wiki pages in this repo.
+    // Additive: the default retrieval path never reads these. Failures here must
+    // not break indexing of the page itself.
+    try {
+      await indexWikiEdges(env.DB_FTS, repo, pageName, wvid, content);
+    } catch (edgeErr) {
+      console.error(
+        `Failed to index graph edges for wiki ${repo}/${pageName}:`,
+        edgeErr instanceof Error ? edgeErr.message : String(edgeErr),
       );
     }
 

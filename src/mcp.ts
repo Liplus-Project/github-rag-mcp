@@ -37,6 +37,7 @@ import {
   type FtsFilter,
 } from "./fts.js";
 import { rerankCandidates, RERANK_MAX_CANDIDATES } from "./rerank.js";
+import { queryNeighbors, getDocsByVectorIds } from "./graph.js";
 
 /** User context passed via props from OAuth layer */
 interface McpProps extends Record<string, unknown> {
@@ -236,6 +237,25 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
               `${INCLUDE_CONTENT_MAX_DOCS} doc rows in the result set to bound API fan-out. ` +
               "Non-doc rows are unaffected.",
           ),
+        graph_expand: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Opt-in GraphRAG expansion (search mode only). When true, after fusion the top " +
+              "results seed a traversal of the Decision-Structure mention graph (D1 doc_edges); " +
+              "related wiki pages are appended as extra results marked with graph_hop / graph_from. " +
+              "Default false = byte-identical to standard hybrid retrieval (no graph read).",
+          ),
+        graph_hops: z
+          .number()
+          .min(1)
+          .max(2)
+          .optional()
+          .default(1)
+          .describe(
+            "Graph traversal depth for graph_expand (1 or 2). Default 1. Ignored when graph_expand is false.",
+          ),
       },
       async ({
         query,
@@ -252,11 +272,15 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         since,
         until,
         include_content,
+        graph_expand,
+        graph_hops,
       }) => {
         const requestedTopK = top_k ?? 10;
         const fusionMode = fusion ?? "rrf";
         const rerankEnabled = rerank ?? true;
         const trimmedQuery = (query ?? "").trim();
+        const graphExpand = graph_expand ?? false;
+        const graphHops = graph_hops ?? 1;
         const isScanMode = trimmedQuery.length === 0;
         const effectiveSort =
           sort ?? (isScanMode ? "updated_desc" : "relevance");
@@ -1005,6 +1029,8 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           review_id?: number;
           line?: number;
           content?: string;
+          graph_hop?: number;
+          graph_from?: string;
         };
 
         const items: ResultItem[] = filtered.map((f) => {
@@ -1187,6 +1213,80 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           await this.inlineDocContent(items);
         }
 
+        // ── Optional graph expansion (opt-in; default off leaves everything
+        // above byte-identical). Seeds from the final result set, traverses the
+        // Decision-Structure mention graph, and appends related wiki pages as
+        // extra results marked with graph_hop / graph_from. Best-effort: any
+        // failure returns the organic results unchanged.
+        let graphNeighborsAdded = 0;
+        if (graphExpand && filtered.length > 0) {
+          try {
+            const seedIds = filtered.map((f) => f.vectorId);
+            const seedSet = new Set(seedIds);
+            const neighbors = await queryNeighbors(this.env.DB_FTS, seedIds, {
+              hops: graphHops,
+              repo,
+              limit: Math.min(requestedTopK * 2, 30),
+            });
+            const fresh = neighbors.filter((n) => !seedSet.has(n.vectorId));
+            if (fresh.length > 0) {
+              const enrich = await getDocsByVectorIds(
+                this.env.DB_FTS,
+                fresh.map((n) => n.vectorId),
+              );
+              const slugOf = (vid: string): string => {
+                const p = payload.get(vid);
+                return p?.meta?.wiki_path ?? p?.ftsRow?.docPath ?? vid;
+              };
+              for (const n of fresh) {
+                const row = enrich.get(n.vectorId);
+                if (!row) continue; // dangling edge (target not indexed) — skip
+                const nRepo = String(row.repo ?? "");
+                const nType = String(row.type ?? "");
+                const nPath = String(row.doc_path ?? "");
+                const url =
+                  nType === "wiki_doc" && nRepo && nPath
+                    ? `https://github.com/${nRepo}/wiki/${nPath}`
+                    : nType === "doc" && nRepo && nPath
+                      ? `https://github.com/${nRepo}/blob/HEAD/${nPath}`
+                      : "";
+                const item: ResultItem = {
+                  number: Number(row.number ?? 0),
+                  title: nPath || n.vectorId,
+                  state: String(row.state ?? ""),
+                  type: nType,
+                  labels: [],
+                  milestone: String(row.milestone ?? ""),
+                  assignees: [],
+                  score: 0,
+                  dense_score: null,
+                  sparse_score: null,
+                  dense_rank: null,
+                  sparse_rank: null,
+                  rerank_score: null,
+                  url,
+                  updated_at: String(row.updated_at ?? ""),
+                  repo: nRepo,
+                  graph_hop: n.hop,
+                  graph_from: slugOf(n.fromVectorId),
+                };
+                if (nType === "wiki_doc") item.wiki_path = nPath;
+                if (nType === "doc") item.doc_path = nPath;
+                if (includeContent && typeof row.content === "string") {
+                  item.content = row.content;
+                }
+                items.push(item);
+                graphNeighborsAdded++;
+              }
+            }
+          } catch (graphErr) {
+            console.error(
+              "graph_expand failed (returning organic results):",
+              graphErr instanceof Error ? graphErr.message : String(graphErr),
+            );
+          }
+        }
+
         return {
           content: [
             {
@@ -1210,6 +1310,8 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
                   rerank_applied: rerankApplied,
                   since: since ?? null,
                   until: until ?? null,
+                  graph_expanded: graphExpand,
+                  graph_neighbors: graphNeighborsAdded,
                   results: items,
                 },
                 null,
