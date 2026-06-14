@@ -35,6 +35,7 @@ import {
 import { handleScheduled } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
 import { RagMcpAgentV2 } from "./mcp.js";
+import { indexWikiEdges } from "./graph.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
@@ -124,6 +125,57 @@ const innerHandler: ExportedHandler<Env> = {
         status: storeResp.status,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    // -- Admin: backfill graph edges for a repo's already-indexed wiki pages --
+    // POST /admin/backfill-edges?repo=owner/repo  (requires GITHUB_TOKEN header)
+    // Re-extracts mention edges from each wiki_doc row's stored content (no GitHub
+    // refetch) and writes them to doc_edges. One-off after deploy; live indexing
+    // keeps edges current thereafter.
+    if (request.method === "POST" && url.pathname === "/admin/backfill-edges") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      let pages = 0;
+      let edges = 0;
+      try {
+        const rows = await env.DB_FTS
+          .prepare(
+            `SELECT vector_id, doc_path, content FROM search_docs WHERE type = 'wiki_doc' AND repo = ?`,
+          )
+          .bind(repo)
+          .all<{ vector_id: string; doc_path: string; content: string }>();
+        for (const r of rows.results ?? []) {
+          const n = await indexWikiEdges(
+            env.DB_FTS,
+            repo,
+            String(r.doc_path ?? ""),
+            String(r.vector_id ?? ""),
+            String(r.content ?? ""),
+          );
+          pages++;
+          edges += n;
+        }
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ repo, wikiPagesProcessed: pages, edgesWritten: edges }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
     }
 
     // -- MCP endpoint (OAuth-protected, ctx.props set by OAuthProvider) --

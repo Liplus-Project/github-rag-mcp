@@ -34,6 +34,7 @@ import {
   type GitHubPRReviewCommentData,
 } from "./pipeline.js";
 import { deleteFtsRow } from "./fts.js";
+import { deleteEdgesForVector } from "./graph.js";
 
 /** GitHub API page size */
 const PER_PAGE = 100;
@@ -1203,6 +1204,15 @@ async function pollWiki(
         console.error(
           `Failed to delete FTS5 row for wiki ${repo}/${wikiDoc.pageName}:`,
           ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+      }
+      // Remove graph edges touching this page (its out-edges and any in-edges).
+      try {
+        await deleteEdgesForVector(env.DB_FTS, wvid);
+      } catch (edgeErr) {
+        console.error(
+          `Failed to delete graph edges for wiki ${repo}/${wikiDoc.pageName}:`,
+          edgeErr instanceof Error ? edgeErr.message : String(edgeErr),
         );
       }
       await storeStub.fetch(

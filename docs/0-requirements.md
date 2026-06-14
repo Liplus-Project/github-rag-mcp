@@ -234,6 +234,18 @@ This store supports:
 - `list_recent_activity`
 - enrichment of semantic search hits
 
+### 8. Graph Index (opt-in, D1 `doc_edges`)
+
+An additive graph layer that indexes relationships between Decision-Structure wiki entries (kebab-case wiki pages). A third surface alongside dense (Vectorize) and sparse (FTS5), but **never read by retrieval unless explicitly requested**.
+
+- **Schema**: `doc_edges(src_vector_id, dst_vector_id, repo, src_slug, dst_slug, edge_kind, updated_at)` (`migrations/0002_graph_edges.sql`). src/dst are deterministic wiki vector IDs (`wikiDocVectorId`).
+- **Edge extraction**: at wiki index time (`processAndUpsertWikiDoc`), when another known wiki slug in the same repo appears in the content, an A→B "mention" edge is written (`indexWikiEdges` in `src/graph.ts`). **Deterministic slug-match (no LLM, no lossy extraction)**; the dst ID is computed, so dangling edges to not-yet-indexed pages are allowed. Typed edges (supersede/depend/conflict) are future scope.
+- **Traversal**: `queryNeighbors` walks 1–2 hop undirected neighbors of the seeds via `WITH RECURSIVE` (standard SQLite, no extension).
+- **Retrieval integration**: `search` gains `graph_expand` (default false) / `graph_hops` (default 1). Only when true, the final result set seeds a traversal and related wiki pages are appended (tagged `graph_hop` / `graph_from`). **When false the behavior is byte-identical to before (no regression).**
+- **Delete fan-out**: on wiki page deletion, `deleteEdgesForVector` removes edges touching that vector.
+- **Backfill**: `POST /admin/backfill-edges?repo=owner/repo` (GITHUB_TOKEN header) re-extracts edges from the stored content of already-indexed wiki pages (no GitHub refetch).
+- **Evaluation**: real-use observation after ship (does judgment-learning surface related decisions), not an offline eval harness.
+
 ## Retrieval Model
 
 The retrieval layer supports a 3-tier pipeline: hybrid search (dense + sparse), RRF fusion, and cross-encoder reranking, with structured filtering applied along the way (the 2026 production baseline).

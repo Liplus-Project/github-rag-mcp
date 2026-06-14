@@ -233,6 +233,18 @@ Durable Object + SQLite は次の structured record を保持する。
 - `list_recent_activity`
 - semantic search hit の enrichment
 
+### 8. Graph Index（opt-in, D1 `doc_edges`）
+
+判断知（Decision Structure = wiki の kebab エントリ）の関係を索引化する additive なグラフ層。dense（Vectorize）/ sparse（FTS5）に並ぶ第3の surface だが、**既定では retrieval から読まれない**。
+
+- **スキーマ**: `doc_edges(src_vector_id, dst_vector_id, repo, src_slug, dst_slug, edge_kind, updated_at)`（`migrations/0002_graph_edges.sql`）。src/dst は wiki の決定的 vector_id（`wikiDocVectorId`）。
+- **エッジ抽出**: wiki ページ index 時（`processAndUpsertWikiDoc`）、同 repo の既知 wiki slug が本文に出現したら A→B の "mention" エッジを生成（`src/graph.ts` の `indexWikiEdges`）。**決定的 slug-match（LLM 不要・ロスなし）**。dst は計算で求まるので未 index でも記録可（dangling 可）。typed（supersede/depend/conflict）は将来スコープ。
+- **traversal**: `queryNeighbors` が `WITH RECURSIVE`（標準 SQLite、拡張不要）で seed の 1–2 hop neighbor を無向に辿る。
+- **retrieval 統合**: `search` の `graph_expand`（既定 false）/ `graph_hops`（既定 1）。true の時のみ、RRF 後の最終結果を seed に neighbor を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで末尾に append。**false の時は既存挙動と完全同一（回帰なし）**。
+- **delete fan-out**: wiki ページ削除時に `deleteEdgesForVector`（当該 vector を端点に持つエッジを除去）。
+- **backfill**: `POST /admin/backfill-edges?repo=owner/repo`（GITHUB_TOKEN ヘッダ）。既存 index 済み wiki の content から一括抽出（GitHub 再取得不要）。
+- **評価**: 本番 ship 後の実運用観測（judgment-learning が関連判断を拾えるか）。offline eval harness は作らない。
+
 ## Retrieval Model
 
 retrieval layer は hybrid search（dense + sparse）+ cross-encoder rerank + structured filter を 3 段で支える（2026 production baseline）。
