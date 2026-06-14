@@ -83,6 +83,15 @@ Responsibilities:
 - expose semantic and structured retrieval tools
 - return state in a format that downstream agents can consume directly
 
+Schema source of truth: the Worker tool definitions are authoritative. The client
+proxy (`mcp-server/server/index.js`) answers `tools/list` from a static mirror of
+the `search` params — it does not forward `tools/list` to the Worker, keeping
+startup auth-free and network-free. Because that mirror is hand-maintained, a param
+added to the Worker but forgotten in the proxy is silently dropped by MCP clients
+(`additionalProperties: false`) and never reaches the Worker (gh#157).
+`scripts/check-schema-drift.mjs` runs in CI and fails the build when the proxy
+`search` schema drifts from the Worker, so the two cannot ship out of sync.
+
 ### 2. Webhook Receiver
 
 The webhook receiver ingests GitHub events in near real time.
