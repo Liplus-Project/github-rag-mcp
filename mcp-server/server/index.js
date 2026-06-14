@@ -522,6 +522,22 @@ const TOOLS = [
             "GitHub contents API) on that row. Capped at the first few doc rows to bound API fan-out. " +
             "Non-doc rows are unaffected. Default: false.",
         },
+        graph_expand: {
+          type: "boolean",
+          description:
+            "Opt-in GraphRAG expansion (search mode only). When true, after fusion the top " +
+            "results seed a traversal of the Decision-Structure mention graph (D1 doc_edges); " +
+            "related wiki pages are appended as extra results marked with graph_hop / graph_from. " +
+            "Default false = byte-identical to standard hybrid retrieval (no graph read).",
+        },
+        graph_hops: {
+          type: "number",
+          minimum: 1,
+          maximum: 2,
+          description:
+            "Graph traversal depth for graph_expand (1 or 2). Default 1. " +
+            "Ignored when graph_expand is false.",
+        },
       },
     },
     annotations: {
