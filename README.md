@@ -115,6 +115,8 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `since` | ISO 8601 string | Keep only results with `updated_at >= since`. |
 | `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
 | `include_content` | boolean | Inline raw content on top doc results (default `false`). |
+| `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages are appended tagged `graph_hop` / `graph_from`. Default `false` = byte-identical to standard hybrid retrieval (no graph read). |
+| `graph_hops` | number | Graph traversal depth for `graph_expand` (1 or 2, default 1). Ignored when `graph_expand` is `false`. |
 
 #### `type` values
 
@@ -124,6 +126,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `"pull_request"` | Pull request descriptions (title + body). |
 | `"release"` | Release notes (name + body). |
 | `"doc"` | Markdown documentation files. |
+| `"wiki_doc"` | GitHub Wiki pages (separate surface from repo docs; both co-exist). |
 | `"diff"` | Per-file commit diffs (commit message + file path + patch). |
 | `"issue_comment"` | Top-level comments on issues and PRs. |
 | `"pr_review"` | PR review bodies (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`). |
