@@ -115,6 +115,8 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。 |
 | `until` | ISO 8601 文字列 | `updated_at < until` の結果だけを残します。 |
 | `include_content` | boolean | 上位 doc 結果に本文を inline する (既定 `false`)。 |
+| `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで末尾に追加。既定 `false` は標準ハイブリッド検索とバイト単位で同一（グラフ未参照）。 |
+| `graph_hops` | number | `graph_expand` のグラフ探索深度（1 または 2、既定 1）。`graph_expand` が `false` のときは無視。 |
 
 #### `type` 値
 
