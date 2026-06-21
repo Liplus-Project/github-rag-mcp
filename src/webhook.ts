@@ -34,29 +34,40 @@ import { deleteFtsRow } from "./fts.js";
 /**
  * Verify GitHub webhook signature using WebCrypto HMAC-SHA256.
  *
- * Compares the X-Hub-Signature-256 header value against the
- * computed HMAC of the request body.
+ * Validates the X-Hub-Signature-256 header against the body's HMAC via
+ * crypto.subtle.verify, which compares in constant time. The previous approach
+ * recomputed the digest and string-compared it with `===`, which early-exits on
+ * the first mismatched character and leaks the expected signature through response
+ * timing (#167). Behavior is unchanged: a correct signature returns true, anything
+ * else returns false.
  */
 export async function verifyGitHubSignature(
   secret: string,
   body: string,
   signature: string,
 ): Promise<boolean> {
+  const prefix = "sha256=";
+  if (!signature.startsWith(prefix)) return false;
+  const hex = signature.slice(prefix.length);
+  // An HMAC-SHA256 digest is 32 bytes = exactly 64 hex chars. Reject any other
+  // shape before touching crypto so malformed input fails fast and uniformly.
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) return false;
+
+  const sigBytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    sigBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign"],
+    ["verify"],
   );
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
-  const expected =
-    "sha256=" +
-    Array.from(new Uint8Array(sig))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-  return expected === signature;
+  // verify() recomputes the HMAC and compares it in constant time.
+  return crypto.subtle.verify("HMAC", key, sigBytes, encoder.encode(body));
 }
 
 /**

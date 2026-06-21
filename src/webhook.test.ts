@@ -27,11 +27,12 @@ describe("webhook: verifyGitHubSignature (HMAC-SHA256, X-Hub-Signature-256)", ()
     const bareHex = VALID.replace("sha256=", "");
     expect(await verifyGitHubSignature(SECRET, BODY, bareHex)).toBe(false); // missing "sha256=" prefix
     expect(await verifyGitHubSignature(SECRET, BODY, "")).toBe(false);
-    expect(await verifyGitHubSignature(SECRET, BODY, "sha256=deadbeef")).toBe(false);
+    expect(await verifyGitHubSignature(SECRET, BODY, "sha256=deadbeef")).toBe(false); // wrong length
+    expect(await verifyGitHubSignature(SECRET, BODY, "sha256=" + "z".repeat(64))).toBe(false); // non-hex
   });
 
-  // NOTE: verifyGitHubSignature compares with `===` (not constant-time) — tracked as
-  // #167. These tests pin the functional contract (accept valid / reject invalid),
-  // which holds regardless of the timing-safety fix; the timing property itself is
-  // not unit-observable.
+  // verifyGitHubSignature now validates via crypto.subtle.verify (constant-time),
+  // resolving #167. The timing property itself is not unit-observable; these tests
+  // pin the functional contract (accept valid / reject invalid / reject malformed),
+  // which the constant-time implementation preserves.
 });
