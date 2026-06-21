@@ -1,5 +1,36 @@
 import { describe, it, expect } from "vitest";
-import { toRankMap, reciprocalRankFusion } from "./fts.js";
+import {
+  toRankMap,
+  reciprocalRankFusion,
+  escapeFtsQuery,
+  tokenizerKindForType,
+} from "./fts.js";
+
+describe("fts: tokenizerKindForType", () => {
+  it("routes diff to the trigram (code) tokenizer and everything else to nat", () => {
+    expect(tokenizerKindForType("diff")).toBe("code");
+    expect(tokenizerKindForType("issue")).toBe("nat");
+    expect(tokenizerKindForType("release")).toBe("nat");
+    expect(tokenizerKindForType("wiki_doc")).toBe("nat");
+  });
+});
+
+describe("fts: escapeFtsQuery", () => {
+  it("quotes each whitespace-separated token", () => {
+    expect(escapeFtsQuery("hello world")).toBe('"hello" "world"');
+    expect(escapeFtsQuery("single")).toBe('"single"');
+  });
+
+  it("collapses empty / whitespace-only input to empty string", () => {
+    expect(escapeFtsQuery("")).toBe("");
+    expect(escapeFtsQuery("   \n\t ")).toBe("");
+  });
+
+  it("escapes embedded double quotes by doubling them (FTS5 syntax)", () => {
+    // token `"hi"` -> inner quotes doubled -> wrapped -> `"""hi"""`
+    expect(escapeFtsQuery('say "hi"')).toBe('"say" """hi"""');
+  });
+});
 
 describe("fts: toRankMap", () => {
   it("assigns 1-based ranks in best-first order", () => {
