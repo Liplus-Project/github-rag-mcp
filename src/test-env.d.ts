@@ -2,8 +2,8 @@
 // scoped to just what the *.workers.test.ts files use. Declared by hand (instead of
 // `/// <reference types="@cloudflare/vitest-pool-workers/types" />`) so the worker's
 // `tsc --noEmit` does not pull a newer @cloudflare/workers-types whose stricter AI
-// binding types conflict with existing code (src/rerank.ts). D1Database is global
-// via the worker's @cloudflare/workers-types.
+// binding types conflict with existing code (src/rerank.ts). D1Database /
+// DurableObject* are global via the worker's @cloudflare/workers-types.
 
 interface TestD1Migration {
   name: string;
@@ -14,6 +14,7 @@ declare module "cloudflare:test" {
   interface ProvidedEnv {
     DB_FTS: D1Database;
     TEST_MIGRATIONS: TestD1Migration[];
+    ISSUE_STORE: DurableObjectNamespace<import("./store.js").IssueStore>;
   }
   export const env: ProvidedEnv;
   export function applyD1Migrations(
@@ -21,4 +22,8 @@ declare module "cloudflare:test" {
     migrations: TestD1Migration[],
     migrationsTableName?: string,
   ): Promise<void>;
+  export function runInDurableObject<O, R>(
+    stub: DurableObjectStub<O>,
+    callback: (instance: O, state: DurableObjectState) => R | Promise<R>,
+  ): Promise<R>;
 }
