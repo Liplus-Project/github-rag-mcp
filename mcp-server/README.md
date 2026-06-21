@@ -71,7 +71,7 @@ To target a self-hosted Worker, set the `RAG_WORKER_URL` environment variable:
 }
 ```
 
-> **Note on `alwaysLoad`:** Recognized by Claude Code v2.1.121+ (released 2026-04-28). When set, the client loads this server's tools at session start instead of deferring them behind a `ToolSearch` round-trip — useful for retrieval servers used on every turn. Older clients silently ignore the field, so it is safe to leave in place. `alwaysLoad` を認識しないクライアント (Claude Desktop など) では無視されるだけで害はない。
+> **Note on `alwaysLoad`:** Recognized by Claude Code v2.1.121+ (released 2026-04-28). When set, the client loads this server's tools at session start instead of deferring them behind a `ToolSearch` round-trip — useful for retrieval servers used on every turn. Older clients (such as Claude Desktop) silently ignore the field, so it is safe to leave in place.
 
 ## Configuration
 
