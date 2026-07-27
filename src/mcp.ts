@@ -935,11 +935,14 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           effectiveSort === "relevance" &&
           filtered.length > 1
         ) {
-          // Backfill content for candidates with no sparse row. Bounded by
-          // `filtered.length` (already capped by the overfetch budget), and
-          // issued as a single batched D1 query — never a per-candidate fan-out.
+          // Backfill content for candidates with no usable sparse content.
+          // Bounded by `filtered.length` (already capped by the overfetch
+          // budget) and issued as a single batched D1 query — never a
+          // per-candidate fan-out. The emptiness test is `trim()`-based to match
+          // the filter `rerankCandidates` applies, so a whitespace-only FTS row
+          // is treated as missing here rather than silently dropped there.
           const missingContentIds = filtered
-            .filter((f) => !(payload.get(f.vectorId)?.ftsRow?.content ?? ""))
+            .filter((f) => (payload.get(f.vectorId)?.ftsRow?.content ?? "").trim() === "")
             .map((f) => f.vectorId);
           let backfilled: Map<string, string> = new Map();
           if (missingContentIds.length > 0) {
@@ -959,10 +962,11 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           }
 
           const rerankInput = filtered.map((f) => {
-            const p = payload.get(f.vectorId);
-            // Prefer sparse content (always populated when present), fall back
-            // to the D1 backfill for dense-only hits.
-            const content = p?.ftsRow?.content ?? backfilled.get(f.vectorId) ?? "";
+            const sparseContent = payload.get(f.vectorId)?.ftsRow?.content ?? "";
+            // Prefer sparse content, fall back to the D1 backfill for
+            // dense-only hits (and for whitespace-only sparse rows).
+            const content =
+              sparseContent.trim() !== "" ? sparseContent : backfilled.get(f.vectorId) ?? "";
             return { id: f.vectorId, content };
           });
 
