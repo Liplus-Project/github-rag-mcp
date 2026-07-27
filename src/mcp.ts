@@ -36,7 +36,7 @@ import {
   type FtsHit,
   type FtsFilter,
 } from "./fts.js";
-import { rerankCandidates, RERANK_MAX_CANDIDATES } from "./rerank.js";
+import { rerankCandidates, rerankWasApplied, RERANK_MAX_CANDIDATES } from "./rerank.js";
 import { queryNeighbors, getDocsByVectorIds } from "./graph.js";
 
 /** User context passed via props from OAuth layer */
@@ -918,11 +918,14 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         //   - rerank is enabled (default true),
         //   - sort is "relevance" (time-sorted callers do not need ranker score),
         //   - more than one candidate survived post-filter (single-element
-        //     reranking would not change order),
-        //   - we have content text to feed (sparse FtsRow has it; dense-only
-        //     candidates without sparse hit have no content available — for
-        //     those we use an empty string and the reranker contributes
-        //     nothing for that row, which is acceptable graceful degradation).
+        //     reranking would not change order).
+        // Content supply: sparse FtsRow carries content inline. Dense-only
+        // candidates (no sparse hit — the normal case for a Japanese query,
+        // where FTS5 tokenization yields zero BM25 matches) have no FtsRow, so
+        // we backfill their content from D1 `search_docs` in ONE batched
+        // `vector_id IN (...)` query. Without this backfill every candidate
+        // reaches the reranker with an empty string, `rerankCandidates` drops
+        // them all, and the cross-encoder never runs (issue #172).
         // The reranker re-orders `filtered` in place. On error or unexpected
         // shape it returns null, in which case we keep the post-filter order.
         const rerankScores = new Map<string, number>();
@@ -932,11 +935,38 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           effectiveSort === "relevance" &&
           filtered.length > 1
         ) {
+          // Backfill content for candidates with no usable sparse content.
+          // Bounded by `filtered.length` (already capped by the overfetch
+          // budget) and issued as a single batched D1 query — never a
+          // per-candidate fan-out. The emptiness test is `trim()`-based to match
+          // the filter `rerankCandidates` applies, so a whitespace-only FTS row
+          // is treated as missing here rather than silently dropped there.
+          const missingContentIds = filtered
+            .filter((f) => (payload.get(f.vectorId)?.ftsRow?.content ?? "").trim() === "")
+            .map((f) => f.vectorId);
+          let backfilled: Map<string, string> = new Map();
+          if (missingContentIds.length > 0) {
+            try {
+              const rows = await getDocsByVectorIds(this.env.DB_FTS, missingContentIds);
+              backfilled = new Map(
+                [...rows].map(([vid, row]) => [vid, String(row.content ?? "")]),
+              );
+            } catch (err) {
+              // Backfill is best-effort: a D1 failure must not take the search
+              // down. We fall through with whatever content we already have.
+              console.error(
+                "search: rerank content backfill failed:",
+                err instanceof Error ? err.message : String(err),
+              );
+            }
+          }
+
           const rerankInput = filtered.map((f) => {
-            const p = payload.get(f.vectorId);
-            // Prefer sparse content (always populated when present), fall back
-            // to empty string for dense-only hits where we have no FtsRow.
-            const content = p?.ftsRow?.content ?? "";
+            const sparseContent = payload.get(f.vectorId)?.ftsRow?.content ?? "";
+            // Prefer sparse content, fall back to the D1 backfill for
+            // dense-only hits (and for whitespace-only sparse rows).
+            const content =
+              sparseContent.trim() !== "" ? sparseContent : backfilled.get(f.vectorId) ?? "";
             return { id: f.vectorId, content };
           });
 
@@ -949,7 +979,12 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             rerankInput.length,
           );
 
-          if (reranked) {
+          // `reranked` is null on reranker error / malformed response, and an
+          // empty array when every candidate had empty content (nothing to
+          // score). Both mean "fusion order stands"; only a non-empty result
+          // set counts as applied, so `rerank_applied: true` always implies at
+          // least one non-null `rerank_score` in the response (issue #172).
+          if (rerankWasApplied(reranked)) {
             for (const r of reranked) {
               rerankScores.set(r.id, r.score);
             }
@@ -1097,8 +1132,10 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             sparse_score: p?.sparseScore ?? null,
             dense_rank: f.contributions["dense"] ?? null,
             sparse_rank: f.contributions["sparse"] ?? null,
-            // null when reranker was disabled, skipped (≤1 candidate), or
-            // failed gracefully; populated otherwise.
+            // null when reranker was disabled, skipped (≤1 candidate), failed
+            // gracefully, or when this row had no content to score; populated
+            // otherwise. `rerank_applied: true` guarantees at least one row in
+            // the response carries a non-null score.
             rerank_score: rerankScores.get(f.vectorId) ?? null,
             url,
             updated_at: updatedAt,
@@ -1304,8 +1341,10 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
                   //   - rerank_applied: whether the cross-encoder actually
                   //     ran and re-scored. False when disabled, when there
                   //     was ≤1 candidate to rerank, when sort != "relevance",
-                  //     or when the AI call errored / returned an unexpected
-                  //     shape (graceful fallback to fusion order).
+                  //     when the AI call errored / returned an unexpected
+                  //     shape, or when no candidate had content to score
+                  //     (graceful fallback to fusion order). True implies at
+                  //     least one item carries a non-null `rerank_score`.
                   rerank_requested: rerankEnabled,
                   rerank_applied: rerankApplied,
                   since: since ?? null,
