@@ -93,6 +93,25 @@ type RerankerResponse =
   | Array<{ id: number; score: number }>;
 
 /**
+ * Whether a `rerankCandidates` result counts as "rerank actually applied".
+ *
+ * Encodes the three-outcome contract documented on `rerankCandidates`:
+ *   - `null` -> false (call errored / malformed response)
+ *   - `[]`   -> false (no candidate had scorable content; nothing was scored)
+ *   - non-empty -> true
+ *
+ * Exported so the telemetry decision has one definition and one test surface.
+ * The pre-#172 caller used a bare truthiness check, which reported
+ * `rerank_applied: true` for the `[]` case — true telemetry with zero scores.
+ *
+ * Declared as a type predicate so a `true` branch also narrows away `null` for
+ * the caller that then reads the scores.
+ */
+export function rerankWasApplied(result: RerankResult[] | null): result is RerankResult[] {
+  return result !== null && result.length > 0;
+}
+
+/**
  * Rerank candidates with bge-reranker-base.
  *
  * Behavior:
@@ -102,6 +121,11 @@ type RerankerResponse =
  * - Candidates with empty content are silently excluded — Workers AI rejects
  *   any `contexts[].text` shorter than one character with error 5006.
  * - Empty input (or all-empty content) returns an empty array immediately (no AI call).
+ *   Return-contract note: an empty array means "nothing was scored", which is
+ *   NOT the same as "rerank applied". Callers must distinguish three outcomes —
+ *   `null` (error, keep pre-rerank order), `[]` (no scorable content, keep
+ *   pre-rerank order), and a non-empty array (applied). Treating `[]` as
+ *   applied is the defect fixed in issue #172.
  * - A single non-empty candidate returns a passthrough with a synthesized
  *   score of 1, to avoid burning a Workers AI call on a one-element list.
  * - Any thrown error from `env.AI.run` or any malformed response returns

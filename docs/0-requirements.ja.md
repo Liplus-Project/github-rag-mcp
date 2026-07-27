@@ -296,9 +296,11 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 実装制約と既知の限界:
 
 - bge-reranker-base は context window 512 tokens（BAAI 元仕様）。`(query, candidate content)` pair が超過しないよう char-budget ベースで truncate（query 200 chars 上限、pair 合計 1700 chars 上限）
-- Workers AI は `contexts[].text` に length >= 1 を要求（エラー 5006: "Length of '/contexts/N/text' must be >= 1 not met"）。sparse hit が無い dense-only 候補は content が空文字になるため、rerank 入力から事前に除外する（除外件数が 0 / 1 の場合は AI 呼び出しをスキップして passthrough）
+- Workers AI は `contexts[].text` に length >= 1 を要求（エラー 5006: "Length of '/contexts/N/text' must be >= 1 not met"）。呼び出し時点で content が空のままの候補は rerank 入力から除外する（残った件数が 0 / 1 の場合は AI 呼び出しをスキップして passthrough）
+- reranker 入力の本文は 2 系統から供給する。sparse（FTS5）hit を持つ候補は本文を inline で保持している。dense-only 候補は FTS row が無いため、D1 `search_docs` から `vector_id IN (...)` の一括クエリ 1 回で本文を補完する（1 件ずつの fan-out はしない）。これは日本語 query で特に効く: FTS5 のトークン化では BM25 hit が 0 件になりやすく、全候補が dense-only になるため、補完が無いと候補集合が空本文のまま reranker に渡り cross-encoder が一度も動かない。補完中の D1 失敗は致命的に扱わず、既に得られている本文だけで検索を継続する
+- `rerank_applied: true` は、実際に 1 件以上へ reranker score が付与された場合にのみ報告する。空の reranker 結果（スコア可能な本文が 0 件）は失敗と同じ扱いで、fusion 順を維持し `rerank_applied: false` とする。不変条件: `rerank_applied: true` なら必ず 1 件以上の `rerank_score` が non-null
 - reranker は最大 50 件 / 1 検索（Workers AI Free tier 10,000 neurons/day と業界中央値の整合点）
-- bge-reranker-base は英語ベース・多言語非対応。日本語 issue/PR では精度低下リスクあり（runtime 観察対象、将来的に bge-reranker-v2-m3 提供開始時または外部 reranker への切替を別 issue で検討）
+- bge-reranker-base は英語ベース・多言語非対応。日本語 issue/PR では精度低下リスクあり（runtime 観察対象、将来的に bge-reranker-v2-m3 提供開始時または外部 reranker への切替を別 issue で検討）。上記の dense-only 本文補完は cross-encoder を「動かす」ためのものであって、モデルを多言語対応にするものではない。順位品質は別軸のまま
 - reranker 呼び出し失敗・想定外レスポンス時は graceful fallback（fusion 順を維持、`rerank_applied: false` で通知）
 
 呼び出しコスト試算:
