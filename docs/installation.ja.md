@@ -190,6 +190,33 @@ POST /admin/reset-hashes?repo=owner/repo
 
 - `GITHUB_TOKEN` header に worker secret と同じ `GITHUB_TOKEN` を送る
 
+## 10. commit diff の欠損期間を再走査する（gap backfill）
+
+ある期間の commit diff が欠けている場合（旧版 poller が取りこぼした、あるいは特定 commit が失敗し続けて watermark が止まっている場合）、diff poller の watermark を巻き戻す。次回 `:30` cron が `since` 以降を古い側から順に、取りこぼしなく再走査する。
+
+Admin endpoint:
+
+```text
+POST /admin/diff-watermark?repo=owner/repo&since=2026-07-06T00:00:00Z
+```
+
+パラメータ:
+
+- `repo` — `owner/repo` 形式。`POLL_REPOS` に含まれている必要がある
+- `since` — 解釈可能な timestamp。次回 run の再開位置として watermark に格納される
+- `phase` — `forward`（既定）は `diffs:{repo}` を巻き戻す。`backfill` は `diffs_backfill:{repo}` を移動する（履歴遡行が止まった時の解除用）
+
+認証:
+
+- `GITHUB_TOKEN` header に worker secret と同じ `GITHUB_TOKEN` を送る
+
+運用上の注意:
+
+- 追いつき速度は 1 repo あたり 1 run 5 commits（毎時 `:30` なので約 120 commits/日）。数週間分の欠損は数日かかる
+- 再走査中も新規 commit は影響を受けない（webhook 経路が即時 index する）
+- upsert は `(repo, commit_sha, file_path)` で idempotent なので、index 済み期間を再走査しても安全
+- 進捗は worker log の `{repo} diffs: forward [...]` 行、または該当期間を `type: "diff"` で検索して確認する
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

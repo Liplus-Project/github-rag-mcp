@@ -190,6 +190,33 @@ Authentication:
 
 - send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
 
+## 10. Replay a commit-diff period (gap backfill)
+
+If commit diffs are missing for a period — an older poller version dropped them, or a commit keeps failing and holds the watermark — rewind the diff poller watermark. The next `:30` cron re-covers the period from `since`, walking it oldest-first without skipping.
+
+Admin endpoint:
+
+```text
+POST /admin/diff-watermark?repo=owner/repo&since=2026-07-06T00:00:00Z
+```
+
+Parameters:
+
+- `repo` — `owner/repo`, must be listed in `POLL_REPOS`
+- `since` — any parseable timestamp; stored as the watermark the next run resumes from
+- `phase` — `forward` (default) rewinds `diffs:{repo}`; `backfill` moves `diffs_backfill:{repo}` (used to release a stalled historical walk)
+
+Authentication:
+
+- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+
+Operational notes:
+
+- catch-up rate is 5 commits per repo per cron run (~120 commits/day at the hourly `:30` trigger), so a multi-week gap takes several days to drain
+- new commits are unaffected while a replay is in flight: the webhook path indexes them in real time
+- upserts are idempotent on `(repo, commit_sha, file_path)`, so re-covering an already-indexed period is safe
+- verify progress with the `{repo} diffs: forward [...]` line in the worker logs, or by searching `type: "diff"` for the period
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`
