@@ -96,6 +96,115 @@ describe("fts D1: deleteFtsRow", () => {
   });
 });
 
+describe("fts D1: tokenizer isolation", () => {
+  it("keeps the opposite tokenizer healthy across updates and deletes", async () => {
+    const repo = "t/tokenizer-isolation";
+    const natId = "i:tokenizer-isolation";
+    const codeId = "c:tokenizer-isolation";
+
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: natId, type: "issue", repo, content: "persistent natural-language sentinel" }),
+    );
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: codeId, type: "diff", repo, content: "persistentCodeSentinel" }),
+    );
+
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: natId, type: "issue", repo, content: "updated natural-language sentinel" }),
+    );
+    await deleteFtsRow(env.DB_FTS, natId);
+    expect((await queryFts(env.DB_FTS, "CodeSentinel", 10, { repo })).map((h) => h.vectorId))
+      .toContain(codeId);
+
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: codeId, type: "diff", repo, content: "updatedCodeSentinel" }),
+    );
+    await deleteFtsRow(env.DB_FTS, codeId);
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: `${natId}-survivor`, type: "issue", repo, content: "healthy natural tokenizer" }),
+    );
+    expect((await queryFts(env.DB_FTS, "healthy", 10, { repo })).map((h) => h.vectorId))
+      .toContain(`${natId}-survivor`);
+  });
+});
+
+describe("fts D1: v1 corruption recovery migration", () => {
+  it("backfills healthy v2 indexes without reading the corrupt v1 indexes", async () => {
+    const baseMigration = env.TEST_MIGRATIONS.find((m) => m.name === "0001_fts5_init.sql");
+    const repairMigration = env.TEST_MIGRATIONS.find(
+      (m) => m.name === "0005_fts5_tokenizer_isolation.sql",
+    );
+    expect(baseMigration).toBeDefined();
+    expect(repairMigration).toBeDefined();
+
+    await applyD1Migrations(env.DB_FTS_MIGRATION, [baseMigration!]);
+
+    const repo = "t/v1-recovery";
+    const natId = "i:v1-recovery";
+    const codeId = "c:v1-recovery";
+    await upsertFtsRow(
+      env.DB_FTS_MIGRATION,
+      mkRow({ vectorId: codeId, type: "diff", repo, content: "persistentCodeSentinel" }),
+    );
+    await upsertFtsRow(
+      env.DB_FTS_MIGRATION,
+      mkRow({ vectorId: natId, type: "issue", repo, content: "original natural sentinel" }),
+    );
+
+    // The v1 UPDATE trigger sends a delete command to code_fts even though this
+    // nat row was never indexed there. D1 rejects the write as a corrupt-vtab
+    // operation; sparse mirroring can therefore never reconcile this row.
+    await expect(
+      upsertFtsRow(
+        env.DB_FTS_MIGRATION,
+        mkRow({ vectorId: natId, type: "issue", repo, content: "updated natural sentinel" }),
+      ),
+    ).rejects.toThrow(/SQLITE_CORRUPT_VTAB/);
+
+    await applyD1Migrations(env.DB_FTS_MIGRATION, [repairMigration!]);
+
+    await env.DB_FTS_MIGRATION
+      .prepare(
+        "INSERT INTO search_docs_nat_fts_v2(search_docs_nat_fts_v2, rank) VALUES('integrity-check', 1)",
+      )
+      .run();
+    await env.DB_FTS_MIGRATION
+      .prepare(
+        "INSERT INTO search_docs_code_fts_v2(search_docs_code_fts_v2, rank) VALUES('integrity-check', 1)",
+      )
+      .run();
+
+    expect(
+      (await queryFts(env.DB_FTS_MIGRATION, "CodeSentinel", 10, { repo }))
+        .map((h) => h.vectorId),
+    ).toContain(codeId);
+    expect(
+      (await queryFts(env.DB_FTS_MIGRATION, "original", 10, { repo }))
+        .map((h) => h.vectorId),
+    ).toContain(natId);
+
+    await upsertFtsRow(
+      env.DB_FTS_MIGRATION,
+      mkRow({ vectorId: natId, type: "issue", repo, content: "updated natural sentinel" }),
+    );
+    expect(
+      (await queryFts(env.DB_FTS_MIGRATION, "updated", 10, { repo }))
+        .map((h) => h.vectorId),
+    ).toContain(natId);
+
+    await deleteFtsRow(env.DB_FTS_MIGRATION, natId);
+    expect(
+      (await queryFts(env.DB_FTS_MIGRATION, "CodeSentinel", 10, { repo }))
+        .map((h) => h.vectorId),
+    ).toContain(codeId);
+  });
+});
+
 describe("fts D1: structured filters", () => {
   it("filters by repo", async () => {
     await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "i:repo-a", type: "issue", repo: "t/repo-alpha", content: "shared keyword token" }));

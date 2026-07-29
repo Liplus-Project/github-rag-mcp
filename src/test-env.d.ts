@@ -13,6 +13,7 @@ interface TestD1Migration {
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     DB_FTS: D1Database;
+    DB_FTS_MIGRATION: D1Database;
     TEST_MIGRATIONS: TestD1Migration[];
     ISSUE_STORE: DurableObjectNamespace<import("./store.js").IssueStore>;
   }

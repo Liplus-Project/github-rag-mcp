@@ -23,7 +23,10 @@ export default defineConfig(async () => {
     miniflare: {
       compatibilityDate: "2025-03-26",
       compatibilityFlags: ["nodejs_compat"],
-      d1Databases: { DB_FTS: "test-fts" },
+      d1Databases: {
+        DB_FTS: "test-fts",
+        DB_FTS_MIGRATION: "test-fts-migration",
+      },
       durableObjects: {
         ISSUE_STORE: { className: "IssueStore", useSQLite: true },
       },

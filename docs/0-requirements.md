@@ -210,15 +210,16 @@ Rationale:
 Schema overview:
 
 - `search_docs` — external content table (source of truth, `vector_id` primary key).
-- `search_docs_nat_fts` — FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc / wiki_doc / comment / review surfaces).
-- `search_docs_code_fts` — FTS5 virtual table with trigram tokenizer for code / SHA / identifier surfaces (diff).
+- `search_docs_nat_fts_v2` — active FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc / wiki_doc / comment / review surfaces).
+- `search_docs_code_fts_v2` — active FTS5 virtual table with trigram tokenizer for code / SHA / identifier surfaces (diff). The v1 tables are retained but never queried or updated so a previously corrupt index is not touched during recovery.
 
 Tokenizer selection:
 
 - `porter` — stem-based matching appropriate for natural language.
 - `trigram` — substring matching appropriate for SHA prefixes, CamelCase tokens, and file paths.
 - A `tokenizer_kind` column on `search_docs` decides which virtual table a row is indexed in.
-- `content=search_docs` + triggers cascade inserts / updates / deletes automatically, so `DELETE FROM search_docs` fans out to both FTS5 tables in a single statement.
+- Each active FTS table declares a tokenizer-filtered view of `search_docs` as its external-content relation, so the declared content rows and indexed rows are the same set. Triggers cascade inserts / updates / deletes automatically, and every branch is guarded by `tokenizer_kind`: a row is inserted into and deleted from exactly one FTS5 table. Sending an FTS5 `delete` command to the opposite tokenizer for a row it never indexed is forbidden because it corrupts the external-content index.
+- Recovery creates a fresh FTS generation and backfills each table with a `WHERE tokenizer_kind = ...` filter. It does not use FTS5 `rebuild`, because `rebuild` would copy every `search_docs` row into each tokenizer and violate the same isolation invariant.
 
 The `vector_id` mirrors the Vectorize vector ID (deterministic SHA-256 based) so RRF fusion can join dense and sparse hits without an extra round-trip.
 
