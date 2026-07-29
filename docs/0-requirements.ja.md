@@ -391,6 +391,9 @@ Requirements:
 - MCP client user を認証する
 - installation 済み repository に access する
 - GitHub API read に token を使う
+- cached Dynamic Client Registration は、登録済み redirect URI 集合が今回の
+  OAuth flow で要求する localhost callback URI を全て含む場合だけ再利用し、
+  含まない場合は authorization 前に client registration を置き換える
 
 ## Storage Rules
 
