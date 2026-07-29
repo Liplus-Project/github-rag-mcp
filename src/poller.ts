@@ -140,6 +140,38 @@ const MAX_DIFF_COMMITS_FORWARD_PER_RUN = 5;
  *  over many runs (e.g. 5 commits/run × 24 runs/day = 120 commits/day per repo). */
 const MAX_DIFF_COMMITS_BACKWARD_PER_RUN = 5;
 
+/** Page size used when the forward diff phase enumerates its commit window.
+ *  Listing is 1 subrequest regardless of page size, while the per-commit
+ *  fan-out (detail fetch + embed + Vectorize + D1 + Store DO) is what the
+ *  MAX_DIFF_COMMITS_FORWARD_PER_RUN cap bounds. Enumerating the whole window
+ *  cheaply is what lets the poller pick the *oldest* unprocessed commits
+ *  instead of the newest ones GitHub returns first (issue #178). */
+const DIFF_FORWARD_LIST_PER_PAGE = 100;
+
+/** Maximum number of times the forward diff window is halved when a single list
+ *  page cannot enumerate it. A full page means the window may hold more commits
+ *  than we can see, so the oldest end is unknown and the watermark must not
+ *  advance. Halving self-adapts: an idle period is enumerated by the first call
+ *  and traversed in one run, while a dense period converges in a few extra list
+ *  calls (1 subrequest each, worst case 9 for the phase — negligible against the
+ *  1000-per-invocation budget the per-commit fan-out actually spends).
+ *
+ *  Sized against the deepest expected rewind: `POST /admin/diff-watermark` may
+ *  set the watermark weeks back to replay a gap, and 8 halvings narrow a 3-week
+ *  window to ~2 hours, so enumeration only fails if a repo lands 100+ commits in
+ *  2 hours. When even the smallest window overflows, the run holds the watermark
+ *  and logs — a visible stall is preferred over a silent gap (issue #178). */
+const MAX_DIFF_FORWARD_WINDOW_SHRINKS = 8;
+
+/** Safety margin subtracted from a retry boundary when the forward diff
+ *  watermark is pinned to an unprocessed commit's date. GitHub's `since` filter
+ *  is documented as "commits after this date"; without the margin a commit whose
+ *  timestamp equals the watermark could be excluded from the retry window, and
+ *  commits sharing a timestamp are common in squash-merge workflows. The margin
+ *  costs at most a bounded re-ingest of already-successful commits, which is
+ *  idempotent on (repo, commit_sha, file_path). */
+const DIFF_RETRY_BOUNDARY_BACKOFF_MS = 1000;
+
 /** Sentinel value indicating GitHub returned 304 Not Modified */
 const NOT_MODIFIED = Symbol("NOT_MODIFIED");
 
@@ -1547,30 +1579,396 @@ function commitDateOf(summary: GitHubCommitSummary): string | undefined {
 }
 
 /**
+ * Per-commit ingestion outcome inside one diff-poller phase.
+ *
+ * - `ok`       — the commit's every indexable file landed in Vectorize.
+ * - `failed`   — the detail fetch, an embedding batch, or a Vectorize upsert
+ *                failed for at least one file; the commit must stay retryable.
+ * - `deferred` — the commit was inside the enumerated window but was not
+ *                attempted this run (per-run commit cap).
+ */
+export type DiffCommitStatus = "ok" | "failed" | "deferred";
+
+/** One commit's outcome, in the order the phase walked its commits. */
+export interface DiffCommitOutcome {
+  sha: string;
+  /** Commit timestamp; absent when GitHub returned neither author nor committer date. */
+  date?: string;
+  status: DiffCommitStatus;
+}
+
+/**
+ * Compute the next forward (`diffs:{repo}`) watermark.
+ *
+ * Invariant: **the forward watermark never advances past the earliest commit
+ * that has not been successfully ingested.** Before issue #178 the phase moved
+ * the watermark to the poll start time unconditionally, so any commit that
+ * failed — or that the per-run cap deferred — fell out of every subsequent
+ * `since` window and was lost permanently (the backward phase only walks into
+ * older history and never returns to that period).
+ *
+ * @param since      watermark the phase started from (lower bound, never regressed)
+ * @param windowEnd  upper bound of the window that was fully enumerated
+ * @param outcomes   every commit in the window, oldest-first
+ * @returns the watermark to persist; equal to `since` when nothing may advance
+ */
+export function nextForwardDiffWatermark(
+  since: string,
+  windowEnd: string,
+  outcomes: DiffCommitOutcome[],
+): string {
+  const boundary = outcomes.find((o) => o.status !== "ok");
+
+  // Whole window ingested — the window end is now the proven-complete frontier.
+  if (!boundary) return windowEnd;
+
+  // A commit we could not place on the timeline cannot bound the retry window;
+  // hold the watermark so the next run re-covers the same period.
+  if (!boundary.date) return since;
+  const boundaryTime = Date.parse(boundary.date);
+  if (Number.isNaN(boundaryTime)) return since;
+
+  const candidate = new Date(
+    boundaryTime - DIFF_RETRY_BOUNDARY_BACKOFF_MS,
+  ).toISOString();
+
+  // Never regress: the boundary can sit at (or before) the current watermark
+  // when the first commit of the window is the one that failed.
+  const sinceTime = Date.parse(since);
+  if (Number.isNaN(sinceTime)) return candidate;
+  return Date.parse(candidate) > sinceTime ? candidate : since;
+}
+
+/**
+ * Compute the next backward (`diffs_backfill:{repo}`) watermark.
+ *
+ * Mirror image of the forward invariant: **the backfill watermark never moves
+ * past the newest commit that has not been successfully ingested.** The phase
+ * walks newest-first, so the watermark may only advance across the contiguous
+ * successful prefix; the first failure freezes it, keeping that commit inside
+ * the next run's `until` window. Commits already ingested after the freeze
+ * point are re-ingested next run, which is bounded by the per-run cap and
+ * idempotent on (repo, commit_sha, file_path).
+ *
+ * @param current   watermark the phase started from (`until` bound)
+ * @param outcomes  commits in the order processed, newest-first
+ * @returns the watermark to persist, or `undefined` to leave it unchanged
+ */
+export function nextBackfillDiffWatermark(
+  current: string,
+  outcomes: DiffCommitOutcome[],
+): string | undefined {
+  let lastGood: string | undefined;
+  for (const o of outcomes) {
+    // Stop at the first commit that is not proven ingested, and at any commit
+    // we cannot place on the timeline (it cannot serve as an `until` bound).
+    if (o.status !== "ok" || !o.date || Number.isNaN(Date.parse(o.date))) break;
+    lastGood = o.date;
+  }
+  if (!lastGood) return undefined;
+
+  // Backfill only ever moves into older history.
+  const currentTime = Date.parse(current);
+  if (!Number.isNaN(currentTime) && Date.parse(lastGood) > currentTime) {
+    return undefined;
+  }
+  return lastGood;
+}
+
+/** Midpoint between two ISO timestamps; undefined when the span is degenerate. */
+function midpointIso(from: string, to: string): string | undefined {
+  const fromTime = Date.parse(from);
+  const toTime = Date.parse(to);
+  if (Number.isNaN(fromTime) || Number.isNaN(toTime)) return undefined;
+  if (toTime - fromTime <= 1000) return undefined;
+  return new Date(fromTime + Math.floor((toTime - fromTime) / 2)).toISOString();
+}
+
+/**
+ * Enumerate every commit in the forward window `(since, windowEnd]`.
+ *
+ * GitHub returns commits newest-first with no ascending option, so a truncated
+ * page hides the *oldest* end of the window — exactly the end the forward phase
+ * must process first. A page that comes back full therefore means "window not
+ * enumerable"; the window is halved and retried until one page covers it.
+ *
+ * @returns the enumerated commits plus the (possibly shrunk) window end, or
+ *          null when the shrink budget was exhausted without enumerating.
+ * @throws  whatever `fetchRepoCommits` throws (caller holds the watermark)
+ */
+async function enumerateForwardWindow(
+  repo: string,
+  token: string,
+  since: string,
+  windowEnd: string,
+): Promise<{ commits: GitHubCommitSummary[]; windowEnd: string } | null> {
+  let end = windowEnd;
+
+  for (let shrink = 0; shrink <= MAX_DIFF_FORWARD_WINDOW_SHRINKS; shrink++) {
+    const page = await fetchRepoCommits(repo, token, {
+      since,
+      until: end,
+      per_page: DIFF_FORWARD_LIST_PER_PAGE,
+    });
+    if (page.length < DIFF_FORWARD_LIST_PER_PAGE) {
+      return { commits: page, windowEnd: end };
+    }
+
+    const mid = midpointIso(since, end);
+    if (!mid) return null;
+    console.warn(
+      `pollDiffs: forward window ${since}..${end} for ${repo} exceeds one list ` +
+        `page (${DIFF_FORWARD_LIST_PER_PAGE}) — shrinking window end to ${mid}`,
+    );
+    end = mid;
+  }
+
+  return null;
+}
+
+/**
+ * Fetch one commit's detail and upsert its per-file diffs.
+ *
+ * `processAndUpsertCommitDiff` reports embedding / Vectorize failures through
+ * its return value rather than by throwing, so both surfaces are folded into a
+ * single outcome here — otherwise a commit whose vectors never landed would
+ * still count as ingested and let the watermark pass it (issue #178).
+ *
+ * Ingestion is judged on the dense side only, matching the pipeline's own
+ * boundary: a D1 FTS mirror or Store DO row failure is logged there and
+ * deliberately not counted, because the Vectorize upsert has already landed and
+ * the sparse index reconciles on reindex. Gating the watermark on the sparse
+ * mirror would let an FTS-side outage stall the whole diff surface.
+ */
+async function ingestCommitDiff(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+  summary: GitHubCommitSummary,
+): Promise<DiffCommitOutcome> {
+  const date = commitDateOf(summary);
+  try {
+    const detail = await fetchCommitDetail(repo, summary.sha, env.GITHUB_TOKEN);
+    const result = await processAndUpsertCommitDiff(env, storeStub, repo, detail);
+    if (result.failed > 0) {
+      console.error(
+        `pollDiffs: ${repo}@${summary.sha} partially failed ` +
+          `(embedded=${result.embedded}, failed=${result.failed}) — ` +
+          `commit stays inside the retry window`,
+      );
+      return { sha: summary.sha, date, status: "failed" };
+    }
+    return { sha: summary.sha, date, status: "ok" };
+  } catch (err) {
+    console.error(
+      `pollDiffs: commit ${repo}@${summary.sha} failed:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return { sha: summary.sha, date, status: "failed" };
+  }
+}
+
+/** Per-phase counters surfaced in the run's summary log line. */
+interface DiffPhaseStats {
+  processed: number;
+  failed: number;
+  deferred: number;
+  /** Watermark did not advance this run (list failure, or an unprocessed commit at the boundary). */
+  held: boolean;
+}
+
+/**
+ * Forward phase — webhook redundancy plus gap recovery.
+ *
+ * Enumerates `(watermark, pollStartTime]`, processes its **oldest**
+ * MAX_DIFF_COMMITS_FORWARD_PER_RUN commits, and advances the watermark only
+ * across the contiguous successfully-ingested prefix. Anything failed or
+ * deferred stays inside the next run's window, so a burst larger than the
+ * per-run cap drains over successive runs instead of being skipped.
+ */
+async function runForwardDiffPhase(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+  pollStartTime: string,
+): Promise<DiffPhaseStats> {
+  const fwdKey = `diffs:${repo}`;
+  const fwdWm = await readWatermark(storeStub, fwdKey);
+  // First run: start one hour ago so the initial forward sweep covers the
+  // last cron interval without pulling the whole history into this phase.
+  const since =
+    fwdWm?.lastPolledAt ??
+    new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  const stats: DiffPhaseStats = { processed: 0, failed: 0, deferred: 0, held: false };
+
+  if (Date.parse(since) >= Date.parse(pollStartTime)) {
+    console.warn(
+      `pollDiffs: forward watermark ${since} is not older than poll start ` +
+        `${pollStartTime} for ${repo} — skipping forward phase`,
+    );
+    stats.held = true;
+    return stats;
+  }
+
+  let window: { commits: GitHubCommitSummary[]; windowEnd: string } | null;
+  try {
+    window = await enumerateForwardWindow(
+      repo,
+      env.GITHUB_TOKEN,
+      since,
+      pollStartTime,
+    );
+  } catch (err) {
+    // A failed list leaves the window unknown; holding the watermark keeps the
+    // whole period retryable on the next run.
+    console.error(
+      `pollDiffs: forward list failed for ${repo} — watermark held at ${since}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    stats.held = true;
+    return stats;
+  }
+
+  if (!window) {
+    console.error(
+      `pollDiffs: forward window for ${repo} still exceeds one list page after ` +
+        `${MAX_DIFF_FORWARD_WINDOW_SHRINKS} shrinks — watermark held at ${since}`,
+    );
+    stats.held = true;
+    return stats;
+  }
+
+  // GitHub returns newest-first; walk oldest-first so the watermark advances
+  // over a prefix that is contiguous in commit-date order.
+  const ordered = [...window.commits].reverse();
+  const outcomes: DiffCommitOutcome[] = [];
+  for (const summary of ordered) {
+    if (outcomes.length >= MAX_DIFF_COMMITS_FORWARD_PER_RUN) {
+      outcomes.push({
+        sha: summary.sha,
+        date: commitDateOf(summary),
+        status: "deferred",
+      });
+      stats.deferred++;
+      continue;
+    }
+    const outcome = await ingestCommitDiff(repo, env, storeStub, summary);
+    outcomes.push(outcome);
+    if (outcome.status === "ok") stats.processed++;
+    else stats.failed++;
+  }
+
+  const next = nextForwardDiffWatermark(since, window.windowEnd, outcomes);
+  if (next !== since) {
+    await writeWatermark(storeStub, fwdKey, next);
+  } else {
+    stats.held = true;
+    const boundary = outcomes.find((o) => o.status !== "ok");
+    console.warn(
+      `pollDiffs: forward watermark held at ${since} for ${repo}` +
+        (boundary ? ` — boundary commit ${boundary.sha} (${boundary.status})` : ""),
+    );
+  }
+
+  return stats;
+}
+
+/**
+ * Backward phase — historical backfill.
+ *
+ * Walks `until=watermark` into older history. The watermark advances only
+ * across the contiguous successful prefix (newest-first), so a failed commit
+ * stays inside the next run's window instead of being stepped over.
+ */
+async function runBackfillDiffPhase(
+  repo: string,
+  env: Env,
+  storeStub: DurableObjectStub,
+  pollStartTime: string,
+): Promise<DiffPhaseStats> {
+  const bwdKey = `diffs_backfill:${repo}`;
+  const bwdWm = await readWatermark(storeStub, bwdKey);
+  // First run: start walking backward from the current time.
+  const until = bwdWm?.lastPolledAt ?? pollStartTime;
+
+  const stats: DiffPhaseStats = { processed: 0, failed: 0, deferred: 0, held: false };
+
+  let commits: GitHubCommitSummary[];
+  try {
+    commits = await fetchRepoCommits(repo, env.GITHUB_TOKEN, {
+      until,
+      per_page: MAX_DIFF_COMMITS_BACKWARD_PER_RUN,
+    });
+  } catch (err) {
+    console.error(
+      `pollDiffs: backward list failed for ${repo} — watermark held at ${until}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    stats.held = true;
+    return stats;
+  }
+
+  const outcomes: DiffCommitOutcome[] = [];
+  for (const summary of commits) {
+    const outcome = await ingestCommitDiff(repo, env, storeStub, summary);
+    outcomes.push(outcome);
+    if (outcome.status === "ok") stats.processed++;
+    else stats.failed++;
+  }
+
+  // With 0 commits returned the repo's history is exhausted (or the token lost
+  // access); leaving the watermark alone avoids silently skipping a window.
+  const next = nextBackfillDiffWatermark(until, outcomes);
+  if (next) {
+    await writeWatermark(storeStub, bwdKey, next);
+  } else {
+    stats.held = true;
+    if (outcomes.length > 0) {
+      console.warn(
+        `pollDiffs: backfill watermark held at ${until} for ${repo} — ` +
+          `newest attempted commit ${outcomes[0].sha} is not ingested`,
+      );
+    }
+  }
+
+  return stats;
+}
+
+/**
  * Poll historical and recent commit diffs for a repository and upsert them
  * through the shared commit-diff pipeline.
  *
  * Two phases run per cron tick:
  *
- * 1. **Forward** (webhook redundancy): fetch commits with `since=lastPolledAt`
- *    so the poller re-covers any commits missed while webhook delivery was
- *    stalled. The first run uses "one hour ago" as the initial since so the
- *    initial fetch stays bounded; subsequent runs advance the forward
- *    watermark to the current poll start time unconditionally.
+ * 1. **Forward** (webhook redundancy + gap recovery): enumerate the window
+ *    `(diffs:{repo} watermark, pollStartTime]` and process its oldest commits
+ *    first. The first run uses "one hour ago" as the initial since so the
+ *    initial fetch stays bounded.
  *
  * 2. **Backward** (historical backfill): fetch commits with
- *    `until=oldestUnprocessedDate` so the poller walks backward through the
- *    repo's history one tick at a time. The first run uses "now" as the
- *    initial until; subsequent runs advance the backward watermark to the
- *    commit_date of the oldest commit processed in this run. When the repo's
- *    history is exhausted the API returns 0 commits and the watermark stops
- *    advancing — subsequent runs will repeatedly return 0 commits, which is
- *    acceptable idle-state behavior.
+ *    `until=diffs_backfill:{repo} watermark` so the poller walks backward
+ *    through the repo's history one tick at a time. The first run uses "now"
+ *    as the initial until. When the repo's history is exhausted the API
+ *    returns 0 commits and the watermark stops advancing — subsequent runs
+ *    repeatedly return 0 commits, which is acceptable idle-state behavior.
+ *
+ * Both phases share one watermark invariant (issue #178): **a watermark never
+ * moves past a commit that has not been successfully ingested.** A failed
+ * detail fetch, embedding, Vectorize or D1 write — and a commit the per-run cap
+ * deferred — all keep the commit inside the next run's window, so a transient
+ * failure costs a retry instead of a permanent gap.
  *
  * Each phase is capped at a small commit count (see MAX_DIFF_COMMITS_*) to
  * spread cost across many cron ticks. `processAndUpsertCommitDiff` upserts
- * on the (repo, commit_sha, file_path) primary key, so overlap with webhook
- * or with the opposite phase is idempotent.
+ * on the (repo, commit_sha, file_path) primary key, so overlap with webhook,
+ * with the opposite phase, or with a retried commit is idempotent.
+ *
+ * Liveness tradeoff: a commit that fails on every attempt (e.g. a permanently
+ * 5xx-ing detail fetch) blocks its phase's watermark. That is deliberate — a
+ * stall is visible in the run log, which names the boundary commit, whereas the
+ * pre-#178 "advance anyway" behavior was silent. The manual escape hatch is
+ * `POST /admin/diff-watermark` (see `src/index.ts`).
  */
 export async function pollDiffs(
   repo: string,
@@ -1579,101 +1977,14 @@ export async function pollDiffs(
 ): Promise<void> {
   const pollStartTime = new Date().toISOString();
 
-  // ── Forward phase ───────────────────────────────────────────
-  const fwdKey = `diffs:${repo}`;
-  const fwdWm = await readWatermark(storeStub, fwdKey);
-  // First run: start one hour ago so the initial forward sweep covers the
-  // last cron interval without pulling the whole history into this phase.
-  const sinceFwd =
-    fwdWm?.lastPolledAt ??
-    new Date(Date.now() - 60 * 60 * 1000).toISOString();
-
-  let fwdProcessed = 0;
-  let fwdFailed = 0;
-  try {
-    const fwdCommits = await fetchRepoCommits(repo, env.GITHUB_TOKEN, {
-      since: sinceFwd,
-      per_page: MAX_DIFF_COMMITS_FORWARD_PER_RUN,
-    });
-    for (const summary of fwdCommits) {
-      try {
-        const detail = await fetchCommitDetail(
-          repo,
-          summary.sha,
-          env.GITHUB_TOKEN,
-        );
-        await processAndUpsertCommitDiff(env, storeStub, repo, detail);
-        fwdProcessed++;
-      } catch (err) {
-        fwdFailed++;
-        console.error(
-          `pollDiffs: forward commit ${repo}@${summary.sha} failed:`,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    }
-  } catch (err) {
-    console.error(
-      `pollDiffs: forward list failed for ${repo}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-  }
-  // Advance the forward watermark regardless of partial failures so the next
-  // run continues from pollStartTime instead of reprocessing the same window.
-  // Upstream upsert is idempotent on (repo, commit_sha, file_path).
-  await writeWatermark(storeStub, fwdKey, pollStartTime);
-
-  // ── Backward phase ──────────────────────────────────────────
-  const bwdKey = `diffs_backfill:${repo}`;
-  const bwdWm = await readWatermark(storeStub, bwdKey);
-  // First run: start walking backward from the current time.
-  const untilBwd = bwdWm?.lastPolledAt ?? pollStartTime;
-
-  let bwdProcessed = 0;
-  let bwdFailed = 0;
-  let oldestSeenDate: string | undefined;
-  try {
-    const bwdCommits = await fetchRepoCommits(repo, env.GITHUB_TOKEN, {
-      until: untilBwd,
-      per_page: MAX_DIFF_COMMITS_BACKWARD_PER_RUN,
-    });
-    // GitHub returns commits newest-first; the last entry is the oldest in
-    // this page and becomes the next-run watermark.
-    for (const summary of bwdCommits) {
-      try {
-        const detail = await fetchCommitDetail(
-          repo,
-          summary.sha,
-          env.GITHUB_TOKEN,
-        );
-        await processAndUpsertCommitDiff(env, storeStub, repo, detail);
-        bwdProcessed++;
-        const d = commitDateOf(summary);
-        if (d) oldestSeenDate = d;
-      } catch (err) {
-        bwdFailed++;
-        console.error(
-          `pollDiffs: backward commit ${repo}@${summary.sha} failed:`,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    }
-  } catch (err) {
-    console.error(
-      `pollDiffs: backward list failed for ${repo}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-  }
-  // Only advance the backward watermark when we actually saw a commit. If the
-  // API returned 0 commits the repo's history is exhausted (or the token lost
-  // access); leaving the watermark alone avoids silently skipping a window.
-  if (oldestSeenDate) {
-    await writeWatermark(storeStub, bwdKey, oldestSeenDate);
-  }
+  const fwd = await runForwardDiffPhase(repo, env, storeStub, pollStartTime);
+  const bwd = await runBackfillDiffPhase(repo, env, storeStub, pollStartTime);
 
   console.log(
-    `${repo} diffs: forward [processed=${fwdProcessed}, failed=${fwdFailed}], ` +
-      `backward [processed=${bwdProcessed}, failed=${bwdFailed}]`,
+    `${repo} diffs: forward [processed=${fwd.processed}, failed=${fwd.failed}, ` +
+      `deferred=${fwd.deferred}, watermark=${fwd.held ? "held" : "advanced"}], ` +
+      `backward [processed=${bwd.processed}, failed=${bwd.failed}, ` +
+      `watermark=${bwd.held ? "held" : "advanced"}]`,
   );
 }
 

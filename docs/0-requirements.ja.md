@@ -133,10 +133,18 @@ Responsibilities:
 
 commit diff poller は 2-phase 構成:
 
-- **forward phase** — `since=lastPolledAt` で直近 commit を再取得する（webhook 取りこぼし時の redundancy）。watermark namespace は `diffs:${repo}`。
+- **forward phase** — `(lastPolledAt, pollStartTime]` の window を列挙し、その中の**古い側から**取り込む（webhook 取りこぼし時の redundancy）。watermark namespace は `diffs:${repo}`。
 - **backward phase** — `until=oldestUnprocessedDate` で履歴を徐々に遡行する（新規 deployment や webhook 起動前の commit を backfill する経路）。watermark namespace は `diffs_backfill:${repo}`。
 
-1 run あたり上限は forward / backward それぞれ 10 commits。`processAndUpsertCommitDiff` の upsert は `(repo, commit_sha, file_path)` で idempotent なので、webhook / 両 phase 間で overlap しても副作用はない。
+1 run あたりの取り込み上限は forward / backward それぞれ 5 commits。`processAndUpsertCommitDiff` の upsert は `(repo, commit_sha, file_path)` で idempotent なので、webhook / 両 phase 間で overlap しても副作用はない。
+
+両 phase は同一の watermark 不変条件に従う: **取り込みに成功していない commit を watermark が追い越さない。** commit が「取り込み済み」とみなされるのは、detail 取得が成功し、かつ `processAndUpsertCommitDiff` の failed が 0 の場合のみ（embedding / Vectorize の失敗は throw ではなく戻り値で報告されるため、戻り値も判定に含める）。判定は dense 側のみを見る: D1 FTS mirror / store row の失敗は pipeline 側で log のみ・failed に計上しない設計で、vector は既に landing 済み・sparse index は reindex で reconcile されるため。mirror 側まで watermark の条件にすると、FTS 側の障害が diff surface 全体を止めてしまう。帰結:
+
+- 失敗した commit と、1 run 上限で持ち越された commit は、次回 run の window に残る
+- commit list 取得が失敗した run は watermark を動かさないので、その期間全体が再試行対象のまま残る
+- forward phase は window の古い端を確定してからでないと watermark を進められないため、window は 100 件/page で列挙する。page が満杯なら「列挙不能」とみなして window 終端を半分に縮める（最大 8 回）。それでも収まらない場合は watermark を保持して log に出す — silent な欠損より、観測できる stall を選ぶ。
+
+トレードオフは liveness で、毎回失敗し続ける commit はその phase の watermark を止める。run log に境界 commit の SHA が出るほか、`POST /admin/diff-watermark`（installation guide 参照）で watermark を手動で移動できる。旧版 poller が取りこぼした期間を再走査させる経路も同じ endpoint。
 
 wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込み経路。Wiki は別 git repo (`{repo}.wiki.git`) に存在し、REST API も webhook event も持たないため、poller が repo ごとに 3 段の HTTP 呼び出しで処理する:
 

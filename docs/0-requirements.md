@@ -134,10 +134,18 @@ Dispatch is performed inside `handleScheduled` by inspecting `controller.cron`. 
 
 The commit-diff poller runs in two phases:
 
-- **forward phase** — re-fetches recent commits using `since=lastPolledAt`, acting as redundancy when webhook delivery has stalled. Watermark namespace: `diffs:${repo}`.
+- **forward phase** — enumerates the window `(lastPolledAt, pollStartTime]` and ingests its **oldest** commits first, acting as redundancy when webhook delivery has stalled. Watermark namespace: `diffs:${repo}`.
 - **backward phase** — walks backward through history using `until=oldestUnprocessedDate`, backfilling commits that predate the webhook or a fresh deployment. Watermark namespace: `diffs_backfill:${repo}`.
 
-Each phase is capped at 10 commits per repo per run. Upserts through `processAndUpsertCommitDiff` are idempotent on `(repo, commit_sha, file_path)`, so overlap between webhook and either phase is safe.
+Each phase ingests at most 5 commits per repo per run. Upserts through `processAndUpsertCommitDiff` are idempotent on `(repo, commit_sha, file_path)`, so overlap between webhook and either phase is safe.
+
+Both phases obey one watermark invariant: **a watermark never moves past a commit that has not been successfully ingested.** A commit counts as ingested only when its detail fetch succeeded and `processAndUpsertCommitDiff` reported zero failed files — embedding and Vectorize failures are reported by return value rather than by throwing, so the return value is part of the check. The criterion is the dense side only: a D1 FTS mirror or store-row failure is logged by the pipeline and deliberately not counted, since the vector has already landed and the sparse index reconciles on reindex; gating the watermark on the mirror would let an FTS-side outage stall the whole diff surface. Consequences:
+
+- a failed commit, and every commit the per-run cap deferred, stay inside the next run's window
+- a failed commit list leaves the watermark untouched, so the whole period stays retryable
+- the forward phase must know the oldest end of its window before advancing, so the window is enumerated with a 100-entry page; a full page means "not enumerable" and the window end is halved (at most 8 times) until one page covers it. If even then the window overflows, the run holds the watermark and logs — a visible stall is preferred over a silent gap.
+
+The tradeoff is liveness: a commit that fails on every attempt blocks its phase's watermark. The run log names the boundary commit, and `POST /admin/diff-watermark` (see the installation guide) moves the watermark manually — the same endpoint used to replay a period whose commits were lost by an earlier version of the poller.
 
 The wiki poller runs in the `:45` cron and is the only ingestion path for GitHub Wiki content. Wiki pages live in a separate git repo (`{repo}.wiki.git`) that GitHub does not expose through the REST API or webhook events; the poller therefore performs three lightweight HTTP calls per repo:
 

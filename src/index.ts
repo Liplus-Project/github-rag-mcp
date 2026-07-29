@@ -14,6 +14,7 @@
  *   GET /oauth/authorize  -- Start GitHub OAuth flow
  *   GET /oauth/callback   -- GitHub OAuth callback
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
+ *   POST /admin/diff-watermark?repo=owner/repo&since=ISO8601[&phase=forward|backfill] -- Rewind the commit-diff poller watermark (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
@@ -174,6 +175,62 @@ const innerHandler: ExportedHandler<Env> = {
 
       return new Response(
         JSON.stringify({ repo, wikiPagesProcessed: pages, edgesWritten: edges }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // -- Admin: move a commit-diff poller watermark (gap recovery / stall release) --
+    // POST /admin/diff-watermark?repo=owner/repo&since=2026-07-06T00:00:00Z[&phase=forward|backfill]
+    // Rewinds (or advances) the diff poller's watermark so the next `:30` cron
+    // re-covers the period from `since`. The forward phase then walks that
+    // period oldest-first, MAX_DIFF_COMMITS_FORWARD_PER_RUN commits per run,
+    // without skipping anything (issue #178).
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/diff-watermark") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      const since = url.searchParams.get("since");
+      if (!since) {
+        return new Response("missing since query parameter", { status: 400 });
+      }
+      const sinceTime = Date.parse(since);
+      if (Number.isNaN(sinceTime)) {
+        return new Response("since is not a parseable timestamp", { status: 400 });
+      }
+      const lastPolledAt = new Date(sinceTime).toISOString();
+
+      const phase = url.searchParams.get("phase") ?? "forward";
+      if (phase !== "forward" && phase !== "backfill") {
+        return new Response("phase must be forward or backfill", { status: 400 });
+      }
+      const key = phase === "backfill" ? `diffs_backfill:${repo}` : `diffs:${repo}`;
+
+      const storeId = env.ISSUE_STORE.idFromName("global");
+      const storeStub = env.ISSUE_STORE.get(storeId);
+      const storeResp = await storeStub.fetch(
+        new Request("http://store/watermark", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo: key, lastPolledAt }),
+        }),
+      );
+      if (!storeResp.ok) {
+        return new Response(
+          JSON.stringify({ error: await storeResp.text() }),
+          { status: 502, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ repo, phase, watermarkKey: key, lastPolledAt }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
