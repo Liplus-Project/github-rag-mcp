@@ -4,8 +4,8 @@
  * Layer = L4 Operations (sparse retrieval surface)
  *
  * Responsibilities:
- * - Index tokenizable content into the D1 FTS5 virtual tables (`search_docs_nat_fts`,
- *   `search_docs_code_fts`) via the `search_docs` content-owner table.
+ * - Index tokenizable content into the D1 FTS5 virtual tables (`search_docs_nat_fts_v2`,
+ *   `search_docs_code_fts_v2`) via the `search_docs` content-owner table.
  * - Query FTS5 by a natural language or code-oriented query using BM25 ranking.
  * - Delete rows when the canonical surface is removed (issue/PR/release/doc).
  *
@@ -214,7 +214,10 @@ export async function queryFts(
   const whereSql =
     whereClauses.length > 0 ? ` AND ${whereClauses.join(" AND ")}` : "";
 
-  // Two UNION ALL branches so each tokenizer contributes hits. The outer ORDER BY
+  // Two UNION ALL branches so each tokenizer contributes hits. The v2 indexes
+  // were created by migration 0005 with tokenizer-isolated delete/update
+  // triggers; the v1 indexes are intentionally left untouched because either
+  // one may already contain invalid delete entries. The outer ORDER BY
   // then picks the best BM25 score across both. `bm25()` returns negative values
   // in D1's FTS5 (larger-magnitude negative = better match), so ASC orders
   // best-first regardless of sign.
@@ -230,10 +233,10 @@ export async function queryFts(
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
                d.commit_date, d.commit_author, d.content,
-               bm25(search_docs_nat_fts) AS score
-          FROM search_docs_nat_fts f
+               bm25(search_docs_nat_fts_v2) AS score
+          FROM search_docs_nat_fts_v2 f
           JOIN search_docs d ON d.rowid = f.rowid
-         WHERE search_docs_nat_fts MATCH ?${whereSql}
+         WHERE search_docs_nat_fts_v2 MATCH ?${whereSql}
          ORDER BY score ASC
          LIMIT ?
       )
@@ -243,10 +246,10 @@ export async function queryFts(
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
                d.commit_date, d.commit_author, d.content,
-               bm25(search_docs_code_fts) AS score
-          FROM search_docs_code_fts f
+               bm25(search_docs_code_fts_v2) AS score
+          FROM search_docs_code_fts_v2 f
           JOIN search_docs d ON d.rowid = f.rowid
-         WHERE search_docs_code_fts MATCH ?${whereSql}
+         WHERE search_docs_code_fts_v2 MATCH ?${whereSql}
          ORDER BY score ASC
          LIMIT ?
       )

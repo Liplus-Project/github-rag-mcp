@@ -208,15 +208,16 @@ D1 の FTS5 virtual table は hybrid retrieval の sparse 側を担う。
 Schema 概要:
 
 - `search_docs` — external content table（source of truth、vector_id を primary key）
-- `search_docs_nat_fts` — porter + unicode61 tokenizer の FTS5 virtual table（自然言語: issue / PR / release / doc）
-- `search_docs_code_fts` — trigram tokenizer の FTS5 virtual table（コード / SHA / identifier: diff）
+- `search_docs_nat_fts_v2` — porter + unicode61 tokenizer の稼働中 FTS5 virtual table（自然言語: issue / PR / release / doc / wiki_doc / comment / review）
+- `search_docs_code_fts_v2` — trigram tokenizer の稼働中 FTS5 virtual table（コード / SHA / identifier: diff）。v1 table は過去の corruption を修復時に触らないため残すが、query / update 対象にはしない
 
 tokenizer 選択:
 
 - `porter` — 自然言語の stem matching に適する
 - `trigram` — SHA prefix、CamelCase、file path などの部分一致に適する
 - tokenizer_kind 列で row をどちらの virtual table に振り分けるか決定
-- content-owner table (`content=search_docs`) + trigger による自動 sync で、delete の fan-out は DELETE FROM search_docs 一発で両 virtual table に伝搬する
+- 各稼働中 FTS table は `search_docs` の tokenizer-filtered view を external-content relation に指定し、宣言上の content row 集合と実際の index row 集合を一致させる。trigger で自動 sync し、すべての分岐を `tokenizer_kind` で guard して、各 row は片方の FTS5 table にだけ insert / delete する。索引したことのない反対側 tokenizer に FTS5 `delete` command を送ることは禁止する（external-content index が壊れるため）
+- 復旧時は新しい FTS generation を作り、`WHERE tokenizer_kind = ...` で各 table を個別 backfill する。FTS5 `rebuild` は全 `search_docs` row を各 tokenizer に流して同じ分離不変条件を壊すため使用しない
 
 vector_id は Vectorize 側と同一（deterministic SHA-256 ベース）で、RRF 合成時に dense hit と sparse hit を追加 round-trip なしで join できる。
 
