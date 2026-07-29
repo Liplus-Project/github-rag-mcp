@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --check server/index.js",
+    "test": "node --check server/index.js && node --test test/oauth-client-registration.test.js",
     "pack:mcpb": "mcpb pack"
   },
   "dependencies": {

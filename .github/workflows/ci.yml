@@ -15,6 +15,10 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - run: npm ci
+        working-directory: mcp-server
+      - run: npm test
+        working-directory: mcp-server
       - run: node scripts/check-schema-drift.mjs
       - run: npm test
       - run: npx tsc --noEmit

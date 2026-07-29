@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { exec } from "node:child_process";
 import { createRequire } from "node:module";
+import { supportsRedirectUris } from "./oauth-client-registration.js";
 
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require("../package.json");
@@ -89,7 +90,7 @@ async function saveClientRegistration(reg) {
 
 async function ensureClientRegistration(metadata, redirectUris) {
   const existing = await loadClientRegistration();
-  if (existing) return existing;
+  if (supportsRedirectUris(existing, redirectUris)) return existing;
 
   if (!metadata.registration_endpoint) {
     throw new Error("OAuth server does not support dynamic client registration");

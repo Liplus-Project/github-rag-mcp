@@ -393,6 +393,9 @@ Requirements:
 - authenticate the MCP client user
 - access repositories through the installed app
 - use GitHub tokens for API reads
+- reuse a cached Dynamic Client Registration only when its registered redirect
+  URI set covers every localhost callback URI requested for the current OAuth
+  flow; otherwise register a replacement client before authorization
 
 ## Storage Rules
 

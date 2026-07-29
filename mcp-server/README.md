@@ -84,6 +84,11 @@ OAuth client registration and tokens are stored in:
 - `~/.github-rag-mcp/oauth-client.json` (dynamic client registration)
 - `~/.github-rag-mcp/oauth-tokens.json` (access + refresh tokens)
 
+The proxy reuses a cached client registration only when it includes every
+redirect URI required by the current localhost callback listener. Because the
+listener uses a random port, a registration from a previous authorization may
+be replaced automatically before the browser opens.
+
 Delete these files to force a fresh authorization flow.
 
 ## Tools exposed
@@ -101,7 +106,8 @@ The `type` filter accepts: `issue`, `pull_request`, `release`, `doc`, `wiki_doc`
 ## Authentication flow
 
 1. On first tool call, the proxy discovers OAuth metadata at `${RAG_WORKER_URL}/.well-known/oauth-authorization-server`.
-2. It performs Dynamic Client Registration (RFC 7591) if no client is cached.
+2. It performs Dynamic Client Registration (RFC 7591) if no compatible client
+   is cached for the current localhost callback URIs.
 3. It starts a one-shot localhost HTTP listener on a random port and opens the browser to the Worker's authorization endpoint.
 4. After you approve, the Worker redirects to `http://127.0.0.1:<port>/callback` with an authorization code.
 5. The proxy exchanges the code for tokens (PKCE S256) and saves them.
@@ -112,6 +118,9 @@ The browser callback never leaves your machine; the authorization code is delive
 ## Troubleshooting
 
 - **Browser does not open.** The proxy logs the authorization URL to stderr; copy it into a browser manually.
+- **`redirect_uri is not associated with this application`.** Upgrade the
+  proxy. Current versions replace cached client registrations whose redirect
+  URI set does not cover the callback port selected for this authorization.
 - **`OAuth callback timed out after 5 minutes`.** Re-invoke any tool to restart the flow.
 - **`Failed to reach worker`.** Check that `RAG_WORKER_URL` is correct and reachable from your machine.
 - **Stale credentials.** Remove `~/.github-rag-mcp/oauth-tokens.json` (and optionally `oauth-client.json`) and retry.
