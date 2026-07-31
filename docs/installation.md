@@ -217,6 +217,43 @@ Operational notes:
 - upserts are idempotent on `(repo, commit_sha, file_path)`, so re-covering an already-indexed period is safe
 - verify progress with the `{repo} diffs: forward [...]` line in the worker logs, or by searching `type: "diff"` for the period
 
+## 11. Re-segment the full-text index after applying migration 0006
+
+Migration `0006_fts5_segmented_nat_index.sql` adds the `content_fts` column and seeds it with a copy of the raw content. The actual word segmentation only exists in JavaScript (`Intl.Segmenter`), so rows indexed before the migration stay unsegmented until this endpoint walks them. Until it finishes, Japanese phrase queries keep returning zero sparse candidates for those rows.
+
+Run it once after applying the migration. Rows indexed after the deploy are already segmented by the ingest path.
+
+Order the upgrade as **apply migration → deploy the worker → run this backfill**. Between the migration and the deploy, the still-running previous version writes no `content_fts`, so rows it indexes in that window land in the v3 index as empty text; the backfill rewrites them from the raw `content`, so the window heals itself. The reverse order does not work: a worker deployed before the migration hits `no such column: content_fts` on every upsert.
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-fts-segments
+```
+
+Parameters:
+
+- `repo` — optional `owner/repo` filter; omit to walk every repository
+- `cursor` — `rowid` to resume from (default `0`); pass back the `nextCursor` of the previous response
+- `limit` — rows per call, `1..200` (default `50`)
+
+Authentication:
+
+- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+
+Response:
+
+```json
+{ "repo": null, "cursor": 0, "limit": 50, "scanned": 50, "updated": 41, "nextCursor": 812, "done": false }
+```
+
+Operational notes:
+
+- call it repeatedly, feeding `nextCursor` back in, until `done` is `true`
+- safe to restart from `cursor=0` at any point: a row whose segmentation already matches is skipped without a write, so a re-run of a finished backfill reports `updated: 0`
+- each call issues at most two D1 operations, so an interrupted run never leaves a half-written batch
+- verify with a Japanese phrase query in `fusion: "sparse_only"` mode — `sparse_candidates` should be non-zero
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

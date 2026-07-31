@@ -215,9 +215,9 @@ D1 の FTS5 virtual table は hybrid retrieval の sparse 側を担う。
 
 Schema 概要:
 
-- `search_docs` — external content table（source of truth、vector_id を primary key）
-- `search_docs_nat_fts_v2` — porter + unicode61 tokenizer の稼働中 FTS5 virtual table（自然言語: issue / PR / release / doc / wiki_doc / comment / review）
-- `search_docs_code_fts_v2` — trigram tokenizer の稼働中 FTS5 virtual table（コード / SHA / identifier: diff）。v1 table は過去の corruption を修復時に触らないため残すが、query / update 対象にはしない
+- `search_docs` — external content table（source of truth、vector_id を primary key）。索引対象テキストを 2 列で持つ: `content` が生本文、`content_fts` が分かち書き済み本文
+- `search_docs_nat_fts_v3` — porter + unicode61 tokenizer の稼働中 FTS5 virtual table（自然言語: issue / PR / release / doc / wiki_doc / comment / review）。external content は `content_fts`
+- `search_docs_code_fts_v2` — trigram tokenizer の稼働中 FTS5 virtual table（コード / SHA / identifier: diff）。external content は生の `content`。旧世代（nat v2 および v1 の 2 table）は過去の corruption を修復時に触らないため残すが、query / update 対象にはしない
 
 tokenizer 選択:
 
@@ -226,6 +226,16 @@ tokenizer 選択:
 - tokenizer_kind 列で row をどちらの virtual table に振り分けるか決定
 - 各稼働中 FTS table は `search_docs` の tokenizer-filtered view を external-content relation に指定し、宣言上の content row 集合と実際の index row 集合を一致させる。trigger で自動 sync し、すべての分岐を `tokenizer_kind` で guard して、各 row は片方の FTS5 table にだけ insert / delete する。索引したことのない反対側 tokenizer に FTS5 `delete` command を送ることは禁止する（external-content index が壊れるため）
 - 復旧時は新しい FTS generation を作り、`WHERE tokenizer_kind = ...` で各 table を個別 backfill する。FTS5 `rebuild` は全 `search_docs` row を各 tokenizer に流して同じ分離不変条件を壊すため使用しない
+
+分かち書き（自然文側）:
+
+- `unicode61` は非英数字でしか token を切らない。日本語には区切り記号が無いため仮名漢字の連なりが丸ごと 1 token になり、日本語の句クエリは何にも当たらない。本 corpus の大半が日本語であるため、hybrid retrieval が実質 dense 単独に退化していた
+- D1 はカスタム tokenizer を読み込めない（`tokenize = 'icu'` は `no such tokenizer: icu` で失敗する）。したがって語境界は SQLite に渡る前に挿入する必要がある
+- 分割には `Intl.Segmenter`（workerd 同梱、依存追加なし）を使う。索引側と検索側の両方で走らせる: 取り込み経路は分かち書き済み本文を `content_fts` に格納し、検索経路は分かち書き済みクエリから nat 側の `MATCH` 文字列を組む。**対称性が正しさの条件**である。カタカナ語などは誤分割するが、クエリ側も同じ誤分割を通るため、劣化するのは精度だけで再現率は落ちない
+- CJK を含まないテキストは素通しするため、英語の挙動は前世代と byte 単位で同一
+- nat 分岐と code 分岐は同一クエリから**別々の** `MATCH` 文字列を組む（nat = 分かち書き後、code = 生。挿入した空白は trigram の部分一致を壊すため）
+- `content` を生のまま保持するのは、reranker の入力であり、かつ trigram index の索引対象であるため
+- migration 0006 は `content_fts` を `content` のコピーで初期化することしかできない（分かち書きは JS にしか存在しない）。既存 row の再分割は `POST /admin/backfill-fts-segments` が `rowid` cursor でバッチ実行する。分かち書き済みの row は書き込まずに skip するため idempotent で、中断しても先頭から再実行できる
 
 vector_id は Vectorize 側と同一（deterministic SHA-256 ベース）で、RRF 合成時に dense hit と sparse hit を追加 round-trip なしで join できる。
 
@@ -306,7 +316,7 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 
 - bge-reranker-base は context window 512 tokens（BAAI 元仕様）。`(query, candidate content)` pair が超過しないよう char-budget ベースで truncate（query 200 chars 上限、pair 合計 1700 chars 上限）
 - Workers AI は `contexts[].text` に length >= 1 を要求（エラー 5006: "Length of '/contexts/N/text' must be >= 1 not met"）。呼び出し時点で content が空のままの候補は rerank 入力から除外する（残った件数が 0 / 1 の場合は AI 呼び出しをスキップして passthrough）
-- reranker 入力の本文は 2 系統から供給する。sparse（FTS5）hit を持つ候補は本文を inline で保持している。dense-only 候補は FTS row が無いため、D1 `search_docs` から `vector_id IN (...)` の一括クエリ 1 回で本文を補完する（1 件ずつの fan-out はしない）。これは日本語 query で特に効く: FTS5 のトークン化では BM25 hit が 0 件になりやすく、全候補が dense-only になるため、補完が無いと候補集合が空本文のまま reranker に渡り cross-encoder が一度も動かない。補完中の D1 失敗は致命的に扱わず、既に得られている本文だけで検索を継続する
+- reranker 入力の本文は 2 系統から供給する。sparse（FTS5）hit を持つ候補は本文を inline で保持している。dense-only 候補は FTS row が無いため、D1 `search_docs` から `vector_id IN (...)` の一括クエリ 1 回で本文を補完する（1 件ずつの fan-out はしない）。最も顕著だったのは nat index を分かち書きする前の日本語 query で、FTS5 のトークン化で BM25 hit が 0 件になり全候補が dense-only になるため、補完が無いと候補集合が空本文のまま reranker に渡り cross-encoder が一度も動かなかった。分かち書きでこの原因は解消したが、sparse 側が取りこぼした候補は依然として本文を持たずに届くので、補完自体は引き続き必要である。補完中の D1 失敗は致命的に扱わず、既に得られている本文だけで検索を継続する
 - `rerank_applied: true` は、実際に 1 件以上へ reranker score が付与された場合にのみ報告する。空の reranker 結果（スコア可能な本文が 0 件）は失敗と同じ扱いで、fusion 順を維持し `rerank_applied: false` とする。不変条件: `rerank_applied: true` なら必ず 1 件以上の `rerank_score` が non-null
 - reranker は最大 50 件 / 1 検索（Workers AI Free tier 10,000 neurons/day と業界中央値の整合点）
 - bge-reranker-base は英語ベース・多言語非対応。日本語 issue/PR では精度低下リスクあり（runtime 観察対象、将来的に bge-reranker-v2-m3 提供開始時または外部 reranker への切替を別 issue で検討）。上記の dense-only 本文補完は cross-encoder を「動かす」ためのものであって、モデルを多言語対応にするものではない。順位品質は別軸のまま

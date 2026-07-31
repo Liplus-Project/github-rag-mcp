@@ -213,6 +213,11 @@ export async function queryNeighbors(
 /**
  * Fetch search_docs rows by vector ID, keyed by vector_id. Used to enrich graph
  * neighbors that did not appear in the dense/sparse result sets.
+ *
+ * The column list is explicit rather than `SELECT *` to leave out `content_fts`.
+ * That column is a segmented duplicate of `content` (see ./segment.ts) and no caller
+ * reads it, so `*` would roughly double the payload of a query that already runs on
+ * the search hot path with up to RERANK_MAX_CANDIDATES rows of full document text.
  */
 export async function getDocsByVectorIds(
   db: D1Database,
@@ -223,7 +228,13 @@ export async function getDocsByVectorIds(
   if (ids.length === 0) return out;
   const placeholders = ids.map(() => "?").join(", ");
   const res = await db
-    .prepare(`SELECT * FROM search_docs WHERE vector_id IN (${placeholders})`)
+    .prepare(
+      `SELECT vector_id, repo, type, state, labels, milestone, assignees, updated_at,
+              number, tag_name, doc_path, commit_sha, file_path, file_status,
+              commit_date, commit_author, tokenizer_kind, content, indexed_at
+         FROM search_docs
+        WHERE vector_id IN (${placeholders})`,
+    )
     .bind(...ids)
     .all<Record<string, unknown>>();
   for (const r of res.results ?? []) {

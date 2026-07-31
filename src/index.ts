@@ -15,6 +15,7 @@
  *   GET /oauth/callback   -- GitHub OAuth callback
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
  *   POST /admin/diff-watermark?repo=owner/repo&since=ISO8601[&phase=forward|backfill] -- Rewind the commit-diff poller watermark (requires GITHUB_TOKEN header)
+ *   POST /admin/backfill-fts-segments[?repo=owner/repo][&cursor=N][&limit=N] -- Re-segment one batch of natural-language FTS rows (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
@@ -37,6 +38,7 @@ import { handleScheduled } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
 import { RagMcpAgentV2 } from "./mcp.js";
 import { indexWikiEdges } from "./graph.js";
+import { backfillNatSegments } from "./fts.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
@@ -177,6 +179,60 @@ const innerHandler: ExportedHandler<Env> = {
         JSON.stringify({ repo, wikiPagesProcessed: pages, edgesWritten: edges }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
+    }
+
+    // -- Admin: re-segment the natural-language FTS rows (one batch per call) --
+    // POST /admin/backfill-fts-segments[?repo=owner/repo][&cursor=N][&limit=N]
+    // Migration 0006 seeds `content_fts` with a copy of the raw content because the
+    // Intl.Segmenter split only exists in JS. This walks the nat rows in rowid order
+    // and rewrites the ones that are still unsegmented. Call it repeatedly, passing
+    // the returned `nextCursor` back, until `done` is true. Safe to restart from the
+    // beginning: rows already segmented are skipped without a write.
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/backfill-fts-segments") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo") ?? undefined;
+
+      const rawCursor = url.searchParams.get("cursor");
+      const cursor = rawCursor === null ? 0 : Number(rawCursor);
+      if (!Number.isInteger(cursor) || cursor < 0) {
+        return new Response("cursor must be a non-negative integer", { status: 400 });
+      }
+
+      // Capped because each row carries up to MAX_EMBEDDING_INPUT_CHARS of text and
+      // every rewrite fans out to the FTS5 index through the UPDATE trigger.
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? 50 : Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        return new Response("limit must be an integer in 1..200", { status: 400 });
+      }
+
+      try {
+        const result = await backfillNatSegments(env.DB_FTS, { limit, cursor, repo });
+        return new Response(
+          JSON.stringify({
+            repo: repo ?? null,
+            cursor,
+            limit,
+            scanned: result.scanned,
+            updated: result.updated,
+            nextCursor: result.nextCursor,
+            done: result.nextCursor === null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
     }
 
     // -- Admin: move a commit-diff poller watermark (gap recovery / stall release) --

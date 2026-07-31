@@ -920,9 +920,8 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         //   - more than one candidate survived post-filter (single-element
         //     reranking would not change order).
         // Content supply: sparse FtsRow carries content inline. Dense-only
-        // candidates (no sparse hit — the normal case for a Japanese query,
-        // where FTS5 tokenization yields zero BM25 matches) have no FtsRow, so
-        // we backfill their content from D1 `search_docs` in ONE batched
+        // candidates (no sparse hit) have no FtsRow, so we backfill their
+        // content from D1 `search_docs` in ONE batched
         // `vector_id IN (...)` query. Without this backfill every candidate
         // reaches the reranker with an empty string, `rerankCandidates` drops
         // them all, and the cross-encoder never runs (issue #172).
