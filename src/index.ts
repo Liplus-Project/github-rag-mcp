@@ -16,6 +16,7 @@
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
  *   POST /admin/diff-watermark?repo=owner/repo&since=ISO8601[&phase=forward|backfill] -- Rewind the commit-diff poller watermark (requires GITHUB_TOKEN header)
  *   POST /admin/backfill-fts-segments[?repo=owner/repo][&cursor=N][&limit=N] -- Re-segment one batch of natural-language FTS rows (requires GITHUB_TOKEN header)
+ *   POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG] -- Walk one batch of a repo's wiki without waiting for the :45 cron (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
@@ -34,7 +35,7 @@ import {
   readOAuthHelpers,
   writeMcpProps,
 } from "./oauth.js";
-import { handleScheduled } from "./poller.js";
+import { handleScheduled, pollWiki } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
 import { RagMcpAgentV2 } from "./mcp.js";
 import { indexWikiEdges } from "./graph.js";
@@ -223,6 +224,61 @@ const innerHandler: ExportedHandler<Env> = {
             nextCursor: result.nextCursor,
             done: result.nextCursor === null,
           }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
+
+    // -- Admin: walk one batch of a repo's wiki immediately --
+    // POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG]
+    // The `:45` cron reaches every page eventually (the poller resumes from a
+    // stored cursor), but a fresh index or a bulk wiki import would take
+    // ceil(pages / 20) hours to land. This runs the same poll pass on demand
+    // with an explicit fetch budget, sharing the cron's cursor so the two
+    // advance one another. Call it repeatedly until `done` is true; pass
+    // `cursor=` (empty) to restart the walk from the head of the enumeration.
+    // Each call is its own Worker invocation, hence its own subrequest budget.
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/backfill-wiki") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      // Bounded for the same reason the cron cap exists: every fetch spends
+      // one of the invocation's 1000 subrequests, and each changed page fans
+      // out further through embed + Vectorize + D1 + store (issue #130).
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? 20 : Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 40) {
+        return new Response("limit must be an integer in 1..40", { status: 400 });
+      }
+
+      // Absent = continue from the stored cursor. Present (even empty) = start
+      // the walk there, so `cursor=` means "restart from the head".
+      const cursor = url.searchParams.get("cursor") ?? undefined;
+
+      const storeId = env.ISSUE_STORE.idFromName("global");
+      const storeStub = env.ISSUE_STORE.get(storeId);
+      try {
+        const summary = await pollWiki(repo, env, storeStub, {
+          fetchBudget: limit,
+          cursor,
+        });
+        return new Response(
+          JSON.stringify({ ...summary, done: summary.wrapped }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       } catch (err) {

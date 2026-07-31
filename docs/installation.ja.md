@@ -254,6 +254,42 @@ Response:
 - 1 回の呼び出しで発行する D1 操作は最大 2 回なので、中断しても batch が中途半端に書き込まれた状態は残らない
 - 確認は `fusion: "sparse_only"` で日本語の句クエリを投げ、`sparse_candidates` が 0 でないことを見る
 
+## 12. cron を待たずに wiki を索引する
+
+`:45` の wiki cron は 1 run あたりの page 数に上限があり、保存した cursor から再開する。したがって深い wiki が全体をカバーするまで ceil(pages / 20) 時間かかる。それでは遅い場合にこの endpoint を使う — repository を繋いだ直後、wiki を一括投入した直後、poller 修正後のカバレッジ復旧など。
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-wiki?repo=owner/repo
+```
+
+パラメータ:
+
+- `repo` — `owner/repo`。`POLL_REPOS` に載っている必要がある
+- `limit` — 1 回の呼び出しで許す raw content の fetch 試行数、`1..40`（既定 `20`）
+- `cursor` — この slug の次から再開する。省略すると保存済み cursor の続きから。空（`cursor=`）を渡すと列挙の先頭からやり直す
+
+認証:
+
+- `GITHUB_TOKEN` ヘッダに worker secret と同じ値を送る
+
+レスポンス:
+
+```json
+{ "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
+  "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5,
+  "startCursor": "", "nextCursor": "current-architecture-as-concession",
+  "wrapped": false, "enumerated": true, "done": false }
+```
+
+運用上の注意:
+
+- `done` が `true` になるまで繰り返し呼ぶ。cron と cursor を共有するので、互いに前進させ合う（競合しない）
+- `enumerated: false` は `/wiki/_pages` の scrape が失敗したという意味。何も索引せず、意図的に何も削除していない。空の wiki と解釈せず再試行すること
+- `orphansDeferred` は per-run cap を超えて削除待ちの page 数。0 になるまで呼び続ける
+- カバレッジの確認は `search_docs` の `type = 'wiki_doc'` 行と `https://github.com/{repo}/wiki/_pages` の page 一覧を突き合わせる
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

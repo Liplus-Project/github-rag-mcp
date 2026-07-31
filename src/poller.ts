@@ -1001,14 +1001,36 @@ const WIKI_EXTENSIONS = ["md", "markdown"] as const;
  *  repository docs. Remaining changed pages are picked up on the next cron. */
 const MAX_WIKI_EMBEDDINGS_PER_RUN = 30;
 
-/** Maximum wiki pages whose content we *probe* (HTTP fetch) per repo per cron
- *  run. Distinct from MAX_WIKI_EMBEDDINGS_PER_RUN because probing alone
+/** Maximum raw-content *fetch attempts* the wiki poller issues per repo per
+ *  cron run. Distinct from MAX_WIKI_EMBEDDINGS_PER_RUN because probing alone
  *  consumes Worker subrequests even when the page has not changed (we still
  *  fetch the raw content to compare hashes). On bulk import this is the
  *  dominant subrequest cost — cap it so 5+ repos with deep wikis cannot
- *  exhaust the per-invocation 1000-subrequest ceiling (issue #130). Pages
- *  beyond the cap are deferred to the next cron run. */
-const MAX_WIKI_PAGES_PROBED_PER_REPO_PER_RUN = 20;
+ *  exhaust the per-invocation 1000-subrequest ceiling (issue #130).
+ *
+ *  Counted per HTTP attempt, not per page: a page whose extension is not yet
+ *  known, or whose slug does not match its on-disk filename, costs more than
+ *  one attempt and must not be able to exceed this ceiling by fanning out
+ *  (issue #184).
+ *
+ *  Pages beyond the cap are deferred — but the walk **resumes from a stored
+ *  cursor** rather than restarting at the head of the enumeration, so every
+ *  page is reached within ceil(pages / cap) runs. Restarting at the head is
+ *  what made pages past position 20 structurally unreachable (issue #184). */
+const MAX_WIKI_FETCHES_PER_REPO_PER_RUN = 20;
+
+/** Maximum wiki pages reaped (Vectorize + FTS5 + graph edges + store row) per
+ *  repo per cron run. Each reap fans out to ~4 subrequests, so an unbounded
+ *  loop over a mass rename could exhaust the invocation budget on its own and
+ *  starve every repo behind it. Remaining orphans are reaped next run — the
+ *  set only shrinks, so the drain is monotonic (issue #184). */
+const MAX_WIKI_DELETIONS_PER_REPO_PER_RUN = 5;
+
+/** Watermark namespace holding the wiki poller's resume cursor for one repo.
+ *  The cursor is the last page slug probed; the next run resumes at the first
+ *  slug ordering after it, wrapping at the end. Stored in the watermark row's
+ *  `etag` column (an opaque per-key string) so no schema change is needed. */
+const wikiCursorKey = (repo: string): string => `wiki:${repo}`;
 
 /**
  * Probe whether a repo has a wiki at all.
@@ -1038,17 +1060,74 @@ async function wikiExists(repo: string): Promise<boolean> {
 }
 
 /**
- * Enumerate wiki page slugs by scraping the `/{repo}/wiki/_pages` HTML index.
+ * One wiki page as the `_pages` index describes it.
+ *
+ * `slug` is the page's stable identity — it keys the vector ID, the store row,
+ * the FTS `doc_path` column, and the rendered wiki URL. `rawName` is the
+ * best-effort *filename* stem used to build the raw.githubusercontent URL; it
+ * differs from the slug whenever the page title contains a character GitHub
+ * collapses into `-` when routing (issue #184, `E. Li+language`).
+ */
+export interface WikiPageRef {
+  slug: string;
+  rawName: string;
+}
+
+/** Result of a `_pages` enumeration; `ok` distinguishes "wiki has no pages"
+ *  from "we could not read the index". The caller must never reap orphans on
+ *  a failed enumeration — an empty slug set would otherwise read as "every
+ *  page was deleted" and wipe the repo's whole wiki index. */
+export interface WikiPageIndex {
+  pages: WikiPageRef[];
+  ok: boolean;
+}
+
+/** Decode the handful of HTML entities GitHub emits inside link text. */
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#(?:39|x27);/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * Total order over page slugs, used both to sort the enumeration and to place
+ * the resume cursor. Case-insensitive first (matching how GitHub renders the
+ * index) with a case-sensitive tie-break so the order is total and stable.
+ */
+function compareSlugs(a: string, b: string): number {
+  const la = a.toLowerCase();
+  const lb = b.toLowerCase();
+  if (la < lb) return -1;
+  if (la > lb) return 1;
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
+ * Enumerate wiki pages by scraping the `/{repo}/wiki/_pages` HTML index.
  *
  * GitHub renders this page as a flat list of every wiki page, with each link
- * shaped `<a ... href="/{repo}/wiki/{page-slug}">`. We extract the slugs with
- * a tolerant regex and reject the special pseudo-pages (`_pages`, `_history`,
- * `_new`, `_access`, etc.) that share the underscore prefix convention.
+ * shaped `<a ... href="/{repo}/wiki/{page-slug}">{page title}</a>`. Slugs are
+ * extracted with a tolerant href-only regex; underscore-prefixed pseudo-pages
+ * (`_pages`, `_history`, `_new`, `_access`, …) are rejected so GitHub's own UI
+ * links never consume a fetch from the per-run budget.
  *
- * If the index is empty or the request fails, we return [] so the caller can
- * fall through to the no-op path.
+ * A second pass pairs each slug with its link *text*. GitHub routes a page
+ * title through a lossy slug (spaces and `+` both become `-`) while the wiki
+ * git repo stores the file under the title with spaces replaced by `-`. For
+ * `E. Li+language` the slug is `E.-Li-language` but the file is
+ * `E.-Li+language.md`, and building the raw URL from the slug 404s forever.
+ * Recovering the filename from the link text is the only signal the index
+ * carries about the pre-slug title (issue #184).
+ *
+ * `Home` is unioned in unconditionally: GitHub omits it from `_pages` even
+ * though `Home.md` serves, so an enumeration-only poller can never reach it.
  */
-async function listWikiPages(repo: string): Promise<string[]> {
+async function listWikiPages(repo: string): Promise<WikiPageIndex> {
   const url = `https://github.com/${repo}/wiki/_pages`;
   try {
     const resp = await fetch(url, {
@@ -1058,7 +1137,7 @@ async function listWikiPages(repo: string): Promise<string[]> {
       },
     });
     if (!resp.ok) {
-      return [];
+      return { pages: [], ok: false };
     }
     const html = await resp.text();
     // Match `href="/{repo}/wiki/PageName"` — capture the page slug. Both the
@@ -1066,26 +1145,143 @@ async function listWikiPages(repo: string): Promise<string[]> {
     // unwrap with decodeURIComponent below. The character class excludes URL
     // delimiters that would terminate the slug naturally.
     const escapedRepo = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`href="/${escapedRepo}/wiki/([^"#?]+)"`, "g");
-    const pages = new Set<string>();
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) {
-      let slug: string;
+    const hrefRe = new RegExp(`href="/${escapedRepo}/wiki/([^"#?]+)"`, "g");
+
+    const decodeSlug = (encoded: string): string => {
       try {
-        slug = decodeURIComponent(m[1]);
+        return decodeURIComponent(encoded);
       } catch {
-        slug = m[1];
+        return encoded;
       }
+    };
+
+    const slugs = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = hrefRe.exec(html)) !== null) {
+      const slug = decodeSlug(m[1]);
       if (!slug || slug.startsWith("_")) continue;
-      pages.add(slug);
+      slugs.add(slug);
     }
-    return Array.from(pages);
+
+    // Second pass: slug -> link text. Kept separate from the slug pass on
+    // purpose — an anchor whose markup this regex cannot match must still
+    // yield its page, just without the filename hint.
+    const titleRe = new RegExp(
+      `href="/${escapedRepo}/wiki/([^"#?]+)"[^>]*>([^<]*)<`,
+      "g",
+    );
+    const titles = new Map<string, string>();
+    while ((m = titleRe.exec(html)) !== null) {
+      const slug = decodeSlug(m[1]);
+      const title = decodeHtmlEntities(m[2]).trim();
+      if (slug && title && !titles.has(slug)) titles.set(slug, title);
+    }
+
+    slugs.add("Home");
+
+    const pages = Array.from(slugs)
+      .sort(compareSlugs)
+      .map((slug) => {
+        const title = titles.get(slug);
+        // GitHub stores the page file under its title with spaces replaced by
+        // dashes. When that differs from the slug the slug is the lossy form,
+        // so the title-derived name is the better raw-URL candidate.
+        const rawName = title ? title.replace(/ /g, "-") : slug;
+        return { slug, rawName };
+      });
+
+    return { pages, ok: true };
   } catch (err) {
     console.error(
       `listWikiPages failed for ${repo}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return [];
+    return { pages: [], ok: false };
+  }
+}
+
+/**
+ * Page names currently present in the D1 FTS index for a repo's wiki.
+ *
+ * The reap set must be computed against what is actually *indexed*, not only
+ * against the structured store: a store row that goes missing (or was never
+ * written because the upsert's final store call failed after Vectorize and D1
+ * had already been written) makes the page invisible to a store-only diff, and
+ * its search_docs / Vectorize / doc_edges rows then survive every later run.
+ * That is what left 8 renamed-away pages resolvable in search for months
+ * (issue #184, cause E — verified against production D1: the surviving rows'
+ * `vector_id` values match `wikiDocVectorId` exactly, so the reap key was
+ * never the problem; the reap simply never fired).
+ */
+async function listIndexedWikiPages(
+  env: Env,
+  repo: string,
+): Promise<{ pages: string[]; ok: boolean }> {
+  try {
+    const rows = await env.DB_FTS.prepare(
+      `SELECT doc_path FROM search_docs WHERE type = 'wiki_doc' AND repo = ?`,
+    )
+      .bind(repo)
+      .all<{ doc_path: string }>();
+    const pages = (rows.results ?? [])
+      .map((r) => String(r.doc_path ?? ""))
+      .filter((p) => p.length > 0);
+    return { pages, ok: true };
+  } catch (err) {
+    console.error(
+      `listIndexedWikiPages failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return { pages: [], ok: false };
+  }
+}
+
+/** Read the wiki resume cursor for a repo; "" when none is stored yet. */
+async function readWikiCursor(
+  storeStub: DurableObjectStub,
+  repo: string,
+): Promise<string> {
+  try {
+    const resp = await storeStub.fetch(
+      new Request(
+        `http://store/watermark?repo=${encodeURIComponent(wikiCursorKey(repo))}`,
+      ),
+    );
+    if (!resp.ok) return "";
+    const wm = (await resp.json()) as { etag?: string };
+    return wm.etag ?? "";
+  } catch (err) {
+    console.error(
+      `readWikiCursor failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return "";
+  }
+}
+
+/** Persist the wiki resume cursor for a repo. */
+async function writeWikiCursor(
+  storeStub: DurableObjectStub,
+  repo: string,
+  cursor: string,
+): Promise<void> {
+  try {
+    await storeStub.fetch(
+      new Request("http://store/watermark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo: wikiCursorKey(repo),
+          lastPolledAt: new Date().toISOString(),
+          etag: cursor,
+        }),
+      }),
+    );
+  } catch (err) {
+    console.error(
+      `writeWikiCursor failed for ${repo}:`,
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
 
@@ -1103,58 +1299,158 @@ async function listWikiPages(repo: string): Promise<string[]> {
  */
 async function fetchWikiContent(
   repo: string,
-  pageName: string,
+  page: WikiPageRef,
   preferredExtension?: string,
-): Promise<{ content: string; extension: string } | null> {
-  const probes = preferredExtension
+  maxAttempts = Number.POSITIVE_INFINITY,
+): Promise<{
+  result: { content: string; extension: string } | null;
+  attempts: number;
+}> {
+  const exts = preferredExtension
     ? [preferredExtension, ...WIKI_EXTENSIONS.filter((e) => e !== preferredExtension)]
     : Array.from(WIKI_EXTENSIONS);
 
-  for (const ext of probes) {
-    const url = `https://raw.githubusercontent.com/wiki/${repo}/${encodeURIComponent(pageName)}.${ext}`;
-    try {
-      const resp = await fetch(url, {
-        headers: { "User-Agent": "github-rag-mcp/0.1.0" },
-      });
-      if (resp.ok) {
-        return { content: await resp.text(), extension: ext };
+  // Filename candidates, most likely first. For the overwhelming majority of
+  // pages these collapse to a single entry, so the common path costs exactly
+  // what it did before.
+  const names = page.rawName && page.rawName !== page.slug
+    ? [page.rawName, page.slug]
+    : [page.slug];
+
+  // Extension outer, filename inner: markdown dominates in practice, so a page
+  // whose title-derived name misses is resolved by the slug on the *second*
+  // attempt rather than after the whole extension set has been walked.
+  let attempts = 0;
+  for (const ext of exts) {
+    for (const name of names) {
+      if (attempts >= maxAttempts) return { result: null, attempts };
+      const url = `https://raw.githubusercontent.com/wiki/${repo}/${encodeURIComponent(name)}.${ext}`;
+      attempts++;
+      try {
+        const resp = await fetch(url, {
+          headers: { "User-Agent": "github-rag-mcp/0.1.0" },
+        });
+        if (resp.ok) {
+          return {
+            result: { content: await resp.text(), extension: ext },
+            attempts,
+          };
+        }
+      } catch (err) {
+        console.error(
+          `fetchWikiContent probe ${ext} failed for ${repo}/${name}:`,
+          err instanceof Error ? err.message : String(err),
+        );
       }
-    } catch (err) {
-      console.error(
-        `fetchWikiContent probe ${ext} failed for ${repo}/${pageName}:`,
-        err instanceof Error ? err.message : String(err),
-      );
     }
   }
-  return null;
+  return { result: null, attempts };
+}
+
+/** Budget / cursor overrides for one wiki poll pass. Defaults are the cron
+ *  values; the admin backfill endpoint supplies its own so an operator can
+ *  drain a wiki without waiting out the hourly cadence. */
+export interface WikiPollOptions {
+  /** Max raw-content fetch attempts this pass may issue. */
+  fetchBudget?: number;
+  /** Max pages this pass may embed. */
+  embedBudget?: number;
+  /** Max orphan pages this pass may reap. */
+  deleteBudget?: number;
+  /** Start the walk after this slug instead of the stored cursor. */
+  cursor?: string;
+  /** Persist the resulting cursor (default true). */
+  persistCursor?: boolean;
+}
+
+/** Outcome of one wiki poll pass, returned so the admin endpoint can drive a
+ *  drain loop and tests can assert the fetch budget was respected. */
+export interface WikiPollSummary {
+  repo: string;
+  /** Pages in the current enumeration (0 when the index could not be read). */
+  pages: number;
+  /** Raw-content fetch attempts issued. Never exceeds the fetch budget. */
+  fetches: number;
+  /** Pages whose content was examined this pass. */
+  visited: number;
+  embedded: number;
+  skipped: number;
+  failed: number;
+  removed: number;
+  /** Orphans detected but deferred past the delete budget. */
+  orphansDeferred: number;
+  startCursor: string;
+  nextCursor: string;
+  /** True when the walk covered every enumerated page in this single pass. */
+  wrapped: boolean;
+  /** False when the `_pages` index could not be read; no reaping happened. */
+  enumerated: boolean;
 }
 
 /**
  * Poll a single repository's wiki for content updates.
  *
- * Strategy: enumerate page slugs, fetch each page's raw content, hash the
- * body, and only embed pages whose hash differs from the stored value
- * (or new pages). Deleted pages — present in the store but absent from the
- * current `_pages` index — are removed from Vectorize, D1 FTS5, and the
- * structured store, mirroring the doc poller's deletion path.
+ * Strategy: enumerate pages, walk them **circularly from a stored cursor**,
+ * fetch each page's raw content, hash the body, and only embed pages whose
+ * hash differs from the stored value (or new pages). The walk stops on the
+ * per-run fetch budget and persists the cursor, so the next run continues
+ * where this one stopped and every page is reached within
+ * ceil(pages / budget) runs. Restarting at the head each run is what pinned
+ * coverage to the first ~20 pages forever (issue #184, cause A).
+ *
+ * Pages absent from the current `_pages` index but still present in the store
+ * *or in the D1 FTS index* are reaped from Vectorize, D1 FTS5, the graph edge
+ * table, and the structured store. Reaping is skipped entirely when the
+ * enumeration failed, and capped per run.
  */
-async function pollWiki(
+export async function pollWiki(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
-): Promise<void> {
+  opts: WikiPollOptions = {},
+): Promise<WikiPollSummary> {
+  const fetchBudget = opts.fetchBudget ?? MAX_WIKI_FETCHES_PER_REPO_PER_RUN;
+  const embedBudget = opts.embedBudget ?? MAX_WIKI_EMBEDDINGS_PER_RUN;
+  const deleteBudget = opts.deleteBudget ?? MAX_WIKI_DELETIONS_PER_REPO_PER_RUN;
+  const persistCursor = opts.persistCursor ?? true;
+
+  const empty = (startCursor: string): WikiPollSummary => ({
+    repo,
+    pages: 0,
+    fetches: 0,
+    visited: 0,
+    embedded: 0,
+    skipped: 0,
+    failed: 0,
+    removed: 0,
+    orphansDeferred: 0,
+    startCursor,
+    nextCursor: startCursor,
+    wrapped: false,
+    enumerated: false,
+  });
+
   // Cheap existence probe so repos without wiki incur a single HEAD-equivalent
   // round-trip per cron run instead of three (probe + index + content).
   const hasWiki = await wikiExists(repo);
   if (!hasWiki) {
     console.log(`${repo} wiki: not enabled or not accessible — skip`);
-    return;
+    return empty("");
   }
 
-  const pageSlugs = await listWikiPages(repo);
-  if (pageSlugs.length === 0) {
+  const index = await listWikiPages(repo);
+  const pages = index.pages;
+  if (!index.ok) {
+    // Could not read `_pages`. Bail before the reap: an empty slug set here
+    // means "we are blind", not "every page was deleted".
+    console.warn(`${repo} wiki: page index unavailable — skip this run`);
+    return empty(opts.cursor ?? (await readWikiCursor(storeStub, repo)));
+  }
+  if (pages.length === 0) {
     console.log(`${repo} wiki: 0 pages discovered`);
   }
+
+  const startCursor = opts.cursor ?? (await readWikiCursor(storeStub, repo));
 
   // Snapshot the existing wiki doc records so we can detect deletes and pick
   // a per-page preferred extension on subsequent polls.
@@ -1165,40 +1461,71 @@ async function pollWiki(
     ? ((await existingResp.json()) as WikiDocRecord[])
     : [];
   const existingMap = new Map(existing.map((w) => [w.pageName, w]));
-  const currentSlugs = new Set(pageSlugs);
-  const deleted = existing.filter((w) => !currentSlugs.has(w.pageName));
+  const currentSlugs = new Set(pages.map((p) => p.slug));
 
   let embedded = 0;
   let skipped = 0;
   let failed = 0;
   let removed = 0;
-  let probed = 0;
+  let fetches = 0;
+  let visited = 0;
+  let nextCursor = startCursor;
+  let wrapped = false;
 
-  for (const pageName of pageSlugs) {
-    if (embedded >= MAX_WIKI_EMBEDDINGS_PER_RUN) {
+  // Resume at the first page ordering strictly after the cursor; wrap to the
+  // head when the cursor sits at (or past) the end, or when it names a page
+  // that no longer exists.
+  let start = pages.findIndex((p) => compareSlugs(p.slug, startCursor) > 0);
+  if (start < 0) start = 0;
+
+  for (let step = 0; step < pages.length; step++) {
+    const page = pages[(start + step) % pages.length];
+
+    if (embedded >= embedBudget) {
       console.warn(
-        `Wiki embedding batch limit reached for ${repo} (${MAX_WIKI_EMBEDDINGS_PER_RUN}). ` +
+        `Wiki embedding batch limit reached for ${repo} (${embedBudget}). ` +
           `Remaining wiki pages will be retried next cron run.`,
       );
       break;
     }
 
-    if (probed >= MAX_WIKI_PAGES_PROBED_PER_REPO_PER_RUN) {
+    if (fetches >= fetchBudget) {
       console.warn(
-        `Wiki probe batch limit reached for ${repo} (${MAX_WIKI_PAGES_PROBED_PER_REPO_PER_RUN}). ` +
-          `Each probe consumes a Worker subrequest; bulk imports spread across multiple cron runs.`,
+        `Wiki fetch batch limit reached for ${repo} (${fetchBudget}). ` +
+          `Each fetch consumes a Worker subrequest; the cursor resumes here next run.`,
       );
       break;
     }
 
-    const prior = existingMap.get(pageName);
-    probed++;
-    const fetched = await fetchWikiContent(repo, pageName, prior?.extension);
+    const prior = existingMap.get(page.slug);
+    const { result: fetched, attempts } = await fetchWikiContent(
+      repo,
+      page,
+      prior?.extension,
+      fetchBudget - fetches,
+    );
+    fetches += attempts;
+
+    if (!fetched && fetches >= fetchBudget) {
+      // The budget ran out inside this page's candidate list, so "no content"
+      // is inconclusive. Leave the cursor before the page and retry next run
+      // rather than recording a failure we did not actually observe.
+      console.warn(
+        `Wiki fetch batch limit reached for ${repo} (${fetchBudget}) while probing ` +
+          `${page.slug}; the cursor resumes at this page next run.`,
+      );
+      break;
+    }
+
+    visited++;
+    nextCursor = page.slug;
+    if (step === pages.length - 1) wrapped = true;
+
     if (!fetched) {
       // The slug was discovered in `_pages` but no extension served. Treat as
       // a transient miss and skip — the next poll will retry without spending
       // an embedding budget here.
-      console.warn(`No content fetched for ${repo}/wiki/${pageName} (all extensions 404)`);
+      console.warn(`No content fetched for ${repo}/wiki/${page.slug} (all candidates 404)`);
       failed++;
       continue;
     }
@@ -1213,7 +1540,7 @@ async function pollWiki(
       env,
       storeStub,
       repo,
-      pageName,
+      page.slug,
       fetched.extension,
       fetched.content,
     );
@@ -1225,46 +1552,83 @@ async function pollWiki(
     }
   }
 
-  // Handle deleted pages: remove from Vectorize, FTS5, and the store.
-  for (const wikiDoc of deleted) {
-    try {
-      const wvid = await wikiDocVectorId(repo, wikiDoc.pageName);
-      await env.VECTORIZE.deleteByIds([wvid]);
+  // Orphan reap. The candidate set is the union of the structured store and
+  // the live FTS index: a page missing from the store but still in search_docs
+  // is exactly the case a store-only diff cannot see, and it is the one that
+  // actually happened in production (issue #184, cause E).
+  const indexed = await listIndexedWikiPages(env, repo);
+  const orphanSet = new Set<string>();
+  for (const w of existing) {
+    if (!currentSlugs.has(w.pageName)) orphanSet.add(w.pageName);
+  }
+  for (const pageName of indexed.pages) {
+    if (!currentSlugs.has(pageName)) orphanSet.add(pageName);
+  }
+  const orphans = Array.from(orphanSet).sort(compareSlugs);
+  const orphansDeferred = Math.max(0, orphans.length - deleteBudget);
+  if (orphansDeferred > 0) {
+    console.warn(
+      `${repo} wiki: ${orphans.length} orphans found, reaping ${deleteBudget} this run ` +
+        `(${orphansDeferred} deferred to the next run).`,
+    );
+  }
+
+  for (const pageName of orphans.slice(0, deleteBudget)) {
+    const wvid = await wikiDocVectorId(repo, pageName);
+    // Each surface is torn down independently: a Vectorize failure must not
+    // strand the D1 rows, which are the ones users actually retrieve.
+    for (const [surface, run] of [
+      ["vector", () => env.VECTORIZE.deleteByIds([wvid])],
+      ["FTS5 row", () => deleteFtsRow(env.DB_FTS, wvid)],
+      ["graph edges", () => deleteEdgesForVector(env.DB_FTS, wvid)],
+      [
+        "store record",
+        () =>
+          storeStub.fetch(
+            new Request(
+              `http://store/wiki-doc?repo=${encodeURIComponent(repo)}&page=${encodeURIComponent(pageName)}`,
+              { method: "DELETE" },
+            ),
+          ),
+      ],
+    ] as Array<[string, () => Promise<unknown>]>) {
       try {
-        await deleteFtsRow(env.DB_FTS, wvid);
-      } catch (ftsErr) {
+        await run();
+      } catch (err) {
         console.error(
-          `Failed to delete FTS5 row for wiki ${repo}/${wikiDoc.pageName}:`,
-          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+          `Failed to delete ${surface} for wiki ${repo}/${pageName}:`,
+          err instanceof Error ? err.message : String(err),
         );
       }
-      // Remove graph edges touching this page (its out-edges and any in-edges).
-      try {
-        await deleteEdgesForVector(env.DB_FTS, wvid);
-      } catch (edgeErr) {
-        console.error(
-          `Failed to delete graph edges for wiki ${repo}/${wikiDoc.pageName}:`,
-          edgeErr instanceof Error ? edgeErr.message : String(edgeErr),
-        );
-      }
-      await storeStub.fetch(
-        new Request(
-          `http://store/wiki-doc?repo=${encodeURIComponent(repo)}&page=${encodeURIComponent(wikiDoc.pageName)}`,
-          { method: "DELETE" },
-        ),
-      );
-      removed++;
-    } catch (err) {
-      console.error(
-        `Failed to delete wiki vector ${repo}/${wikiDoc.pageName}:`,
-        err instanceof Error ? err.message : String(err),
-      );
     }
+    removed++;
+  }
+
+  if (persistCursor && nextCursor !== startCursor) {
+    await writeWikiCursor(storeStub, repo, nextCursor);
   }
 
   console.log(
-    `${repo} wiki: ${pageSlugs.length} pages, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${removed} deleted`,
+    `${repo} wiki: ${pages.length} pages, ${visited} visited, ${fetches}/${fetchBudget} fetches, ` +
+      `${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${removed} deleted, ` +
+      `cursor ${startCursor || "<head>"} -> ${nextCursor || "<head>"}`,
   );
+
+  return {
+    repo,
+    pages: pages.length,
+    fetches,
+    visited,
+    embedded,
+    skipped,
+    failed,
+    removed,
+    orphansDeferred,
+    startCursor,
+    nextCursor,
+    wrapped,
+    enumerated: true,
+  };
 }
 
 // ── Comment / review backfill ────────────────────────────────

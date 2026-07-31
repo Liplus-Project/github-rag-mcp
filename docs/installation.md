@@ -254,6 +254,42 @@ Operational notes:
 - each call issues at most two D1 operations, so an interrupted run never leaves a half-written batch
 - verify with a Japanese phrase query in `fusion: "sparse_only"` mode — `sparse_candidates` should be non-zero
 
+## 12. Index a wiki without waiting for the cron
+
+The `:45` wiki cron walks a bounded number of pages per run and resumes from a stored cursor, so a deep wiki reaches full coverage in ceil(pages / 20) hours. Use this endpoint when that is too slow — a freshly connected repository, a bulk wiki import, or a coverage repair after a poller fix.
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-wiki?repo=owner/repo
+```
+
+Parameters:
+
+- `repo` — `owner/repo`, must be listed in `POLL_REPOS`
+- `limit` — raw-content fetch attempts per call, `1..40` (default `20`)
+- `cursor` — page slug to resume after; omit to continue from the stored cursor, or pass empty (`cursor=`) to restart from the head of the enumeration
+
+Authentication:
+
+- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+
+Response:
+
+```json
+{ "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
+  "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5,
+  "startCursor": "", "nextCursor": "current-architecture-as-concession",
+  "wrapped": false, "enumerated": true, "done": false }
+```
+
+Operational notes:
+
+- call it repeatedly until `done` is `true`; it shares the cron's cursor, so the two advance one another rather than fighting
+- `enumerated: false` means the `/wiki/_pages` scrape failed — nothing was indexed and, deliberately, nothing was reaped; retry rather than treating it as an empty wiki
+- `orphansDeferred` counts pages still to be reaped past the per-run cap; keep calling until it reaches 0
+- verify coverage by comparing `search_docs` rows (`type = 'wiki_doc'`) against the page list at `https://github.com/{repo}/wiki/_pages`
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`
