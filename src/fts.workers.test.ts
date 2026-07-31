@@ -292,13 +292,34 @@ describe("fts D1: Japanese natural-language queries (#180 fact 1)", () => {
       .toContain("d:ja-word");
   });
 
-  it("does not match an unrelated Japanese phrase", async () => {
+  it("does not match a Japanese phrase that shares no token", async () => {
     const repo = "t/ja-nomatch";
     await upsertFtsRow(
       env.DB_FTS,
       mkRow({ vectorId: "d:ja-nomatch", type: "wiki_doc", repo, content: JA_DOC }),
     );
-    expect(await queryFts(env.DB_FTS, "気象衛星の打ち上げ", 10, { repo })).toEqual([]);
+    expect(await queryFts(env.DB_FTS, "気象衛星", 10, { repo })).toEqual([]);
+  });
+
+  it("ranks a real match above a document sharing only a particle (#186 relaxed tier)", async () => {
+    // Before #186 an unrelated phrase returned nothing at all, because every token had
+    // to match. The relaxed tier trades that for recall: `気象衛星の打ち上げ` now also
+    // weak-matches JA_DOC through the shared `の`. The guard is therefore rank, not set
+    // membership — BM25's IDF keeps the function-word-only hit underneath a real one.
+    const repo = "t/ja-weak-match";
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: "d:ja-weak-other", type: "wiki_doc", repo, content: JA_DOC }),
+    );
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: "d:ja-weak-real", type: "wiki_doc", repo, content: "気象衛星の打ち上げ計画を記録する" }),
+    );
+    const ids = (await queryFts(env.DB_FTS, "気象衛星の打ち上げ", 10, { repo })).map((h) => h.vectorId);
+    expect(ids[0]).toBe("d:ja-weak-real");
+    if (ids.includes("d:ja-weak-other")) {
+      expect(ids.indexOf("d:ja-weak-real")).toBeLessThan(ids.indexOf("d:ja-weak-other"));
+    }
   });
 
   it("returns the RAW content, not the segmented form (reranker input)", async () => {
@@ -378,6 +399,93 @@ describe("fts D1: Japanese natural-language queries (#180 fact 1)", () => {
         "INSERT INTO search_docs_nat_fts_v3(search_docs_nat_fts_v3, rank) VALUES('integrity-check', 1)",
       )
       .run();
+  });
+});
+
+describe("fts D1: query length sweep (#186)", () => {
+  // The production measurement behind #186: with an AND-joined MATCH the hit count
+  // decayed with query length until it hit zero (3 tokens -> 3, ~12 -> 2, ~17 -> 0).
+  // These tests pin the whole band, in both languages, against the same document.
+
+  const JA_TARGET =
+    "brake 2 は L1 Model Layer の root criteria evaluator を必須にする。evaluator の verdict PASS は human approval を代替し、DEVIATION は merge を止める。";
+  const EN_TARGET =
+    "the root criteria evaluator returns PASS when the change stays inside the model layer, and DEVIATION blocks the merge";
+  // Shares no token with either target — the guard that a relaxed OR never degenerates
+  // into "match everything" (a phrase that tokenizes to nothing must contribute nothing).
+  const DISJOINT = "kubernetes ingress controller の再起動手順";
+
+  it("keeps sparse hits at short / medium / long Japanese query lengths", async () => {
+    const repo = "t/qlen-ja";
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:qlen-ja", type: "wiki_doc", repo, content: JA_TARGET }));
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:qlen-ja-off", type: "wiki_doc", repo, content: DISJOINT }));
+
+    // The three queries measured on production, verbatim.
+    const short = "root criteria evaluator";                                                   // 3 tokens
+    const medium = "brake 2 L1 root criteria evaluator PASS が human approval を代替する";      // ~12 tokens
+    const long = "brake 2 は L1 root criteria evaluator の PASS を human approval の代替とする判断"; // ~17 tokens
+
+    for (const q of [short, medium, long]) {
+      const ids = (await queryFts(env.DB_FTS, q, 10, { repo })).map((h) => h.vectorId);
+      expect(ids, `query: ${q}`).toContain("d:qlen-ja");
+      expect(ids[0], `query: ${q}`).toBe("d:qlen-ja");
+    }
+  });
+
+  it("keeps sparse hits at short / medium / long English query lengths", async () => {
+    // Same cliff without any Japanese involved: the cause is the AND join, not the
+    // segmenter. Japanese only reaches the cliff sooner (particles become tokens).
+    const repo = "t/qlen-en";
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:qlen-en", type: "wiki_doc", repo, content: EN_TARGET }));
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:qlen-en-off", type: "wiki_doc", repo, content: DISJOINT }));
+
+    const short = "root criteria evaluator";                                                          // 3 tokens
+    const medium = "root criteria evaluator returns PASS when the change stays inside";               // 10 tokens
+    const long =
+      "why does the root criteria evaluator return PASS instead of asking a human reviewer for approval"; // 17 tokens
+
+    for (const q of [short, medium, long]) {
+      const ids = (await queryFts(env.DB_FTS, q, 10, { repo })).map((h) => h.vectorId);
+      expect(ids, `query: ${q}`).toContain("d:qlen-en");
+      expect(ids[0], `query: ${q}`).toBe("d:qlen-en");
+    }
+  });
+
+  it("still returns nothing when the query shares no token at any length", async () => {
+    // Guards the relaxed arm against becoming a match-all, including the punctuation
+    // case where a segment tokenizes to nothing under unicode61.
+    const repo = "t/qlen-disjoint";
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:qlen-disjoint", type: "wiki_doc", repo, content: EN_TARGET }));
+    expect(await queryFts(env.DB_FTS, "kubernetes ingress controller", 10, { repo })).toEqual([]);
+    expect(await queryFts(env.DB_FTS, "kubernetes ingress controller の再起動手順を記録する。", 10, { repo })).toEqual([]);
+  });
+
+  it("keeps the strict (all-token) hit ahead of partial matches on a short query", async () => {
+    // Acceptance condition of #186: adding the relaxed tier must not cost short-query
+    // precision. The strict tier keeps its ranks; relaxed hits can only append below.
+    const repo = "t/qlen-precision";
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:prec-all", type: "wiki_doc", repo, content: "alpha bravo charlie delta" }));
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:prec-one", type: "wiki_doc", repo, content: "alpha epsilon foxtrot" }));
+
+    const ids = (await queryFts(env.DB_FTS, "alpha bravo charlie", 10, { repo })).map((h) => h.vectorId);
+    expect(ids[0]).toBe("d:prec-all");
+    if (ids.includes("d:prec-one")) {
+      expect(ids.indexOf("d:prec-all")).toBeLessThan(ids.indexOf("d:prec-one"));
+    }
+  });
+
+  it("deduplicates across tiers and still respects topK", async () => {
+    // A document matched by both nat tiers must occupy one slot, not two.
+    const repo = "t/qlen-dedup";
+    for (let i = 0; i < 4; i++) {
+      await upsertFtsRow(
+        env.DB_FTS,
+        mkRow({ vectorId: `d:qlen-dedup-${i}`, type: "wiki_doc", repo, content: `shared marker token variant ${i}` }),
+      );
+    }
+    const hits = await queryFts(env.DB_FTS, "shared marker token", 2, { repo });
+    expect(hits.length).toBe(2);
+    expect(new Set(hits.map((h) => h.vectorId)).size).toBe(2);
   });
 });
 

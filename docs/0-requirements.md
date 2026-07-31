@@ -245,6 +245,16 @@ Word segmentation (natural-language side):
 - `content` stays raw because the reranker consumes it and the trigram index indexes it.
 - Migration 0006 can only seed `content_fts` with a copy of `content` (the segmentation exists only in JS). `POST /admin/backfill-fts-segments` re-segments the existing rows in batches, driven by a `rowid` cursor; it is idempotent (a row already segmented is skipped without a write), so an interrupted run can simply be restarted.
 
+Query length tiering (nat side):
+
+- A conjunctive `MATCH` (every token required) gets monotonically harder to satisfy as the query grows. Measured on production against one indexed document: 3 tokens returned 3 candidates, ~12 returned 2, ~17 returned 0. Natural-language questions live in exactly that band, so the sparse half of hybrid retrieval was effective for short keyword strings only.
+- The cliff is language-independent. Japanese reaches it sooner because segmentation turns particles into standalone tokens, but a long English question falls off it too — so the fix is language-independent as well: no stopword or particle list is maintained.
+- The nat side therefore issues **two** `MATCH` strings, strict (all tokens) and relaxed (any token), as separate arms of the same UNION with a `tier` column, ordered by tier before BM25 score. Strict hits keep exactly the ranks they had; the relaxed arm can only append below them, so short-query precision does not regress, and it becomes visible only insofar as the strict arm under-fills `topK` — which is the failure mode itself. No query-length threshold is needed.
+- Relaxed-tier precision is carried by BM25: IDF weighting ranks documents covering more (and rarer) query terms above the rest and drives high-frequency function words (`の` / `は` / `the` / `of`) toward zero contribution. That is the ranker doing what a stopword list would have done, without one.
+- Both tiers ship in a single statement rather than "retry with OR when AND returns nothing": the retry shape costs a second D1 round-trip per query and would leave the measured mid-band (~12 tokens, 2 weak hits) unimproved. Cost accepted: the relaxed arm walks the posting lists of every query token, so a long query reads more rows than before. The next lever, if that ever bites, is IDF-aware term pruning via an `fts5vocab` table.
+- Because a document can be returned by both tiers, results are deduplicated by `vector_id` (best tier, then best score wins) before the `topK` cap.
+- The code (trigram) arm stays strict. Substring matching over identifiers does not have the same cliff.
+
 The `vector_id` mirrors the Vectorize vector ID (deterministic SHA-256 based) so RRF fusion can join dense and sparse hits without an extra round-trip.
 
 Metadata filters (`repo`, `type`, `state`, `milestone`) are applied as SQL WHERE predicates, matching the pre-filter capability of the Vectorize side.
