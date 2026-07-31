@@ -1446,9 +1446,9 @@ export async function pollWiki(
     console.warn(`${repo} wiki: page index unavailable — skip this run`);
     return empty(opts.cursor ?? (await readWikiCursor(storeStub, repo)));
   }
-  if (pages.length === 0) {
-    console.log(`${repo} wiki: 0 pages discovered`);
-  }
+  // No "0 pages discovered" branch: `Home` is unioned into every successful
+  // enumeration, so a readable index always yields at least one page. An empty
+  // set only means the scrape failed, which the guard above already returned on.
 
   const startCursor = opts.cursor ?? (await readWikiCursor(storeStub, repo));
 
