@@ -243,6 +243,16 @@ tokenizer 選択:
 - `content` を生のまま保持するのは、reranker の入力であり、かつ trigram index の索引対象であるため
 - migration 0006 は `content_fts` を `content` のコピーで初期化することしかできない（分かち書きは JS にしか存在しない）。既存 row の再分割は `POST /admin/backfill-fts-segments` が `rowid` cursor でバッチ実行する。分かち書き済みの row は書き込まずに skip するため idempotent で、中断しても先頭から再実行できる
 
+クエリ長の階層化（nat 側）:
+
+- 全トークンを要求する連言 `MATCH` は、クエリが長くなるほど満たすのが単調に難しくなる。本番で同一の索引済み文書に対し実測すると、3 トークンで候補 3 件、約 12 トークンで 2 件、約 17 トークンで 0 件だった。自然文の問いはまさにこの帯域に入るため、hybrid の sparse 側が実効していたのは短い単語列に対してだけだった
+- この崖は言語非依存である。日本語は分かち書きで助詞が独立トークンになるぶん早く到達するが、英語の長文クエリでも落ちる。したがって対処も言語非依存にする（stopword / 助詞のリストは持たない）
+- nat 側は strict（全トークン）と relaxed（いずれかのトークン）の **2 本**の `MATCH` 文字列を、同一 UNION の別 arm として `tier` 列付きで発行し、BM25 score より先に tier で並べる。strict の hit は従来と同じ順位を保ち、relaxed はその下に追加されるだけなので、短いクエリの precision は退行しない。relaxed が見えるのは strict が `topK` を埋めきれなかった分だけ——それが崖そのものである。クエリ長の閾値は不要
+- relaxed 側の precision は BM25 が担う。IDF 重みが「より多くの・よりレアな語を含む文書」を上位に置き、高頻度の機能語（`の` / `は` / `the` / `of`）の寄与をほぼ 0 にする。stopword リストがやるはずの仕事を、リストを持たずに ranker がやる
+- 2 tier を「AND が 0 件なら OR で再試行」ではなく単一 statement に載せるのは、再試行形式が D1 への往復を 1 回増やすうえ、実測の中間帯（約 12 トークンで弱い 2 件）を改善しないため。受容したコスト: relaxed arm は全クエリトークンの posting list を辿るので、長いクエリでは従来より読む row が増える。問題化した場合の次の手は `fts5vocab` table を使った IDF ベースの語の刈り込みであり、手書きの stopword リストではない
+- 同一文書が両 tier から返り得るため、`topK` で切る前に `vector_id` で重複排除する（tier が良い方、次に score が良い方を残す）
+- code（trigram）arm は strict のまま。識別子の部分一致は同じ崖を持たない
+
 vector_id は Vectorize 側と同一（deterministic SHA-256 ベース）で、RRF 合成時に dense hit と sparse hit を追加 round-trip なしで join できる。
 
 Vectorize metadata filter と同じく、`repo` / `type` / `state` / `milestone` は SQL WHERE 句で pre-filter する。

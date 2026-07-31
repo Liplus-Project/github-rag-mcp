@@ -64,8 +64,22 @@ export interface FtsUpsertRow {
   content: string;     // tokenizable text (title+body or commit msg + path + patch)
 }
 
-/** Escape a query term for FTS5 MATCH syntax (wrap each token in double quotes). */
-export function escapeFtsQuery(raw: string): string {
+/**
+ * How the tokens of one MATCH string are combined.
+ *
+ * - `all` — implicit AND (FTS5 default for juxtaposed phrases): a document must
+ *   contain every token. Precise, but the constraint tightens with every extra
+ *   token, so long queries fall off a cliff to zero hits (issue #186).
+ * - `any`  — explicit OR: a document needs one token. Recall-shaped; BM25 then
+ *   ranks documents that cover more (and rarer) query terms above the rest.
+ */
+export type FtsMatchMode = "all" | "any";
+
+/**
+ * Escape a query term for FTS5 MATCH syntax (wrap each token in double quotes).
+ * `mode` selects the boolean connective between tokens; see FtsMatchMode.
+ */
+export function escapeFtsQuery(raw: string, mode: FtsMatchMode = "all"): string {
   // Split on whitespace, drop empties, quote each token.
   // Double quotes inside are escaped by doubling them per FTS5 syntax.
   const tokens = raw
@@ -73,7 +87,8 @@ export function escapeFtsQuery(raw: string): string {
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
   if (tokens.length === 0) return "";
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ");
+  const quoted = tokens.map((t) => `"${t.replace(/"/g, '""')}"`);
+  return quoted.join(mode === "any" ? " OR " : " ");
 }
 
 /**
@@ -267,9 +282,11 @@ export interface FtsFilter {
 /**
  * Query both FTS5 virtual tables and return the top-N hits by BM25 score.
  *
- * The query is escaped and run against both tokenizers (`nat`, `code`). The two
- * result sets are combined and sorted by BM25 score (lower = better) before the
- * caller applies RRF.
+ * The query is escaped and run against both tokenizers (`nat`, `code`). The nat side
+ * contributes two tiers — strict (every token) and relaxed (any token) — so that a
+ * long query cannot fall to zero sparse hits; strict hits always sort ahead of relaxed
+ * ones. See the tiering note on the SQL below for why (issue #186). The result sets are
+ * combined, deduplicated and capped at `topK` before the caller applies RRF.
  *
  * Additional filters (`repo`, `type`, `state`, `milestone`) are expressed as
  * SQL WHERE predicates on the joined `search_docs` table, matching the
@@ -285,11 +302,15 @@ export async function queryFts(
   // (`content_fts`), so the query must be segmented the same way or a Japanese phrase
   // matches nothing; the code index stores raw text, so it must NOT be segmented or
   // the inserted spaces would break the trigram substring match.
-  const matchNat = escapeFtsQuery(ftsIndexText(query, "nat"));
-  const matchCode = escapeFtsQuery(ftsIndexText(query, "code"));
+  const natText = ftsIndexText(query, "nat");
+  const matchNat = escapeFtsQuery(natText, "all");
+  const matchNatAny = escapeFtsQuery(natText, "any");
+  const matchCode = escapeFtsQuery(ftsIndexText(query, "code"), "all");
   // Segmentation only inserts/removes whitespace, so the two are empty together —
   // an empty or whitespace-only query. Never bind "" as a MATCH argument.
   if (matchNat === "" || matchCode === "") return [];
+  // Single-token queries have identical strict/relaxed forms; skip the extra arm.
+  const relaxNat = matchNatAny !== matchNat;
 
   // Build dynamic WHERE clause for metadata filters. Shared by both branches; only
   // the leading MATCH parameter differs, so it is bound per branch below.
@@ -314,56 +335,76 @@ export async function queryFts(
   const whereSql =
     whereClauses.length > 0 ? ` AND ${whereClauses.join(" AND ")}` : "";
 
-  // Two UNION ALL branches so each tokenizer contributes hits. The nat branch reads
-  // the v3 index created by migration 0006 (external content = the segmented
-  // `content_fts` column); the code branch stays on the v2 trigram index created by
-  // migration 0005 (external content = the raw `content` column). Superseded
-  // generations (nat v2, and both v1 tables) are intentionally left untouched — they
-  // may hold invalid delete entries, and rewriting them is what corrupts an
-  // external-content index.
+  // UNION ALL arms so each tokenizer contributes hits. The nat arms read the v3 index
+  // created by migration 0006 (external content = the segmented `content_fts` column);
+  // the code arm stays on the v2 trigram index created by migration 0005 (external
+  // content = the raw `content` column). Superseded generations (nat v2, and both v1
+  // tables) are intentionally left untouched — they may hold invalid delete entries,
+  // and rewriting them is what corrupts an external-content index.
   //
-  // The outer ORDER BY then picks the best BM25 score across both. `bm25()` returns
-  // negative values in D1's FTS5 (larger-magnitude negative = better match), so ASC
-  // orders best-first regardless of sign.
+  // `bm25()` returns negative values in D1's FTS5 (larger-magnitude negative = better
+  // match), so ORDER BY score ASC is best-first regardless of sign.
   //
   // Per-branch `ORDER BY score ASC LIMIT ?` must live inside a subquery because
   // SQLite's compound SELECT (UNION ALL) forbids LIMIT directly on its arms —
   // D1 rejects such queries with `D1_ERROR: LIMIT clause should come after
   // UNION ALL not before` (observed via Workers Observability, 2026-04-24).
-  const sql = `
-    SELECT * FROM (
+  //
+  // Tiering (issue #186). A conjunctive MATCH gets monotonically harder to satisfy as
+  // the query grows: measured on production, 3 tokens -> 3 hits, ~12 -> 2, ~17 -> 0.
+  // The cliff is language-independent (Japanese only reaches it sooner because
+  // segmentation turns particles into their own tokens), so the fix is too: the nat
+  // side runs BOTH a strict (all-tokens) and a relaxed (any-token) MATCH, tagged with
+  // a `tier` column, and the outer ORDER BY sorts by tier first. Consequences:
+  //   - strict hits keep exactly the ranks they have today; the relaxed arm can only
+  //     append below them, never displace one. Short queries do not regress.
+  //   - the relaxed arm becomes visible only insofar as the strict arm under-fills
+  //     topK — which is precisely the failure mode. No length threshold is needed.
+  //   - relaxed-tier precision is carried by BM25 itself: IDF weighting pushes
+  //     documents covering more (and rarer) query terms up, and drives high-frequency
+  //     function words (`の` / `は` / `the` / `of`) toward zero contribution. That is the
+  //     language-independent form of the "strip particles" idea, done by the ranker.
+  // Both tiers live in ONE statement on purpose: the "retry with OR when AND returns
+  // nothing" shape would be simpler to write but costs a second D1 round-trip per
+  // query, and would leave the measured mid-band (~12 tokens, 2 weak hits) unhelped.
+  // Cost accepted: the relaxed arm makes FTS5 walk the posting lists of every query
+  // token, including very common ones, so a long query reads more rows than before.
+  // If that ever bites, the next lever is IDF-aware term pruning via an `fts5vocab`
+  // table — not a hand-maintained stopword list.
+  //
+  // The code (trigram) arm is deliberately left strict: it is out of scope for #186,
+  // and single-token substring matching does not have the same cliff.
+  const natArm = (tier: number) => `
       SELECT * FROM (
         SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
                d.commit_date, d.commit_author, d.content,
-               bm25(search_docs_nat_fts_v3) AS score
+               bm25(search_docs_nat_fts_v3) AS score, ${tier} AS tier
           FROM search_docs_nat_fts_v3 f
           JOIN search_docs d ON d.rowid = f.rowid
          WHERE search_docs_nat_fts_v3 MATCH ?${whereSql}
          ORDER BY score ASC
          LIMIT ?
-      )
-      UNION ALL
+      )`;
+
+  const codeArm = `
       SELECT * FROM (
         SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
                d.commit_date, d.commit_author, d.content,
-               bm25(search_docs_code_fts_v2) AS score
+               bm25(search_docs_code_fts_v2) AS score, 0 AS tier
           FROM search_docs_code_fts_v2 f
           JOIN search_docs d ON d.rowid = f.rowid
          WHERE search_docs_code_fts_v2 MATCH ?${whereSql}
          ORDER BY score ASC
          LIMIT ?
-      )
-    )
-    ORDER BY score ASC
-    LIMIT ?
-  `;
+      )`;
 
-  // Each UNION branch binds its own MATCH string first, then the shared filter
-  // params, then its topK cap; the outer LIMIT takes the final topK.
+  // Each arm binds its own MATCH string first, then the shared filter params, then its
+  // own topK cap; the outer LIMIT is bound last.
+  const arms = [natArm(0), codeArm];
   const bindArgs: (string | number)[] = [
     matchNat,
     ...params,
@@ -371,33 +412,58 @@ export async function queryFts(
     matchCode,
     ...params,
     topK,
-    topK,
   ];
+  if (relaxNat) {
+    arms.push(natArm(1));
+    bindArgs.push(matchNatAny, ...params, topK);
+  }
+  // Overfetch when the relaxed arm is present: a document can be returned by both nat
+  // tiers, and those duplicates are collapsed below rather than eating result slots.
+  bindArgs.push(relaxNat ? topK * 2 : topK);
+
+  const sql = `
+    SELECT * FROM (${arms.join("\n      UNION ALL")}
+    )
+    ORDER BY tier ASC, score ASC
+    LIMIT ?
+  `;
 
   const stmt = db.prepare(sql).bind(...bindArgs);
   const result = await stmt.all<Record<string, unknown>>();
   const rows = result.results ?? [];
 
-  return rows.map((r) => ({
-    vectorId: String(r.vector_id ?? ""),
-    repo: String(r.repo ?? ""),
-    type: String(r.type ?? ""),
-    state: String(r.state ?? ""),
-    labels: String(r.labels ?? ""),
-    milestone: String(r.milestone ?? ""),
-    assignees: String(r.assignees ?? ""),
-    updatedAt: String(r.updated_at ?? ""),
-    number: Number(r.number ?? 0),
-    tagName: String(r.tag_name ?? ""),
-    docPath: String(r.doc_path ?? ""),
-    commitSha: String(r.commit_sha ?? ""),
-    filePath: String(r.file_path ?? ""),
-    fileStatus: String(r.file_status ?? ""),
-    commitDate: String(r.commit_date ?? ""),
-    commitAuthor: String(r.commit_author ?? ""),
-    content: String(r.content ?? ""),
-    score: Number(r.score ?? 0),
-  }));
+  // Deduplicate by vector_id, keeping the first (best tier, then best BM25) occurrence,
+  // then cap at topK. Without the relaxed arm this is a no-op: a row is indexed in
+  // exactly one FTS table, so the nat and code arms can never return the same id.
+  const seen = new Set<string>();
+  const hits: FtsHit[] = [];
+  for (const r of rows) {
+    const vectorId = String(r.vector_id ?? "");
+    if (seen.has(vectorId)) continue;
+    seen.add(vectorId);
+    hits.push({
+      vectorId,
+      repo: String(r.repo ?? ""),
+      type: String(r.type ?? ""),
+      state: String(r.state ?? ""),
+      labels: String(r.labels ?? ""),
+      milestone: String(r.milestone ?? ""),
+      assignees: String(r.assignees ?? ""),
+      updatedAt: String(r.updated_at ?? ""),
+      number: Number(r.number ?? 0),
+      tagName: String(r.tag_name ?? ""),
+      docPath: String(r.doc_path ?? ""),
+      commitSha: String(r.commit_sha ?? ""),
+      filePath: String(r.file_path ?? ""),
+      fileStatus: String(r.file_status ?? ""),
+      commitDate: String(r.commit_date ?? ""),
+      commitAuthor: String(r.commit_author ?? ""),
+      content: String(r.content ?? ""),
+      score: Number(r.score ?? 0),
+    });
+    if (hits.length >= topK) break;
+  }
+  return hits;
 }
 
 /**

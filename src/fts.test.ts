@@ -30,6 +30,18 @@ describe("fts: escapeFtsQuery", () => {
     // token `"hi"` -> inner quotes doubled -> wrapped -> `"""hi"""`
     expect(escapeFtsQuery('say "hi"')).toBe('"say" """hi"""');
   });
+
+  it("joins with OR in `any` mode and keeps implicit AND as the default (#186)", () => {
+    expect(escapeFtsQuery("alpha bravo charlie", "any")).toBe('"alpha" OR "bravo" OR "charlie"');
+    expect(escapeFtsQuery("alpha bravo charlie", "all")).toBe('"alpha" "bravo" "charlie"');
+    expect(escapeFtsQuery("alpha bravo charlie")).toBe(escapeFtsQuery("alpha bravo charlie", "all"));
+  });
+
+  it("produces an identical string in both modes for a single token", () => {
+    // queryFts uses this equality to skip the relaxed UNION arm entirely.
+    expect(escapeFtsQuery("single", "any")).toBe(escapeFtsQuery("single", "all"));
+    expect(escapeFtsQuery("", "any")).toBe("");
+  });
 });
 
 describe("fts: toRankMap", () => {
