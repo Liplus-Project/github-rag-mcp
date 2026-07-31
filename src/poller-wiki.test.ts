@@ -1,0 +1,481 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { Env, WikiDocRecord } from "./types.js";
+
+// `pollWiki` fans out to the embed pipeline (Workers AI + Vectorize + D1 + Store
+// DO) and to the two D1 teardown helpers. Everything under test here is upstream
+// of that fan-out — page enumeration, the resume cursor, the fetch budget and
+// the orphan reap — so those four entry points are replaced with controllable
+// fakes and only the *wiki HTTP surface* reaches the stubbed global fetch.
+// `sha256Hex` and the rest of `./pipeline.js` stay real.
+const {
+  processAndUpsertWikiDocMock,
+  deleteFtsRowMock,
+  deleteEdgesForVectorMock,
+} = vi.hoisted(() => ({
+  processAndUpsertWikiDocMock: vi.fn(),
+  deleteFtsRowMock: vi.fn(),
+  deleteEdgesForVectorMock: vi.fn(),
+}));
+
+vi.mock("./pipeline.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./pipeline.js")>();
+  return { ...actual, processAndUpsertWikiDoc: processAndUpsertWikiDocMock };
+});
+
+vi.mock("./fts.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./fts.js")>();
+  return { ...actual, deleteFtsRow: deleteFtsRowMock };
+});
+
+vi.mock("./graph.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./graph.js")>();
+  return { ...actual, deleteEdgesForVector: deleteEdgesForVectorMock };
+});
+
+const { pollWiki } = await import("./poller.js");
+const { sha256Hex } = await import("./pipeline.js");
+
+const REPO = "acme/widgets";
+const CURSOR_KEY = `wiki:${REPO}`;
+const RAW_PREFIX = `https://raw.githubusercontent.com/wiki/${REPO}/`;
+
+/** A page as the `_pages` index renders it: routed slug + displayed title. */
+interface FakeWikiPage {
+  slug: string;
+  /** Link text. Defaults to the slug with dashes turned back into spaces. */
+  title?: string;
+}
+
+interface FakeWiki {
+  listed: FakeWikiPage[];
+  /** Raw filename stem (no extension) -> markdown body, as the wiki git repo holds it. */
+  files: Record<string, string>;
+  /** Simulate an unreadable `/wiki/_pages` (non-200). */
+  indexFails?: boolean;
+}
+
+/**
+ * Stub the global fetch with a fake GitHub wiki: the `.wiki.git` existence
+ * probe, the `_pages` HTML index, and raw.githubusercontent content.
+ *
+ * `rawRequests` records every raw-content URL the poller issued — the fetch
+ * budget and the per-page candidate fan-out are both asserted against it.
+ */
+function stubWiki(wiki: FakeWiki) {
+  const rawRequests: string[] = [];
+
+  const pagesHtml = [
+    // GitHub's own UI links live in the same index and share the underscore
+    // convention. They must never cost a raw fetch.
+    `<div><a href="/${REPO}/wiki/_new">New Page</a></div>`,
+    `<div><a href="/${REPO}/wiki/_Sidebar">Sidebar</a></div>`,
+    ...wiki.listed.map(
+      (p) =>
+        `<div class="flex-auto"><a href="/${REPO}/wiki/${p.slug}">` +
+        `${p.title ?? p.slug.replace(/-/g, " ")}</a></div>`,
+    ),
+  ].join("\n");
+
+  const fetchMock = vi.fn(async (input: string | URL) => {
+    const url = String(input);
+
+    if (url.includes(".wiki.git/info/refs")) {
+      return new Response("001e# service=git-upload-pack\n", { status: 200 });
+    }
+
+    if (url.endsWith("/wiki/_pages")) {
+      if (wiki.indexFails) return new Response("boom", { status: 503 });
+      return new Response(pagesHtml, {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+
+    if (url.startsWith(RAW_PREFIX)) {
+      rawRequests.push(url);
+      const tail = url.slice(RAW_PREFIX.length);
+      const dot = tail.lastIndexOf(".");
+      const name = decodeURIComponent(tail.slice(0, dot));
+      const ext = tail.slice(dot + 1);
+      const body = wiki.files[name];
+      if (ext !== "md" || body === undefined) {
+        return new Response("Not Found", { status: 404 });
+      }
+      return new Response(body, { status: 200 });
+    }
+
+    throw new Error(`unexpected fetch in wiki stub: ${url}`);
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+
+  /** Raw filename stems requested, in call order. */
+  const requestedNames = (): string[] =>
+    rawRequests.map((u) => {
+      const tail = u.slice(RAW_PREFIX.length);
+      return decodeURIComponent(tail.slice(0, tail.lastIndexOf(".")));
+    });
+
+  return { rawRequests, requestedNames };
+}
+
+/**
+ * In-memory IssueStore stand-in covering the wiki surface: the record list the
+ * poller diffs against, the watermark row holding the resume cursor, and the
+ * per-page DELETE the reap issues.
+ */
+function makeWikiStore(seed: WikiDocRecord[] = [], cursor?: string) {
+  const records = new Map<string, WikiDocRecord>(seed.map((w) => [w.pageName, w]));
+  const watermarks = new Map<string, { lastPolledAt: string; etag: string }>();
+  if (cursor !== undefined) {
+    watermarks.set(CURSOR_KEY, { lastPolledAt: "2026-07-31T00:00:00Z", etag: cursor });
+  }
+  const deletes: string[] = [];
+
+  const stub = {
+    async fetch(request: Request): Promise<Response> {
+      const url = new URL(request.url);
+      const path = url.pathname;
+
+      if (request.method === "GET" && path === "/wiki-docs") {
+        return Response.json([...records.values()]);
+      }
+      if (request.method === "GET" && path === "/watermark") {
+        const key = url.searchParams.get("repo") ?? "";
+        const wm = watermarks.get(key);
+        if (!wm) return new Response("not found", { status: 404 });
+        return Response.json({ repo: key, ...wm });
+      }
+      if (request.method === "POST" && path === "/watermark") {
+        const body = (await request.json()) as {
+          repo: string;
+          lastPolledAt: string;
+          etag?: string;
+        };
+        watermarks.set(body.repo, {
+          lastPolledAt: body.lastPolledAt,
+          etag: body.etag ?? "",
+        });
+        return new Response("ok");
+      }
+      if (request.method === "DELETE" && path === "/wiki-doc") {
+        const page = url.searchParams.get("page") ?? "";
+        deletes.push(page);
+        records.delete(page);
+        return new Response("ok");
+      }
+      return new Response("ok");
+    },
+  };
+
+  return {
+    stub: stub as unknown as DurableObjectStub,
+    records,
+    deletes,
+    cursor: () => watermarks.get(CURSOR_KEY)?.etag ?? "",
+  };
+}
+
+/** Env whose D1 reports `indexed` as the live wiki_doc rows in search_docs. */
+function makeWikiEnv(indexed: string[] = []) {
+  const vectorDeletes: string[] = [];
+  const deleteByIds = vi.fn(async (ids: string[]) => {
+    vectorDeletes.push(...ids);
+  });
+  const env = {
+    GITHUB_TOKEN: "test-token",
+    VECTORIZE: { deleteByIds },
+    DB_FTS: {
+      prepare: () => ({
+        bind: () => ({
+          all: async () => ({ results: indexed.map((p) => ({ doc_path: p })) }),
+        }),
+      }),
+    },
+  } as unknown as Env;
+  return { env, vectorDeletes, deleteByIds };
+}
+
+/** Slugs the run handed to the embed pipeline. */
+const embeddedSlugs = (): string[] =>
+  processAndUpsertWikiDocMock.mock.calls.map((call) => String(call[3]));
+
+beforeEach(() => {
+  processAndUpsertWikiDocMock.mockReset();
+  processAndUpsertWikiDocMock.mockResolvedValue({
+    embedded: true,
+    skippedUnchanged: false,
+    metadataUpdated: false,
+    failed: false,
+  });
+  deleteFtsRowMock.mockReset().mockResolvedValue(undefined);
+  deleteEdgesForVectorMock.mockReset().mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("poller: pollWiki page coverage", () => {
+  it("reaches every page across runs instead of restarting at the head", async () => {
+    // 50 pages, 20 fetches per run: the pre-fix poller walked pages 1..20 on
+    // every run and never reached page 21. Three runs must cover all of them.
+    const slugs = Array.from({ length: 50 }, (_, i) => `p${String(i).padStart(2, "0")}`);
+    const wiki: FakeWiki = {
+      listed: slugs.map((slug) => ({ slug, title: slug })),
+      files: Object.fromEntries([...slugs, "Home"].map((s) => [s, `body of ${s}`])),
+    };
+
+    const seen = new Set<string>();
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+
+    for (let run = 0; run < 3; run++) {
+      const { requestedNames } = stubWiki(wiki);
+      const summary = await pollWiki(REPO, env, store.stub);
+
+      expect(summary.fetches).toBeLessThanOrEqual(20);
+      for (const name of requestedNames()) seen.add(name);
+      vi.unstubAllGlobals();
+    }
+
+    // 50 listed pages + Home, which `_pages` never lists.
+    expect(seen.size).toBe(51);
+    for (const slug of [...slugs, "Home"]) expect(seen.has(slug)).toBe(true);
+  });
+
+  it("persists the resume cursor and continues past it", async () => {
+    const slugs = ["a", "b", "c", "d", "e", "f"];
+    const wiki: FakeWiki = {
+      listed: slugs.map((slug) => ({ slug, title: slug })),
+      files: Object.fromEntries([...slugs, "Home"].map((s) => [s, `body ${s}`])),
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+
+    stubWiki(wiki);
+    const first = await pollWiki(REPO, env, store.stub, { fetchBudget: 3 });
+    vi.unstubAllGlobals();
+
+    expect(first.visited).toBe(3);
+    expect(first.wrapped).toBe(false);
+    expect(store.cursor()).toBe(first.nextCursor);
+
+    const { requestedNames } = stubWiki(wiki);
+    const second = await pollWiki(REPO, env, store.stub, { fetchBudget: 3 });
+
+    expect(second.startCursor).toBe(first.nextCursor);
+    expect(requestedNames()).not.toContain(first.nextCursor);
+  });
+
+  it("wraps to the head when the cursor sits past the last page", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "a" }, { slug: "b" }],
+      files: { a: "a", b: "b", Home: "h" },
+    };
+    const store = makeWikiStore([], "zzz");
+    const { env } = makeWikiEnv();
+    const { requestedNames } = stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 10 });
+
+    expect(summary.wrapped).toBe(true);
+    expect(requestedNames().sort()).toEqual(["Home", "a", "b"]);
+  });
+
+  it("never spends a fetch on GitHub's underscore UI links", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "real-page" }],
+      files: { "real page": "x", "real-page": "x", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+    const { requestedNames } = stubWiki(wiki);
+
+    await pollWiki(REPO, env, store.stub);
+
+    expect(requestedNames().some((n) => n.startsWith("_"))).toBe(false);
+    expect(embeddedSlugs()).not.toContain("_new");
+  });
+
+  it("indexes Home even though _pages omits it", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "other" }],
+      files: { other: "o", Home: "home body" },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+    stubWiki(wiki);
+
+    await pollWiki(REPO, env, store.stub);
+
+    expect(embeddedSlugs()).toContain("Home");
+  });
+
+  it("indexes a page whose slug lost a character to routing", async () => {
+    // GitHub routes `E. Li+language` to the slug `E.-Li-language`, but the wiki
+    // git repo holds `E.-Li+language.md`. Building the raw URL from the slug
+    // 404s forever; the link text carries the only recoverable filename.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "E.-Li-language", title: "E. Li+language" }],
+      files: { "E.-Li+language": "spec body", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+    const { requestedNames } = stubWiki(wiki);
+
+    await pollWiki(REPO, env, store.stub);
+
+    expect(requestedNames()).toContain("E.-Li+language");
+    // Identity stays the slug: vector ID, store key and wiki URL all key on it.
+    expect(embeddedSlugs()).toContain("E.-Li-language");
+  });
+
+  it("holds the fetch budget even when every page needs a second candidate", async () => {
+    const slugs = Array.from({ length: 30 }, (_, i) => `page-${i}`);
+    const wiki: FakeWiki = {
+      // Title differs from the slug on every page, so each page costs a miss
+      // before the slug-named file resolves.
+      listed: slugs.map((slug) => ({ slug, title: `T ${slug}` })),
+      files: Object.fromEntries([...slugs, "Home"].map((s) => [s, `b ${s}`])),
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+    const { rawRequests } = stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.fetches).toBeLessThanOrEqual(20);
+    expect(rawRequests.length).toBeLessThanOrEqual(20);
+  });
+
+  it("skips a page whose content hash is unchanged", async () => {
+    const body = "stable body";
+    const wiki: FakeWiki = {
+      listed: [{ slug: "kept" }],
+      files: { kept: body, Home: "h" },
+    };
+    const store = makeWikiStore([
+      {
+        repo: REPO,
+        pageName: "kept",
+        extension: "md",
+        contentHash: await sha256Hex(body),
+        updatedAt: "2026-07-01T00:00:00Z",
+      },
+    ]);
+    const { env } = makeWikiEnv();
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.skipped).toBe(1);
+    expect(embeddedSlugs()).not.toContain("kept");
+  });
+});
+
+describe("poller: pollWiki orphan reap", () => {
+  it("reaps a page that survives in the index but not in the store", async () => {
+    // The production failure: the store row was gone, so the store-only diff
+    // saw nothing to delete and the search_docs / Vectorize / edge rows for a
+    // renamed-away page stayed resolvable for months.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore(); // store knows nothing
+    const { env, vectorDeletes } = makeWikiEnv(["current", "renamed-away"]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.removed).toBe(1);
+    expect(vectorDeletes).toHaveLength(1);
+    expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
+    expect(deleteEdgesForVectorMock).toHaveBeenCalledTimes(1);
+    expect(store.deletes).toEqual(["renamed-away"]);
+  });
+
+  it("still reaps a store-only orphan", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore([
+      {
+        repo: REPO,
+        pageName: "stale",
+        extension: "md",
+        contentHash: "h",
+        updatedAt: "2026-05-01T00:00:00Z",
+      },
+    ]);
+    const { env } = makeWikiEnv([]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.removed).toBe(1);
+    expect(store.deletes).toEqual(["stale"]);
+  });
+
+  it("tears down the D1 rows even when the Vectorize delete throws", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const { env, deleteByIds } = makeWikiEnv(["orphan"]);
+    deleteByIds.mockRejectedValue(new Error("vectorize outage"));
+    stubWiki(wiki);
+
+    await pollWiki(REPO, env, store.stub);
+
+    expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
+    expect(store.deletes).toEqual(["orphan"]);
+  });
+
+  it("caps reaps per run and defers the rest", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const orphans = Array.from({ length: 9 }, (_, i) => `orphan-${i}`);
+    const { env } = makeWikiEnv(["current", ...orphans]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.removed).toBe(5);
+    expect(summary.orphansDeferred).toBe(4);
+  });
+
+  it("reaps nothing when the page index could not be read", async () => {
+    // An unreadable `_pages` yields an empty slug set. Treating that as "every
+    // page was deleted" would wipe the repo's entire wiki index.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c" },
+      indexFails: true,
+    };
+    const store = makeWikiStore([
+      {
+        repo: REPO,
+        pageName: "current",
+        extension: "md",
+        contentHash: "h",
+        updatedAt: "2026-05-01T00:00:00Z",
+      },
+    ]);
+    const { env, vectorDeletes } = makeWikiEnv(["current"]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.enumerated).toBe(false);
+    expect(summary.removed).toBe(0);
+    expect(vectorDeletes).toEqual([]);
+    expect(store.deletes).toEqual([]);
+  });
+});

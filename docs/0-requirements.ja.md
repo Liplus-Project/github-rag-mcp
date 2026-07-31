@@ -149,10 +149,16 @@ commit diff poller は 2-phase 構成:
 wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込み経路。Wiki は別 git repo (`{repo}.wiki.git`) に存在し、REST API も webhook event も持たないため、poller が repo ごとに 3 段の HTTP 呼び出しで処理する:
 
 1. `https://github.com/{repo}.wiki.git/info/refs?service=git-upload-pack` を打って wiki 存在検出（200 = 存在、404 = 無効化済 or 未設置 = skip）。
-2. `/{repo}/wiki/_pages` HTML を scrape して page slug を列挙（`/{repo}/wiki/{slug}` 形式の link を tolerant な regex で拾う、`_pages` / `_history` / `_new` 等の特殊 pseudo-page は除外）。
-3. 各 slug について `https://raw.githubusercontent.com/wiki/{repo}/master/{slug}.{ext}` から raw markup を取得。markup 拡張子は probe 順 (`md` → `markdown` → `mediawiki` → `org` → `rst` → `rest` → `textile` → `pod` → `asciidoc` → `creole`) で検出、次回以降は前回ヒット拡張子を再利用して probe を省略。
+2. `/{repo}/wiki/_pages` HTML を scrape して page slug を列挙（`/{repo}/wiki/{slug}` 形式の link を tolerant な regex で拾う、`_pages` / `_history` / `_new` 等の特殊 pseudo-page は除外）。この index には効いてくる癖が 2 つある（issue #184）: `Home` は実在するのに列挙に現れないので無条件で union する。そして slug は page title の**不可逆な**変換で（`E. Li+language` は `E.-Li-language` に routing されるが実ファイルは `E.-Li+language.md`）、link の表示テキストを 2 つ目のファイル名候補として保持する。
+3. 各 page について `https://raw.githubusercontent.com/wiki/{repo}/{name}.{ext}` から raw markup を取得（`name` は title 由来のファイル名を先に、slug を後に試す）。markup 拡張子は probe 順 (`md` → `markdown`) で検出、次回以降は前回ヒット拡張子を再利用して probe を省略。probe 集合を絞ってあるのは意図的で、1 回の miss が invocation の 1000 subrequest を 1 消費するため（issue #130）。
 
-変更検出は SHA-256 content hash（wiki git smart-HTTP を叩かないと git blob SHA は取れないため、content 直接 hash）。hash 差分のある page だけ re-embed、`_pages` index に消えた page は Vectorize / D1 FTS5 / structured store から削除。1 cron run あたりの per-repo 上限は `MAX_WIKI_EMBEDDINGS_PER_RUN`（既定 30）で、初回 bulk import が複数 cron に分散する。
+変更検出は SHA-256 content hash（wiki git smart-HTTP を叩かないと git blob SHA は取れないため、content 直接 hash）。hash 差分のある page だけ re-embed。
+
+**カバレッジ.** page 走査の上限は `MAX_WIKI_FETCHES_PER_REPO_PER_RUN`（既定 20）。page 単位ではなく **HTTP 試行単位**で数えるので、候補を複数持つ page が fan-out で上限を超えることはない。この予算は深い wiki より小さいため、走査は**循環し、保存された cursor から再開する** — 最後に probe した slug を `wiki:{repo}` watermark 行の `etag` 列に置くので、schema 変更は不要。結果として全 page が ceil(pages / 予算) run 以内に到達する。毎 run 列挙の先頭から舐め直す実装が、位置 20 以降を構造的に到達不能にし、77 page の wiki の大半を未索引のまま放置していた（issue #184）。`MAX_WIKI_EMBEDDINGS_PER_RUN`（既定 30）は別軸のまま — Workers AI の embed 予算の上限であって、走査の上限ではない。
+
+**孤児の削除.** 現在の `_pages` index に無い page は Vectorize / D1 FTS5 / graph edge table / structured store から削除する。候補集合は structured store **と** 実際の `search_docs` 行の和集合。store から消えているのに index には残っている page は store だけを見る差分からは見えず、これが改名済み 8 page を数ヶ月間 search から引ける状態で残した原因だった（issue #184）。影響範囲は 3 つの guard で抑える — `_pages` index が読めなかった run では削除を完全に skip（空の slug 集合は「全部消えた」ではなく「こちらが盲目」の意）、1 repo 1 run あたり `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap、各 surface は独立に teardown して Vectorize の失敗が実際に retrieval される D1 行を取り残さないようにする。
+
+**即時復旧.** `POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG]` が同じ pass を明示予算（1..40、既定 20）で即時実行する。cron と cursor を共有するので互いに前進させ合う。response の `done: true` まで繰り返し呼ぶ。`cursor=`（空）を渡すと列挙の先頭から walk をやり直す。各 call は独立した Worker invocation なので、それぞれ独自の subrequest 予算を持つ。
 
 ### 4. Embedding Pipeline
 
