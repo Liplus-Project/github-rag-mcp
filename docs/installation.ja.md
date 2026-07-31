@@ -217,6 +217,41 @@ POST /admin/diff-watermark?repo=owner/repo&since=2026-07-06T00:00:00Z
 - upsert は `(repo, commit_sha, file_path)` で idempotent なので、index 済み期間を再走査しても安全
 - 進捗は worker log の `{repo} diffs: forward [...]` 行、または該当期間を `type: "diff"` で検索して確認する
 
+## 11. migration 0006 適用後に full-text index を再分かち書きする
+
+migration `0006_fts5_segmented_nat_index.sql` は `content_fts` 列を追加し、生本文のコピーで初期化する。実際の分かち書きは JavaScript（`Intl.Segmenter`）にしか存在しないため、migration より前に索引された row はこの endpoint が走るまで未分割のまま残る。それまでの間、該当 row に対する日本語の句クエリは sparse 候補が 0 件のままになる。
+
+migration 適用後に一度だけ実行する。deploy 以降に索引された row は取り込み経路が既に分かち書き済みで書いている。
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-fts-segments
+```
+
+パラメータ:
+
+- `repo` — 任意の `owner/repo` filter。省略すると全 repository を走査する
+- `cursor` — 再開位置の `rowid`（既定 `0`）。前回 response の `nextCursor` をそのまま渡す
+- `limit` — 1 回あたりの row 数、`1..200`（既定 `50`）
+
+認証:
+
+- `GITHUB_TOKEN` header に worker secret と同じ `GITHUB_TOKEN` を送る
+
+Response:
+
+```json
+{ "repo": null, "cursor": 0, "limit": 50, "scanned": 50, "updated": 41, "nextCursor": 812, "done": false }
+```
+
+運用上の注意:
+
+- `nextCursor` を渡し直しながら `done` が `true` になるまで繰り返し呼ぶ
+- どの時点でも `cursor=0` から再実行してよい。分かち書きが既に一致する row は書き込まず skip するため、完了済みの backfill を再実行すると `updated: 0` になる
+- 1 回の呼び出しで発行する D1 操作は最大 2 回なので、中断しても batch が中途半端に書き込まれた状態は残らない
+- 確認は `fusion: "sparse_only"` で日本語の句クエリを投げ、`sparse_candidates` が 0 でないことを見る
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

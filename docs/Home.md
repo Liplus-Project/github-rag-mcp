@@ -27,7 +27,7 @@ GitHub webhooks + GitHub API
 retrieval layer は **3-tier hybrid search**:
 
 1. **Dense** — Vectorize に格納した BGE-M3 embedding (1024d, cosine) を semantic 検索
-2. **Sparse** — D1 FTS5 (BM25) を porter / trigram tokenizer で語彙検索（コード識別子 / SHA / 固有名詞に強い）
+2. **Sparse** — D1 FTS5 (BM25) を porter / trigram tokenizer で語彙検索（コード識別子 / SHA / 固有名詞に強い）。自然文側は索引時・検索時の両方で `Intl.Segmenter` により分かち書きするため、日本語の句クエリでも BM25 候補が立つ
 3. **Fusion + Rerank** — Reciprocal Rank Fusion (RRF, k=60) で dense / sparse を合成 → `@cf/baai/bge-reranker-base` で precision を底上げ
 
 `push` event からは per-commit diff も index される（1 commit × N files → N vector）。これにより削除済みファイルや非 `.md` 拡張子の判断履歴も semantic 検索可能。

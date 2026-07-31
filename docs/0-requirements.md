@@ -217,9 +217,9 @@ Rationale:
 
 Schema overview:
 
-- `search_docs` — external content table (source of truth, `vector_id` primary key).
-- `search_docs_nat_fts_v2` — active FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc / wiki_doc / comment / review surfaces).
-- `search_docs_code_fts_v2` — active FTS5 virtual table with trigram tokenizer for code / SHA / identifier surfaces (diff). The v1 tables are retained but never queried or updated so a previously corrupt index is not touched during recovery.
+- `search_docs` — external content table (source of truth, `vector_id` primary key). It carries the tokenizable text twice: `content` is the raw text, `content_fts` is the word-segmented form.
+- `search_docs_nat_fts_v3` — active FTS5 virtual table with porter + unicode61 tokenizer for natural-language surfaces (issue / PR / release / doc / wiki_doc / comment / review surfaces). Its external content is `content_fts`.
+- `search_docs_code_fts_v2` — active FTS5 virtual table with trigram tokenizer for code / SHA / identifier surfaces (diff). Its external content is the raw `content`. Superseded generations (nat v2, and both v1 tables) are retained but never queried or updated so a previously corrupt index is not touched during recovery.
 
 Tokenizer selection:
 
@@ -228,6 +228,16 @@ Tokenizer selection:
 - A `tokenizer_kind` column on `search_docs` decides which virtual table a row is indexed in.
 - Each active FTS table declares a tokenizer-filtered view of `search_docs` as its external-content relation, so the declared content rows and indexed rows are the same set. Triggers cascade inserts / updates / deletes automatically, and every branch is guarded by `tokenizer_kind`: a row is inserted into and deleted from exactly one FTS5 table. Sending an FTS5 `delete` command to the opposite tokenizer for a row it never indexed is forbidden because it corrupts the external-content index.
 - Recovery creates a fresh FTS generation and backfills each table with a `WHERE tokenizer_kind = ...` filter. It does not use FTS5 `rebuild`, because `rebuild` would copy every `search_docs` row into each tokenizer and violate the same isolation invariant.
+
+Word segmentation (natural-language side):
+
+- `unicode61` breaks tokens on non-alphanumeric characters only. Japanese has no such separators, so an entire run of kana/kanji is indexed as one token and a Japanese phrase query matches nothing — hybrid retrieval silently degraded to dense-only for the majority of this corpus.
+- D1 cannot load a custom tokenizer: `tokenize = 'icu'` fails with `no such tokenizer: icu`. The word boundaries therefore have to be inserted before the text reaches SQLite.
+- `Intl.Segmenter` (available in workerd, no dependency) does that split. It runs on both sides of the index: the ingest path stores the segmented text in `content_fts`, and the query path builds the nat `MATCH` string from the segmented query. Symmetry is the correctness condition — the segmenter over-splits some katakana words, which costs precision but not recall, because the query is split the same wrong way.
+- Text containing no CJK is passed through verbatim, so English behavior is byte-identical to the previous generation.
+- The nat and code branches build **separate** `MATCH` strings from the same query: segmented for nat, raw for code (inserted spaces would break trigram substring matching).
+- `content` stays raw because the reranker consumes it and the trigram index indexes it.
+- Migration 0006 can only seed `content_fts` with a copy of `content` (the segmentation exists only in JS). `POST /admin/backfill-fts-segments` re-segments the existing rows in batches, driven by a `rowid` cursor; it is idempotent (a row already segmented is skipped without a write), so an interrupted run can simply be restarted.
 
 The `vector_id` mirrors the Vectorize vector ID (deterministic SHA-256 based) so RRF fusion can join dense and sparse hits without an extra round-trip.
 
@@ -308,7 +318,7 @@ Implementation constraints and known limitations:
 
 - bge-reranker-base inherits BAAI's 512-token context window. Each `(query, candidate content)` pair is truncated by character budget (query: 200 chars max, pair total: 1700 chars max) since no tokenizer is available in Workers.
 - Workers AI requires every `contexts[].text` to be at least one character long (error 5006: "Length of '/contexts/N/text' must be >= 1 not met"). Candidates whose content is still empty at call time are filtered out of the rerank input; if 0 or 1 non-empty candidates remain the call is skipped entirely.
-- Reranker input content is supplied from two sources. Candidates with a sparse (FTS5) hit carry their content inline. Dense-only candidates have no FTS row, so their content is backfilled from D1 `search_docs` in a single batched `vector_id IN (...)` query issued once per search — never a per-candidate fan-out. This matters most for Japanese queries, where FTS5 tokenization commonly yields zero BM25 hits and therefore makes every candidate dense-only; without the backfill the whole candidate set reached the reranker empty and the cross-encoder never ran. A D1 failure during backfill is non-fatal: the search proceeds with whatever content is already available.
+- Reranker input content is supplied from two sources. Candidates with a sparse (FTS5) hit carry their content inline. Dense-only candidates have no FTS row, so their content is backfilled from D1 `search_docs` in a single batched `vector_id IN (...)` query issued once per search — never a per-candidate fan-out. The acute case was a Japanese query before the nat index was segmented: FTS5 tokenization yielded zero BM25 hits, every candidate was therefore dense-only, and without this backfill the whole candidate set reached the reranker empty and the cross-encoder never ran. Segmentation removed that specific cause, but any candidate the sparse ranker misses still arrives without content, so the backfill remains required. A D1 failure during backfill is non-fatal: the search proceeds with whatever content is already available.
 - `rerank_applied: true` is reported only when at least one candidate actually received a reranker score. An empty reranker result (no scorable content) is treated the same as a failure — fusion order stands and `rerank_applied` is `false`. The invariant is that `rerank_applied: true` always implies at least one non-null `rerank_score` in the response.
 - The reranker processes at most 50 candidates per call — chosen as the join point between the Workers AI Free tier neuron budget (10,000/day) and industry median (50–75 candidates).
 - bge-reranker-base is English-centric and not multilingual. Japanese issue/PR content may see degraded quality. This is observed at runtime; switching to `bge-reranker-v2-m3` or an external reranker (Voyage / Cohere) is tracked as a separate issue when needed. Note that the dense-only content backfill above makes the cross-encoder *run* on Japanese queries; it does not make the model multilingual, so ranking quality remains a separate axis.

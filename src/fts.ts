@@ -13,13 +13,20 @@
  * - FTS5 is SQLite's built-in full-text search extension. Cloudflare D1 is pre-compiled
  *   with FTS5, so no extension loading is required; the `fts5` module name must be lowercase.
  * - We keep two FTS5 virtual tables with different tokenizers:
- *     - `search_docs_nat_fts`  — porter + unicode61 for natural-language surfaces
- *     - `search_docs_code_fts` — trigram for code / SHA / identifier surfaces (diffs)
+ *     - `search_docs_nat_fts_v3`  — porter + unicode61 for natural-language surfaces
+ *     - `search_docs_code_fts_v2` — trigram for code / SHA / identifier surfaces (diffs)
  *   Rows are written to exactly one based on `tokenizer_kind`.
+ * - The nat index takes its text from `search_docs.content_fts`, which holds the
+ *   `Intl.Segmenter`-segmented form of the content (see ./segment.ts). `unicode61`
+ *   cannot split Japanese on its own, so the word boundaries are inserted before the
+ *   text reaches SQLite — on the ingest side AND on the query side, symmetrically
+ *   (issue #180 fact 1 / #182). The code index keeps using the raw `content`: trigram
+ *   already substring-matches Japanese.
  * - BM25 is invoked via the `bm25(<fts_table>)` auxiliary function. Smaller value = better.
  *   We convert to a rank (1..N) for RRF fusion in the retrieval path.
  */
 
+import { segmentForFts } from "./segment.js";
 import type { DiffFileStatus, VectorMetadata } from "./types.js";
 
 /** Which FTS5 virtual table a row is indexed in. */
@@ -70,6 +77,18 @@ export function escapeFtsQuery(raw: string): string {
 }
 
 /**
+ * Text to index in / match against the natural-language FTS5 index for a given
+ * tokenizer kind. Single source for the ingest side (`content_fts`) and the query
+ * side (nat MATCH string) so the two can never drift apart — an asymmetric
+ * segmentation silently loses recall instead of failing.
+ *
+ * `code` rows are indexed raw: the trigram tokenizer needs the original characters.
+ */
+export function ftsIndexText(text: string, kind: TokenizerKind): string {
+  return kind === "nat" ? segmentForFts(text) : text;
+}
+
+/**
  * Upsert a single row into D1 search_docs. Triggers on the table mirror the content
  * into the matching FTS5 virtual table. Safe to call repeatedly for the same vector_id.
  */
@@ -85,8 +104,8 @@ export async function upsertFtsRow(
       `INSERT INTO search_docs (
          vector_id, repo, type, state, labels, milestone, assignees, updated_at,
          number, tag_name, doc_path, commit_sha, file_path, file_status,
-         commit_date, commit_author, tokenizer_kind, content, indexed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         commit_date, commit_author, tokenizer_kind, content, content_fts, indexed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (vector_id) DO UPDATE SET
          repo            = excluded.repo,
          type            = excluded.type,
@@ -105,6 +124,7 @@ export async function upsertFtsRow(
          commit_author   = excluded.commit_author,
          tokenizer_kind  = excluded.tokenizer_kind,
          content         = excluded.content,
+         content_fts     = excluded.content_fts,
          indexed_at      = excluded.indexed_at`,
     )
     .bind(
@@ -126,9 +146,81 @@ export async function upsertFtsRow(
       row.commitAuthor ?? "",
       tokenizerKind,
       row.content,
+      ftsIndexText(row.content, tokenizerKind),
       now,
     )
     .run();
+}
+
+/** Outcome of one `backfillNatSegments` batch. */
+export interface SegmentBackfillResult {
+  /** Rows examined in this batch. */
+  scanned: number;
+  /** Rows whose `content_fts` actually changed (and were rewritten). */
+  updated: number;
+  /** Pass back as `cursor` to continue; `null` once the scan is exhausted. */
+  nextCursor: number | null;
+}
+
+/**
+ * Re-segment one batch of natural-language rows into `content_fts`.
+ *
+ * Migration 0006 seeds `content_fts` with a copy of the raw content because the
+ * segmentation only exists in JS. This walks the nat rows and rewrites the ones whose
+ * stored form differs from the current segmentation; the UPDATE trigger re-syncs the
+ * v3 FTS index per row.
+ *
+ * Batched on purpose: one bulk UPDATE would fire the trigger for every row in a single
+ * statement and blow both the D1 statement budget and the Worker subrequest budget.
+ * Each call issues at most two D1 operations (one SELECT, one batched UPDATE).
+ *
+ * Resumable and idempotent: progress is a plain `rowid` cursor, and a row whose
+ * `content_fts` already matches is skipped, so re-running an interrupted backfill from
+ * the beginning converges without rewriting the work that already landed.
+ */
+export async function backfillNatSegments(
+  db: D1Database,
+  opts: { limit: number; cursor?: number; repo?: string },
+): Promise<SegmentBackfillResult> {
+  const cursor = opts.cursor ?? 0;
+  const selectParams: (string | number)[] = [cursor];
+  let repoSql = "";
+  if (opts.repo) {
+    repoSql = " AND repo = ?";
+    selectParams.push(opts.repo);
+  }
+  selectParams.push(opts.limit);
+
+  const res = await db
+    .prepare(
+      `SELECT rowid AS rid, content, content_fts
+         FROM search_docs
+        WHERE tokenizer_kind = 'nat' AND rowid > ?${repoSql}
+        ORDER BY rowid
+        LIMIT ?`,
+    )
+    .bind(...selectParams)
+    .all<{ rid: number; content: string; content_fts: string }>();
+
+  const rows = res.results ?? [];
+  if (rows.length === 0) return { scanned: 0, updated: 0, nextCursor: null };
+
+  const update = db.prepare(`UPDATE search_docs SET content_fts = ? WHERE rowid = ?`);
+  const pending: D1PreparedStatement[] = [];
+  for (const r of rows) {
+    const segmented = ftsIndexText(String(r.content ?? ""), "nat");
+    if (segmented !== String(r.content_fts ?? "")) {
+      pending.push(update.bind(segmented, Number(r.rid)));
+    }
+  }
+  if (pending.length > 0) await db.batch(pending);
+
+  return {
+    scanned: rows.length,
+    updated: pending.length,
+    // A short page means the scan reached the end of the table.
+    nextCursor: rows.length < opts.limit ? null : Number(rows[rows.length - 1].rid),
+  };
 }
 
 /** Delete a single row by its vector_id. FTS5 rows are removed via the delete trigger. */
@@ -189,12 +281,20 @@ export async function queryFts(
   topK: number,
   filter?: FtsFilter,
 ): Promise<FtsHit[]> {
-  const match = escapeFtsQuery(query);
-  if (match === "") return [];
+  // Each branch gets its own MATCH string. The nat index stores segmented text
+  // (`content_fts`), so the query must be segmented the same way or a Japanese phrase
+  // matches nothing; the code index stores raw text, so it must NOT be segmented or
+  // the inserted spaces would break the trigram substring match.
+  const matchNat = escapeFtsQuery(ftsIndexText(query, "nat"));
+  const matchCode = escapeFtsQuery(ftsIndexText(query, "code"));
+  // Segmentation only inserts/removes whitespace, so the two are empty together —
+  // an empty or whitespace-only query. Never bind "" as a MATCH argument.
+  if (matchNat === "" || matchCode === "") return [];
 
-  // Build dynamic WHERE clause for metadata filters.
+  // Build dynamic WHERE clause for metadata filters. Shared by both branches; only
+  // the leading MATCH parameter differs, so it is bound per branch below.
   const whereClauses: string[] = [];
-  const params: (string | number)[] = [match];
+  const params: (string | number)[] = [];
   if (filter?.repo) {
     whereClauses.push("d.repo = ?");
     params.push(filter.repo);
@@ -214,13 +314,17 @@ export async function queryFts(
   const whereSql =
     whereClauses.length > 0 ? ` AND ${whereClauses.join(" AND ")}` : "";
 
-  // Two UNION ALL branches so each tokenizer contributes hits. The v2 indexes
-  // were created by migration 0005 with tokenizer-isolated delete/update
-  // triggers; the v1 indexes are intentionally left untouched because either
-  // one may already contain invalid delete entries. The outer ORDER BY
-  // then picks the best BM25 score across both. `bm25()` returns negative values
-  // in D1's FTS5 (larger-magnitude negative = better match), so ASC orders
-  // best-first regardless of sign.
+  // Two UNION ALL branches so each tokenizer contributes hits. The nat branch reads
+  // the v3 index created by migration 0006 (external content = the segmented
+  // `content_fts` column); the code branch stays on the v2 trigram index created by
+  // migration 0005 (external content = the raw `content` column). Superseded
+  // generations (nat v2, and both v1 tables) are intentionally left untouched — they
+  // may hold invalid delete entries, and rewriting them is what corrupts an
+  // external-content index.
+  //
+  // The outer ORDER BY then picks the best BM25 score across both. `bm25()` returns
+  // negative values in D1's FTS5 (larger-magnitude negative = better match), so ASC
+  // orders best-first regardless of sign.
   //
   // Per-branch `ORDER BY score ASC LIMIT ?` must live inside a subquery because
   // SQLite's compound SELECT (UNION ALL) forbids LIMIT directly on its arms —
@@ -233,10 +337,10 @@ export async function queryFts(
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
                d.commit_date, d.commit_author, d.content,
-               bm25(search_docs_nat_fts_v2) AS score
-          FROM search_docs_nat_fts_v2 f
+               bm25(search_docs_nat_fts_v3) AS score
+          FROM search_docs_nat_fts_v3 f
           JOIN search_docs d ON d.rowid = f.rowid
-         WHERE search_docs_nat_fts_v2 MATCH ?${whereSql}
+         WHERE search_docs_nat_fts_v3 MATCH ?${whereSql}
          ORDER BY score ASC
          LIMIT ?
       )
@@ -258,10 +362,13 @@ export async function queryFts(
     LIMIT ?
   `;
 
-  // The two UNION branches bind the same filter params; concatenate params twice + add topK caps.
+  // Each UNION branch binds its own MATCH string first, then the shared filter
+  // params, then its topK cap; the outer LIMIT takes the final topK.
   const bindArgs: (string | number)[] = [
+    matchNat,
     ...params,
     topK,
+    matchCode,
     ...params,
     topK,
     topK,
