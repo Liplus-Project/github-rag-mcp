@@ -4,7 +4,7 @@
  * Layer = L4 Operations (sparse retrieval surface)
  *
  * Responsibilities:
- * - Index tokenizable content into the D1 FTS5 virtual tables (`search_docs_nat_fts_v2`,
+ * - Index tokenizable content into the D1 FTS5 virtual tables (`search_docs_nat_fts_v3`,
  *   `search_docs_code_fts_v2`) via the `search_docs` content-owner table.
  * - Query FTS5 by a natural language or code-oriented query using BM25 ranking.
  * - Delete rows when the canonical surface is removed (issue/PR/release/doc).
