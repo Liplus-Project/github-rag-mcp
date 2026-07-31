@@ -223,6 +223,8 @@ Migration `0006_fts5_segmented_nat_index.sql` adds the `content_fts` column and 
 
 Run it once after applying the migration. Rows indexed after the deploy are already segmented by the ingest path.
 
+Order the upgrade as **apply migration → deploy the worker → run this backfill**. Between the migration and the deploy, the still-running previous version writes no `content_fts`, so rows it indexes in that window land in the v3 index as empty text; the backfill rewrites them from the raw `content`, so the window heals itself. The reverse order does not work: a worker deployed before the migration hits `no such column: content_fts` on every upsert.
+
 Admin endpoint:
 
 ```text

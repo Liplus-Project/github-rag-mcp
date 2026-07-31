@@ -223,6 +223,8 @@ migration `0006_fts5_segmented_nat_index.sql` は `content_fts` 列を追加し�
 
 migration 適用後に一度だけ実行する。deploy 以降に索引された row は取り込み経路が既に分かち書き済みで書いている。
 
+順序は **migration 適用 → worker deploy → この backfill** とする。migration から deploy までの間、稼働中の旧版は `content_fts` を書かないため、その窓で索引された row は v3 index に空テキストとして入る。backfill が生の `content` から書き直すので、この窓は自己修復する。逆順は成立しない。migration 前に deploy した worker は upsert のたびに `no such column: content_fts` で落ちる。
+
 Admin endpoint:
 
 ```text
