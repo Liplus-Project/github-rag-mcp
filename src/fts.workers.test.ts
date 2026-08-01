@@ -570,6 +570,23 @@ describe("fts D1: structured filters", () => {
     const hits = await queryFts(env.DB_FTS, "common", 10, { repo, type: "release" });
     expect(hits.map((h) => h.vectorId)).toEqual(["r:type-rel"]);
   });
+
+  // gh#181: wiki pages are a returned type, so they must also be a selectable
+  // filter value — repo docs and wiki pages co-exist as separate surfaces and a
+  // wiki-only sweep is the only way to observe the wiki index directly.
+  it("narrows to wiki_doc without changing the unfiltered set", async () => {
+    const repo = "t/wiki-type-filter";
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "d:wt-doc", type: "doc", repo, content: "shared surface marker" }));
+    await upsertFtsRow(env.DB_FTS, mkRow({ vectorId: "w:wt-wiki", type: "wiki_doc", repo, content: "shared surface marker" }));
+
+    const wikiOnly = await queryFts(env.DB_FTS, "marker", 10, { repo, type: "wiki_doc" });
+    expect(wikiOnly.map((h) => h.vectorId)).toEqual(["w:wt-wiki"]);
+    expect(wikiOnly.every((h) => h.type === "wiki_doc")).toBe(true);
+
+    // No type filter = both surfaces, exactly as before the filter value existed.
+    const unfiltered = await queryFts(env.DB_FTS, "marker", 10, { repo });
+    expect(unfiltered.map((h) => h.vectorId).sort()).toEqual(["d:wt-doc", "w:wt-wiki"]);
+  });
 });
 
 describe("fts D1: queryFts edge cases", () => {
