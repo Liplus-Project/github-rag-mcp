@@ -1032,6 +1032,15 @@ const MAX_WIKI_DELETIONS_PER_REPO_PER_RUN = 5;
  *  `etag` column (an opaque per-key string) so no schema change is needed. */
 const wikiCursorKey = (repo: string): string => `wiki:${repo}`;
 
+/** Watermark namespace holding the slug the current *lap* started after.
+ *  The resume cursor alone cannot answer "has every page been covered?" — it
+ *  only says where the last pass stopped. The anchor pins the start of the
+ *  sweep so a lap can be declared complete across several budget-limited
+ *  passes, which is the only way `done` is reachable when a wiki holds more
+ *  pages than one pass may fetch (issue #188). Same watermark row shape as the
+ *  cursor, different key. */
+const wikiLapKey = (repo: string): string => `wiki-lap:${repo}`;
+
 /**
  * Probe whether a repo has a wiki at all.
  *
@@ -1236,27 +1245,63 @@ async function listIndexedWikiPages(
   }
 }
 
+/** Read one wiki watermark slug; `null` when the row does not exist yet.
+ *  `null` is distinct from `""`: the lap anchor treats "never stored" and
+ *  "anchored at the head" differently. */
+async function readWikiSlug(
+  storeStub: DurableObjectStub,
+  key: string,
+  label: string,
+): Promise<string | null> {
+  try {
+    const resp = await storeStub.fetch(
+      new Request(`http://store/watermark?repo=${encodeURIComponent(key)}`),
+    );
+    if (!resp.ok) return null;
+    const wm = (await resp.json()) as { etag?: string };
+    return wm.etag ?? "";
+  } catch (err) {
+    console.error(
+      `${label} failed for ${key}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+}
+
+/** Persist one wiki watermark slug. */
+async function writeWikiSlug(
+  storeStub: DurableObjectStub,
+  key: string,
+  slug: string,
+  label: string,
+): Promise<void> {
+  try {
+    await storeStub.fetch(
+      new Request("http://store/watermark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo: key,
+          lastPolledAt: new Date().toISOString(),
+          etag: slug,
+        }),
+      }),
+    );
+  } catch (err) {
+    console.error(
+      `${label} failed for ${key}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 /** Read the wiki resume cursor for a repo; "" when none is stored yet. */
 async function readWikiCursor(
   storeStub: DurableObjectStub,
   repo: string,
 ): Promise<string> {
-  try {
-    const resp = await storeStub.fetch(
-      new Request(
-        `http://store/watermark?repo=${encodeURIComponent(wikiCursorKey(repo))}`,
-      ),
-    );
-    if (!resp.ok) return "";
-    const wm = (await resp.json()) as { etag?: string };
-    return wm.etag ?? "";
-  } catch (err) {
-    console.error(
-      `readWikiCursor failed for ${repo}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    return "";
-  }
+  return (await readWikiSlug(storeStub, wikiCursorKey(repo), "readWikiCursor")) ?? "";
 }
 
 /** Persist the wiki resume cursor for a repo. */
@@ -1265,24 +1310,24 @@ async function writeWikiCursor(
   repo: string,
   cursor: string,
 ): Promise<void> {
-  try {
-    await storeStub.fetch(
-      new Request("http://store/watermark", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repo: wikiCursorKey(repo),
-          lastPolledAt: new Date().toISOString(),
-          etag: cursor,
-        }),
-      }),
-    );
-  } catch (err) {
-    console.error(
-      `writeWikiCursor failed for ${repo}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  await writeWikiSlug(storeStub, wikiCursorKey(repo), cursor, "writeWikiCursor");
+}
+
+/** Read the lap anchor for a repo; `null` when no lap has been anchored yet. */
+async function readWikiLapAnchor(
+  storeStub: DurableObjectStub,
+  repo: string,
+): Promise<string | null> {
+  return readWikiSlug(storeStub, wikiLapKey(repo), "readWikiLapAnchor");
+}
+
+/** Persist the lap anchor for a repo. */
+async function writeWikiLapAnchor(
+  storeStub: DurableObjectStub,
+  repo: string,
+  anchor: string,
+): Promise<void> {
+  await writeWikiSlug(storeStub, wikiLapKey(repo), anchor, "writeWikiLapAnchor");
 }
 
 /**
@@ -1381,7 +1426,15 @@ export interface WikiPollSummary {
   orphansDeferred: number;
   startCursor: string;
   nextCursor: string;
-  /** True when the walk covered every enumerated page in this single pass. */
+  /** Slug the current lap started after ("" = the lap began at the head).
+   *  Together with `nextCursor` this is the lap's progress: the walk runs from
+   *  the first page after the anchor around to the anchor again. */
+  lapAnchor: string;
+  /** True when this pass reached the last page of the current lap, i.e. the
+   *  cursor completed a full circuit of the enumeration. The lap may span
+   *  several passes — a wiki with more pages than the per-pass fetch budget
+   *  can never finish one in a single pass, which is exactly why this is not
+   *  "covered every page in this one pass" (issue #188). */
   wrapped: boolean;
   /** False when the `_pages` index could not be read; no reaping happened. */
   enumerated: boolean;
@@ -1397,6 +1450,12 @@ export interface WikiPollSummary {
  * where this one stopped and every page is reached within
  * ceil(pages / budget) runs. Restarting at the head each run is what pinned
  * coverage to the first ~20 pages forever (issue #184, cause A).
+ *
+ * A second watermark — the lap anchor — records where the current sweep began,
+ * so `wrapped` reports "the cursor came back around to the anchor" rather than
+ * "this one pass saw every page". The latter is unreachable whenever the wiki
+ * holds more pages than one pass may fetch, which made the admin endpoint's
+ * `done` flag a stop condition that never fired (issue #188).
  *
  * Pages absent from the current `_pages` index but still present in the store
  * *or in the D1 FTS index* are reaped from Vectorize, D1 FTS5, the graph edge
@@ -1426,6 +1485,7 @@ export async function pollWiki(
     orphansDeferred: 0,
     startCursor,
     nextCursor: startCursor,
+    lapAnchor: startCursor,
     wrapped: false,
     enumerated: false,
   });
@@ -1452,6 +1512,14 @@ export async function pollWiki(
 
   const startCursor = opts.cursor ?? (await readWikiCursor(storeStub, repo));
 
+  // The lap anchor marks where the current sweep began. An explicit cursor
+  // override is an operator saying "start the walk here", so it opens a fresh
+  // lap at that point; otherwise the stored anchor carries across passes and
+  // falls back to the current cursor the first time a repo is walked.
+  const storedAnchor =
+    opts.cursor !== undefined ? null : await readWikiLapAnchor(storeStub, repo);
+  const lapAnchor = storedAnchor ?? startCursor;
+
   // Snapshot the existing wiki doc records so we can detect deletes and pick
   // a per-page preferred extension on subsequent polls.
   const existingResp = await storeStub.fetch(
@@ -1477,6 +1545,14 @@ export async function pollWiki(
   // that no longer exists.
   let start = pages.findIndex((p) => compareSlugs(p.slug, startCursor) > 0);
   if (start < 0) start = 0;
+
+  // The lap closes on the page immediately *before* the one the lap started
+  // on: reaching it means the cursor has come all the way back around to the
+  // anchor. Resolved by slug order rather than by a stored index so a page
+  // added or deleted mid-lap cannot desync it.
+  let lapStart = pages.findIndex((p) => compareSlugs(p.slug, lapAnchor) > 0);
+  if (lapStart < 0) lapStart = 0;
+  const lapFinalSlug = pages[(lapStart - 1 + pages.length) % pages.length].slug;
 
   for (let step = 0; step < pages.length; step++) {
     const page = pages[(start + step) % pages.length];
@@ -1519,7 +1595,7 @@ export async function pollWiki(
 
     visited++;
     nextCursor = page.slug;
-    if (step === pages.length - 1) wrapped = true;
+    if (page.slug === lapFinalSlug) wrapped = true;
 
     if (!fetched) {
       // The slug was discovered in `_pages` but no extension served. Treat as
@@ -1604,14 +1680,24 @@ export async function pollWiki(
     removed++;
   }
 
-  if (persistCursor && nextCursor !== startCursor) {
-    await writeWikiCursor(storeStub, repo, nextCursor);
+  // A completed lap re-anchors on the page that closed it, so the next lap
+  // starts at the page after it and the walk keeps moving forward.
+  const nextLapAnchor = wrapped ? lapFinalSlug : lapAnchor;
+
+  if (persistCursor) {
+    if (nextCursor !== startCursor) {
+      await writeWikiCursor(storeStub, repo, nextCursor);
+    }
+    if (nextLapAnchor !== storedAnchor) {
+      await writeWikiLapAnchor(storeStub, repo, nextLapAnchor);
+    }
   }
 
   console.log(
     `${repo} wiki: ${pages.length} pages, ${visited} visited, ${fetches}/${fetchBudget} fetches, ` +
       `${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${removed} deleted, ` +
-      `cursor ${startCursor || "<head>"} -> ${nextCursor || "<head>"}`,
+      `cursor ${startCursor || "<head>"} -> ${nextCursor || "<head>"}, ` +
+      `lap ${lapAnchor || "<head>"}${wrapped ? " complete" : ` -> ${lapFinalSlug}`}`,
   );
 
   return {
@@ -1626,6 +1712,7 @@ export async function pollWiki(
     orphansDeferred,
     startCursor,
     nextCursor,
+    lapAnchor,
     wrapped,
     enumerated: true,
   };

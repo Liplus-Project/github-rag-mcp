@@ -268,7 +268,7 @@ Parameters:
 
 - `repo` — `owner/repo`, must be listed in `POLL_REPOS`
 - `limit` — raw-content fetch attempts per call, `1..40` (default `20`)
-- `cursor` — page slug to resume after; omit to continue from the stored cursor, or pass empty (`cursor=`) to restart from the head of the enumeration
+- `cursor` — page slug to resume after; omit to continue from the stored cursor, or pass empty (`cursor=`) to restart from the head of the enumeration (which restarts the lap there too)
 
 Authentication:
 
@@ -280,12 +280,14 @@ Response:
 { "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
   "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5,
   "startCursor": "", "nextCursor": "current-architecture-as-concession",
-  "wrapped": false, "enumerated": true, "done": false }
+  "lapAnchor": "", "wrapped": false, "enumerated": true, "done": false }
 ```
 
 Operational notes:
 
 - call it repeatedly until `done` is `true`; it shares the cron's cursor, so the two advance one another rather than fighting
+- `done` (= `wrapped`) means the cursor completed a lap of the enumeration, not that one call covered every page. A wiki with more `pages` than `limit` cannot finish in one call; the lap closes after `ceil(pages / limit)` calls — 4 for a 77-page wiki at the default `limit=20` (issue #188)
+- `lapAnchor` is the slug the current lap started after (`""` = the head of the enumeration). The lap runs from the page after the anchor around to the anchor itself, so `lapAnchor` plus `nextCursor` shows how far the lap has come
 - `enumerated: false` means the `/wiki/_pages` scrape failed — nothing was indexed and, deliberately, nothing was reaped; retry rather than treating it as an empty wiki
 - `orphansDeferred` counts pages still to be reaped past the per-run cap; keep calling until it reaches 0
 - verify coverage by comparing `search_docs` rows (`type = 'wiki_doc'`) against the page list at `https://github.com/{repo}/wiki/_pages`

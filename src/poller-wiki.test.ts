@@ -37,6 +37,7 @@ const { sha256Hex } = await import("./pipeline.js");
 
 const REPO = "acme/widgets";
 const CURSOR_KEY = `wiki:${REPO}`;
+const LAP_KEY = `wiki-lap:${REPO}`;
 const RAW_PREFIX = `https://raw.githubusercontent.com/wiki/${REPO}/`;
 
 /** A page as the `_pages` index renders it: routed slug + displayed title. */
@@ -124,11 +125,14 @@ function stubWiki(wiki: FakeWiki) {
  * poller diffs against, the watermark row holding the resume cursor, and the
  * per-page DELETE the reap issues.
  */
-function makeWikiStore(seed: WikiDocRecord[] = [], cursor?: string) {
+function makeWikiStore(seed: WikiDocRecord[] = [], cursor?: string, lapAnchor?: string) {
   const records = new Map<string, WikiDocRecord>(seed.map((w) => [w.pageName, w]));
   const watermarks = new Map<string, { lastPolledAt: string; etag: string }>();
   if (cursor !== undefined) {
     watermarks.set(CURSOR_KEY, { lastPolledAt: "2026-07-31T00:00:00Z", etag: cursor });
+  }
+  if (lapAnchor !== undefined) {
+    watermarks.set(LAP_KEY, { lastPolledAt: "2026-07-31T00:00:00Z", etag: lapAnchor });
   }
   const deletes: string[] = [];
 
@@ -173,6 +177,7 @@ function makeWikiStore(seed: WikiDocRecord[] = [], cursor?: string) {
     records,
     deletes,
     cursor: () => watermarks.get(CURSOR_KEY)?.etag ?? "",
+    lapAnchor: () => watermarks.get(LAP_KEY)?.etag,
   };
 }
 
@@ -371,6 +376,108 @@ describe("poller: pollWiki page coverage", () => {
 
     expect(summary.skipped).toBe(1);
     expect(embeddedSlugs()).not.toContain("kept");
+  });
+});
+
+describe("poller: pollWiki lap completion", () => {
+  /** 7 listed pages + the unlisted `Home` = 8, sorted `Home, p0..p6`. */
+  const lapWiki = (): FakeWiki => {
+    const slugs = Array.from({ length: 7 }, (_, i) => `p${i}`);
+    return {
+      listed: slugs.map((slug) => ({ slug, title: slug })),
+      files: Object.fromEntries([...slugs, "Home"].map((s) => [s, `body ${s}`])),
+    };
+  };
+
+  it("completes a lap across passes when pages exceed the fetch budget", async () => {
+    // The bug: `wrapped` meant "this single pass saw every page", so a wiki
+    // with more pages than the per-pass budget could never set it and the
+    // documented "call until done" loop never terminated (issue #188).
+    const wiki = lapWiki();
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+
+    const run = async () => {
+      stubWiki(wiki);
+      const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 3 });
+      vi.unstubAllGlobals();
+      return summary;
+    };
+
+    // 8 pages / 3 fetches per pass: the lap must close on the third call.
+    const first = await run();
+    expect(first.pages).toBe(8);
+    expect(first.fetches).toBeLessThanOrEqual(3);
+    expect(first.wrapped).toBe(false);
+
+    const second = await run();
+    expect(second.wrapped).toBe(false);
+
+    const third = await run();
+    expect(third.wrapped).toBe(true);
+  });
+
+  it("keeps the lap anchor across passes and re-anchors once the lap closes", async () => {
+    const wiki = lapWiki();
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+
+    stubWiki(wiki);
+    const first = await pollWiki(REPO, env, store.stub, { fetchBudget: 3 });
+    vi.unstubAllGlobals();
+
+    // The first pass anchors the lap at the head and does not move it.
+    expect(first.lapAnchor).toBe("");
+    expect(store.lapAnchor()).toBe("");
+    expect(first.nextCursor).not.toBe("");
+
+    stubWiki(wiki);
+    const second = await pollWiki(REPO, env, store.stub, { fetchBudget: 3 });
+    vi.unstubAllGlobals();
+
+    expect(second.lapAnchor).toBe("");
+    expect(second.startCursor).toBe(first.nextCursor);
+
+    stubWiki(wiki);
+    const third = await pollWiki(REPO, env, store.stub, { fetchBudget: 3 });
+    vi.unstubAllGlobals();
+
+    // Lap closed on the page before the anchor — `p6`, the last in slug order.
+    expect(third.wrapped).toBe(true);
+    expect(store.lapAnchor()).toBe("p6");
+  });
+
+  it("does not report a lap the cron already walked most of", async () => {
+    // A pass that happens to start one page before the lap's final page must
+    // not be read as "everything is covered": the anchor, not the pass, owns
+    // the verdict.
+    const wiki = lapWiki();
+    const store = makeWikiStore([], "p4", "p4");
+    const { env } = makeWikiEnv();
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 2 });
+
+    expect(summary.lapAnchor).toBe("p4");
+    // Lap runs p5, p6, Home, p0..p4; this pass only reaches p5 and p6.
+    expect(summary.wrapped).toBe(false);
+  });
+
+  it("opens a fresh lap when an explicit cursor overrides the stored one", async () => {
+    const wiki = lapWiki();
+    const store = makeWikiStore([], "p6", "p4");
+    const { env } = makeWikiEnv();
+    stubWiki(wiki);
+
+    // `cursor=` (empty) is the documented "restart from the head" call; it must
+    // restart the lap too, otherwise the very next pass would report a lap the
+    // walk never made.
+    const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 2, cursor: "" });
+
+    expect(summary.startCursor).toBe("");
+    expect(summary.lapAnchor).toBe("");
+    expect(summary.wrapped).toBe(false);
+    expect(store.lapAnchor()).toBe("");
   });
 });
 

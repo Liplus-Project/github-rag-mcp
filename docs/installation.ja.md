@@ -268,7 +268,7 @@ POST /admin/backfill-wiki?repo=owner/repo
 
 - `repo` — `owner/repo`。`POLL_REPOS` に載っている必要がある
 - `limit` — 1 回の呼び出しで許す raw content の fetch 試行数、`1..40`（既定 `20`）
-- `cursor` — この slug の次から再開する。省略すると保存済み cursor の続きから。空（`cursor=`）を渡すと列挙の先頭からやり直す
+- `cursor` — この slug の次から再開する。省略すると保存済み cursor の続きから。空（`cursor=`）を渡すと列挙の先頭からやり直す（周回の起点もそこに戻る）
 
 認証:
 
@@ -280,12 +280,14 @@ POST /admin/backfill-wiki?repo=owner/repo
 { "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
   "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5,
   "startCursor": "", "nextCursor": "current-architecture-as-concession",
-  "wrapped": false, "enumerated": true, "done": false }
+  "lapAnchor": "", "wrapped": false, "enumerated": true, "done": false }
 ```
 
 運用上の注意:
 
 - `done` が `true` になるまで繰り返し呼ぶ。cron と cursor を共有するので、互いに前進させ合う（競合しない）
+- `done`（= `wrapped`）は「cursor が列挙を一周した」という意味で、1 回の呼び出しで全 page を踏破したという意味ではない。`pages` が `limit` を超える wiki では 1 回で `true` にはならず、`ceil(pages / limit)` 回で成立する。77 page を既定 `limit=20` で回すなら 4 回（issue #188）
+- `lapAnchor` は現在の周回の起点 slug（`""` は列挙の先頭）。周回は `lapAnchor` の次の page から始まり、`lapAnchor` に戻ってきた時点で閉じる。`nextCursor` と併せて見れば途中経過が分かる
 - `enumerated: false` は `/wiki/_pages` の scrape が失敗したという意味。何も索引せず、意図的に何も削除していない。空の wiki と解釈せず再試行すること
 - `orphansDeferred` は per-run cap を超えて削除待ちの page 数。0 になるまで呼び続ける
 - カバレッジの確認は `search_docs` の `type = 'wiki_doc'` 行と `https://github.com/{repo}/wiki/_pages` の page 一覧を突き合わせる
