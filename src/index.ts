@@ -242,8 +242,10 @@ const innerHandler: ExportedHandler<Env> = {
     // stored cursor), but a fresh index or a bulk wiki import would take
     // ceil(pages / 20) hours to land. This runs the same poll pass on demand
     // with an explicit fetch budget, sharing the cron's cursor so the two
-    // advance one another. Call it repeatedly until `done` is true; pass
-    // `cursor=` (empty) to restart the walk from the head of the enumeration.
+    // advance one another. Call it repeatedly until `done` is true — `done`
+    // means the cursor completed a lap of the enumeration, which takes
+    // ceil(pages / limit) calls rather than one (issue #188). Passing
+    // `cursor=` (empty) restarts the walk *and the lap* at the head.
     // Each call is its own Worker invocation, hence its own subrequest budget.
     // Requires GITHUB_TOKEN header for authentication.
     if (request.method === "POST" && url.pathname === "/admin/backfill-wiki") {

@@ -156,9 +156,11 @@ wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込
 
 **カバレッジ.** page 走査の上限は `MAX_WIKI_FETCHES_PER_REPO_PER_RUN`（既定 20）。page 単位ではなく **HTTP 試行単位**で数えるので、候補を複数持つ page が fan-out で上限を超えることはない。この予算は深い wiki より小さいため、走査は**循環し、保存された cursor から再開する** — 最後に probe した slug を `wiki:{repo}` watermark 行の `etag` 列に置くので、schema 変更は不要。結果として全 page が ceil(pages / 予算) run 以内に到達する。毎 run 列挙の先頭から舐め直す実装が、位置 20 以降を構造的に到達不能にし、77 page の wiki の大半を未索引のまま放置していた（issue #184）。`MAX_WIKI_EMBEDDINGS_PER_RUN`（既定 30）は別軸のまま — Workers AI の embed 予算の上限であって、走査の上限ではない。
 
+**周回の完了.** 2 本目の watermark 行 `wiki-lap:{repo}` が *lap anchor* — 現在の周回がどの slug の次から始まったか — を保持する。pass は anchor の直前の page に到達した時点、つまり cursor が一周して戻ってきた時点で `wrapped: true` を返し、anchor はその page へ移動して次の周回がその次から始まる。これが admin endpoint の `done` を到達可能にしている。「この 1 回の pass で全 page を踏破した」という意味では、1 pass の fetch 予算より page 数が多い wiki で真になりようがなく、「`done` まで呼び続けろ」という手順に停止条件が無かった（issue #188）。anchor は保存した index ではなく slug 順で解決するので、周回の途中で page が増減しても desync しない。`cursor=` を明示指定した場合はその地点から新しい周回を開始する。
+
 **孤児の削除.** 現在の `_pages` index に無い page は Vectorize / D1 FTS5 / graph edge table / structured store から削除する。候補集合は structured store **と** 実際の `search_docs` 行の和集合。store から消えているのに index には残っている page は store だけを見る差分からは見えず、これが改名済み 8 page を数ヶ月間 search から引ける状態で残した原因だった（issue #184）。影響範囲は 3 つの guard で抑える — `_pages` index が読めなかった run では削除を完全に skip（空の slug 集合は「全部消えた」ではなく「こちらが盲目」の意）、1 repo 1 run あたり `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap、各 surface は独立に teardown して Vectorize の失敗が実際に retrieval される D1 行を取り残さないようにする。
 
-**即時復旧.** `POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG]` が同じ pass を明示予算（1..40、既定 20）で即時実行する。cron と cursor を共有するので互いに前進させ合う。response の `done: true` まで繰り返し呼ぶ。`cursor=`（空）を渡すと列挙の先頭から walk をやり直す。各 call は独立した Worker invocation なので、それぞれ独自の subrequest 予算を持つ。
+**即時復旧.** `POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG]` が同じ pass を明示予算（1..40、既定 20）で即時実行する。cron と cursor を共有するので互いに前進させ合う。response の `done: true` まで繰り返し呼ぶ — 1 周に必要な呼び出し回数は 1 回ではなく ceil(pages / limit) 回。`cursor=`（空）を渡すと列挙の先頭から walk（と周回）をやり直す。各 call は独立した Worker invocation なので、それぞれ独自の subrequest 予算を持つ。
 
 ### 4. Embedding Pipeline
 
