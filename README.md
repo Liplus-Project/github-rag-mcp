@@ -90,7 +90,7 @@ Unified search across GitHub issues, pull requests, releases, repository documen
 Three modes are selected by the combination of `query` and `sort`:
 
 1. **Hybrid semantic search (default)** — dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with the `@cf/baai/bge-reranker-base` cross-encoder. Pass a natural-language `query`.
-2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent activity across every type. This subsumes the previous `list_recent_activity` tool.
+2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent activity across every type. This subsumes the previous `list_recent_activity` tool. The `[since, until)` window is applied inside the index, so any window holding rows returns rows however far back it sits; the response carries `truncated: true` when the window holds more than one page, which is what separates "no such rows" from "the read stopped short". Walk backwards by re-issuing the scan with `until` set to the oldest row returned.
 3. **Doc / wiki content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API; for `type: "wiki_doc"` rows, the raw markup is fetched from `raw.githubusercontent.com/wiki/`. Both are inlined as a `content` field. Capped at the first few rows of each type to bound API fan-out. This subsumes the previous `get_doc_content` tool.
 
 Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode.
@@ -112,7 +112,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `fusion` | `"rrf"` \| `"dense_only"` \| `"sparse_only"` | Fusion strategy (default `rrf`). Ignored in scan mode. |
 | `rerank` | boolean | Cross-encoder rerank (default `true`). Ignored in scan mode. |
 | `sort` | `"relevance"` \| `"updated_desc"` \| `"created_desc"` | Result ordering. Default `relevance` with a query, `updated_desc` without. Time sorts override ranker score. |
-| `since` | ISO 8601 string | Keep only results with `updated_at >= since`. |
+| `since` | ISO 8601 string | Keep only results with `updated_at >= since`. In scan mode, defaults to 7 days before `until` (before now when `until` is omitted). |
 | `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
 | `include_content` | boolean | Inline raw content on top doc results (default `false`). |
 | `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages are appended tagged `graph_hop` / `graph_from`. Default `false` = byte-identical to standard hybrid retrieval (no graph read). |

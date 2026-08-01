@@ -283,6 +283,8 @@ This store supports:
 - `list_recent_activity`
 - enrichment of semantic search hits
 
+**Recency window.** Every `/recent*` endpoint reads a half-open window `[since, until)` over the surface's own timestamp column (`updated_at`, `published_at`, `commit_date`), newest first, capped at `limit` rows. Both bounds are part of the SQL. Applying `until` to the returned rows instead is what made old windows unreachable: the cap takes the newest rows first and the filter then drops all of them, so a window holding thousands of rows still read as zero (issue #194). The per-endpoint cap stays — it bounds the subrequest / D1 read budget — but it now truncates the window rather than replacing it.
+
 ### 8. Graph Index (opt-in, D1 `doc_edges`)
 
 An additive graph layer that indexes relationships between Decision-Structure wiki entries (kebab-case wiki pages). A third surface alongside dense (Vectorize) and sparse (FTS5), but **never read by retrieval unless explicitly requested**.
@@ -388,12 +390,17 @@ Parameters:
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
+- `since` / `until` optional — half-open time window `[since, until)`
 
 Returns:
 
 - ranked matches with repository, type, state, labels, milestone, assignees, URL, and RRF fused `score`
 - additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`, `rerank_score` (null when rerank disabled or when graceful fallback engaged)
 - top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`
+
+**Scan mode (empty query).** Vectorize / FTS5 / reranker are skipped and the result set is aggregated from the structured store's recency endpoints. `since` / `until` are pushed down to the store, so a window returns rows whenever it holds rows, however far back it sits. `since` defaults to 7 days before `until` (before now when `until` is omitted), so an `until`-only query does not degenerate into an empty window above its own ceiling.
+
+Scan mode adds one top-level field, `truncated`, which is true when the window holds more rows than the response carries — either an endpoint filled its row cap, or the merged set was longer than `top_k`. This is what tells a caller that zero results means "no such rows" rather than "the read stopped short": walk backwards by re-issuing the scan with `until` set to the oldest row returned. A gap-hunting tool that cannot separate those two answers reports absent rows that exist and misses rows that do not, which is how #178 was mis-diagnosed twice in one day.
 
 ### `get_issue_context`
 

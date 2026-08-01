@@ -19,6 +19,20 @@ import type {
   PollWatermark,
 } from "./types.js";
 
+/**
+ * Options shared by every `getRecent*` reader: a half-open time window
+ * [since, until) over the surface's own timestamp column, newest first,
+ * optionally scoped to one repo, capped at `limit` rows.
+ *
+ * `until` is optional; omitting it means "up to now".
+ */
+export type RecentWindowOpts = {
+  since?: string;
+  until?: string;
+  limit?: number;
+  repo?: string;
+};
+
 /** Row shape returned by SQLite for the issues table */
 type IssueRow = {
   [key: string]: SqlStorageValue;
@@ -512,23 +526,51 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToIssueRecord);
   }
 
-  getRecentActivity(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): IssueRecord[] {
+  /**
+   * Build the shared recency-window query: rows whose `timeCol` falls in
+   * [since, until), newest first, capped at `limit`.
+   *
+   * `until` is part of the SQL rather than something the caller filters out of
+   * the result. A caller-side `until` filter over a recency-capped candidate
+   * set can never reach a window older than the newest `limit` rows: the cap
+   * takes the newest rows first and the filter then drops all of them, so an
+   * arbitrarily populated old window reads as empty (issue #194).
+   *
+   * `table` and `timeCol` are internal literals, never caller input.
+   */
+  private recentWindowQuery(
+    table: string,
+    timeCol: string,
+    opts?: RecentWindowOpts,
+  ): { query: string; params: (string | number)[] } {
     const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const since =
+      opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    let query: string;
-    let params: (string | number)[];
-
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
     if (opts?.repo) {
-      query = `SELECT * FROM issues WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM issues WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [since, limit];
+      conditions.push(`repo = ?`);
+      params.push(opts.repo);
     }
+    conditions.push(`${timeCol} >= ?`);
+    params.push(since);
+    if (opts?.until) {
+      conditions.push(`${timeCol} < ?`);
+      params.push(opts.until);
+    }
+    params.push(limit);
 
+    return {
+      query:
+        `SELECT * FROM ${table} WHERE ${conditions.join(" AND ")} ` +
+        `ORDER BY ${timeCol} DESC LIMIT ?`,
+      params,
+    };
+  }
+
+  getRecentActivity(opts?: RecentWindowOpts): IssueRecord[] {
+    const { query, params } = this.recentWindowQuery("issues", "updated_at", opts);
     const cursor = this.sql.exec<IssueRow>(query, ...params);
     return [...cursor].map(rowToIssueRecord);
   }
@@ -580,23 +622,12 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToReleaseRecord);
   }
 
-  getRecentReleases(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): ReleaseRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM releases WHERE repo = ? AND published_at >= ? ORDER BY published_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM releases WHERE published_at >= ? ORDER BY published_at DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentReleases(opts?: RecentWindowOpts): ReleaseRecord[] {
+    const { query, params } = this.recentWindowQuery(
+      "releases",
+      "published_at",
+      opts,
+    );
     const cursor = this.sql.exec<ReleaseRow>(query, ...params);
     return [...cursor].map(rowToReleaseRecord);
   }
@@ -650,23 +681,8 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToDocRecord);
   }
 
-  getRecentDocs(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): DocRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM docs WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM docs WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentDocs(opts?: RecentWindowOpts): DocRecord[] {
+    const { query, params } = this.recentWindowQuery("docs", "updated_at", opts);
     const cursor = this.sql.exec<DocRow>(query, ...params);
     return [...cursor].map(rowToDocRecord);
   }
@@ -708,23 +724,12 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToWikiDocRecord);
   }
 
-  getRecentWikiDocs(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): WikiDocRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM wiki_docs WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM wiki_docs WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentWikiDocs(opts?: RecentWindowOpts): WikiDocRecord[] {
+    const { query, params } = this.recentWindowQuery(
+      "wiki_docs",
+      "updated_at",
+      opts,
+    );
     const cursor = this.sql.exec<WikiDocRow>(query, ...params);
     return [...cursor].map(rowToWikiDocRecord);
   }
@@ -794,23 +799,12 @@ export class IssueStore implements DurableObject {
     return [...cursor].map(rowToDiffRecord);
   }
 
-  getRecentDiffs(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): DiffRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM diffs WHERE repo = ? AND commit_date >= ? ORDER BY commit_date DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM diffs WHERE commit_date >= ? ORDER BY commit_date DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentDiffs(opts?: RecentWindowOpts): DiffRecord[] {
+    const { query, params } = this.recentWindowQuery(
+      "diffs",
+      "commit_date",
+      opts,
+    );
     const cursor = this.sql.exec<DiffRow>(query, ...params);
     return [...cursor].map(rowToDiffRecord);
   }
@@ -855,23 +849,12 @@ export class IssueStore implements DurableObject {
     );
   }
 
-  getRecentIssueComments(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): IssueCommentRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM issue_comments WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM issue_comments WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentIssueComments(opts?: RecentWindowOpts): IssueCommentRecord[] {
+    const { query, params } = this.recentWindowQuery(
+      "issue_comments",
+      "updated_at",
+      opts,
+    );
     const cursor = this.sql.exec<IssueCommentRow>(query, ...params);
     return [...cursor].map(rowToIssueCommentRecord);
   }
@@ -919,23 +902,12 @@ export class IssueStore implements DurableObject {
     );
   }
 
-  getRecentPRReviews(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): PRReviewRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM pr_reviews WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM pr_reviews WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentPRReviews(opts?: RecentWindowOpts): PRReviewRecord[] {
+    const { query, params } = this.recentWindowQuery(
+      "pr_reviews",
+      "updated_at",
+      opts,
+    );
     const cursor = this.sql.exec<PRReviewRow>(query, ...params);
     return [...cursor].map(rowToPRReviewRecord);
   }
@@ -986,23 +958,12 @@ export class IssueStore implements DurableObject {
     );
   }
 
-  getRecentPRReviewComments(
-    opts?: { since?: string; limit?: number; repo?: string },
-  ): PRReviewCommentRecord[] {
-    const limit = opts?.limit ?? 20;
-    const since = opts?.since ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let query: string;
-    let params: (string | number)[];
-
-    if (opts?.repo) {
-      query = `SELECT * FROM pr_review_comments WHERE repo = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [opts.repo, since, limit];
-    } else {
-      query = `SELECT * FROM pr_review_comments WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT ?`;
-      params = [since, limit];
-    }
-
+  getRecentPRReviewComments(opts?: RecentWindowOpts): PRReviewCommentRecord[] {
+    const { query, params } = this.recentWindowQuery(
+      "pr_review_comments",
+      "updated_at",
+      opts,
+    );
     const cursor = this.sql.exec<PRReviewCommentRow>(query, ...params);
     return [...cursor].map(rowToPRReviewCommentRecord);
   }
@@ -1129,6 +1090,20 @@ export class IssueStore implements DurableObject {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    /**
+     * Query-string form of the recency window shared by every `/recent*`
+     * endpoint: `since` / `until` / `limit` / `repo`.
+     */
+    const recentOpts = (): RecentWindowOpts => {
+      const limit = url.searchParams.get("limit");
+      return {
+        since: url.searchParams.get("since") ?? undefined,
+        until: url.searchParams.get("until") ?? undefined,
+        limit: limit ? parseInt(limit, 10) : undefined,
+        repo: url.searchParams.get("repo") ?? undefined,
+      };
+    };
+
     try {
       // POST /upsert — upsert a single issue record
       if (request.method === "POST" && path === "/upsert") {
@@ -1164,17 +1139,9 @@ export class IssueStore implements DurableObject {
         return Response.json(issues);
       }
 
-      // GET /recent?since=...&limit=...&repo=... — recent activity
+      // GET /recent?since=...&until=...&limit=...&repo=... — recent activity
       if (request.method === "GET" && path === "/recent") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentActivity({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentActivity(recentOpts()));
       }
 
       // POST /upsert-release — upsert a single release record
@@ -1223,17 +1190,9 @@ export class IssueStore implements DurableObject {
         return Response.json(releases);
       }
 
-      // GET /recent-releases?since=...&limit=...&repo=... — recent release activity
+      // GET /recent-releases?since=...&until=...&limit=...&repo=... — recent release activity
       if (request.method === "GET" && path === "/recent-releases") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentReleases({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentReleases(recentOpts()));
       }
 
       // POST /reset-hashes?repo=... — reset all hashes and watermarks for a repo to force re-embedding
@@ -1287,17 +1246,9 @@ export class IssueStore implements DurableObject {
         return Response.json(docs);
       }
 
-      // GET /recent-docs?since=...&limit=...&repo=... — recent doc activity
+      // GET /recent-docs?since=...&until=...&limit=...&repo=... — recent doc activity
       if (request.method === "GET" && path === "/recent-docs") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentDocs({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentDocs(recentOpts()));
       }
 
       // POST /upsert-wiki-doc — upsert a single wiki doc record
@@ -1327,17 +1278,9 @@ export class IssueStore implements DurableObject {
         return Response.json(wikiDocs);
       }
 
-      // GET /recent-wiki-docs?since=...&limit=...&repo=... — recent wiki doc activity
+      // GET /recent-wiki-docs?since=...&until=...&limit=...&repo=... — recent wiki doc activity
       if (request.method === "GET" && path === "/recent-wiki-docs") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentWikiDocs({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentWikiDocs(recentOpts()));
       }
 
       // DELETE /wiki-doc?repo=...&page=... — delete a wiki doc record
@@ -1396,17 +1339,9 @@ export class IssueStore implements DurableObject {
         return Response.json(diffs);
       }
 
-      // GET /recent-diffs?since=...&limit=...&repo=... — recent diff activity
+      // GET /recent-diffs?since=...&until=...&limit=...&repo=... — recent diff activity
       if (request.method === "GET" && path === "/recent-diffs") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentDiffs({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentDiffs(recentOpts()));
       }
 
       // ── Issue comment endpoints ───────────────────────────────
@@ -1441,17 +1376,9 @@ export class IssueStore implements DurableObject {
         return new Response("ok", { status: 200 });
       }
 
-      // GET /recent-comments?since=...&limit=...&repo=... — recent comments
+      // GET /recent-comments?since=...&until=...&limit=...&repo=... — recent comments
       if (request.method === "GET" && path === "/recent-comments") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentIssueComments({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentIssueComments(recentOpts()));
       }
 
       // ── PR review endpoints ───────────────────────────────────
@@ -1486,17 +1413,9 @@ export class IssueStore implements DurableObject {
         return new Response("ok", { status: 200 });
       }
 
-      // GET /recent-reviews?since=...&limit=...&repo=... — recent PR reviews
+      // GET /recent-reviews?since=...&until=...&limit=...&repo=... — recent PR reviews
       if (request.method === "GET" && path === "/recent-reviews") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentPRReviews({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentPRReviews(recentOpts()));
       }
 
       // ── PR review comment endpoints ───────────────────────────
@@ -1531,17 +1450,9 @@ export class IssueStore implements DurableObject {
         return new Response("ok", { status: 200 });
       }
 
-      // GET /recent-review-comments?since=...&limit=...&repo=... — recent review comments
+      // GET /recent-review-comments?since=...&until=...&limit=...&repo=... — recent review comments
       if (request.method === "GET" && path === "/recent-review-comments") {
-        const since = url.searchParams.get("since") ?? undefined;
-        const limit = url.searchParams.get("limit");
-        const repo = url.searchParams.get("repo") ?? undefined;
-        const items = this.getRecentPRReviewComments({
-          since,
-          limit: limit ? parseInt(limit, 10) : undefined,
-          repo,
-        });
-        return Response.json(items);
+        return Response.json(this.getRecentPRReviewComments(recentOpts()));
       }
 
       return new Response("not found", { status: 404 });
