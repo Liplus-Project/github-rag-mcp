@@ -108,12 +108,16 @@ export const TOOLS = [
           type: "string",
           description:
             "ISO 8601 timestamp (inclusive) — keep only results whose updated_at >= since. " +
-            "Pair with sort=\"updated_desc\" + empty query for an activity scan.",
+            "Pair with sort=\"updated_desc\" + empty query for an activity scan. " +
+            "Default in scan mode: 7 days back from until (or from now when until is omitted).",
         },
         until: {
           type: "string",
           description:
-            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until.",
+            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until. " +
+            "In scan mode the [since, until) window is applied inside the index, so any window " +
+            "holding rows returns rows however far back it sits; the response carries " +
+            "truncated: true when the window holds more than one page.",
         },
         include_content: {
           type: "boolean",

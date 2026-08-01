@@ -90,7 +90,7 @@ GitHub の issue / pull request / release / documentation / **GitHub Wiki page**
 `query` と `sort` の組み合わせで、以下の 3 モードを切り替えます。
 
 1. **ハイブリッド意味検索 (既定)** — dense BGE-M3 (Vectorize) + sparse BM25 (D1 FTS5) を Reciprocal Rank Fusion (RRF, k=60) で合成し、`@cf/baai/bge-reranker-base` cross-encoder で rerank。自然言語 `query` を渡します。
-2. **時系列 activity scan** — `query` を省略または空にし、`sort` を `"updated_desc"` / `"created_desc"` に設定します。`since` / `until` を併用して窓を絞れます。従来の `list_recent_activity` を置き換えます。
+2. **時系列 activity scan** — `query` を省略または空にし、`sort` を `"updated_desc"` / `"created_desc"` に設定します。`since` / `until` を併用して窓を絞れます。従来の `list_recent_activity` を置き換えます。`[since, until)` の窓は索引側で適用されるので、窓に行があればどれだけ古い窓でも返ります。窓が 1 ページに収まらないときは応答に `truncated: true` が付き、「該当なし」と「読み切れていない」を区別できます。返った最古の行の時刻を次の `until` にして遡ってください。
 3. **doc 本文取得** — `include_content: true` を指定すると、`type="doc"` 結果の本文が GitHub contents API 経由で取得され、該当行の `content` フィールドに inline されます。API fan-out を抑えるため先頭の数件に絞られます。従来の `get_doc_content` を置き換えます。
 
 structured filter (`repo` / `state` / `labels` / `milestone` / `assignee` / `type`) はすべてのモードで有効です。
@@ -112,7 +112,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `fusion` | `"rrf"` / `"dense_only"` / `"sparse_only"` | fusion 戦略 (既定 `rrf`)。scan モードでは無視。 |
 | `rerank` | boolean | cross-encoder rerank (既定 `true`)。scan モードでは無視。 |
 | `sort` | `"relevance"` / `"updated_desc"` / `"created_desc"` | 並び順。query ありの既定は `relevance`、query なしの既定は `updated_desc`。時系列指定は ranker score を上書きします。 |
-| `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。 |
+| `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。scan モードの既定は `until` の 7 日前 (`until` 省略時は現在の 7 日前)。 |
 | `until` | ISO 8601 文字列 | `updated_at < until` の結果だけを残します。 |
 | `include_content` | boolean | 上位 doc 結果に本文を inline する (既定 `false`)。 |
 | `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで末尾に追加。既定 `false` は標準ハイブリッド検索とバイト単位で同一（グラフ未参照）。 |

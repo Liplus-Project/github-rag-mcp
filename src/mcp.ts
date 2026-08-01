@@ -20,12 +20,6 @@ import type {
   Env,
   IssueRecord,
   ReleaseRecord,
-  DocRecord,
-  WikiDocRecord,
-  DiffRecord,
-  IssueCommentRecord,
-  PRReviewRecord,
-  PRReviewCommentRecord,
   VectorMetadata,
 } from "./types.js";
 import type { GitHubUserProps } from "./oauth.js";
@@ -38,6 +32,7 @@ import {
 } from "./fts.js";
 import { rerankCandidates, rerankWasApplied, RERANK_MAX_CANDIDATES } from "./rerank.js";
 import { queryNeighbors, getDocsByVectorIds } from "./graph.js";
+import { runScan, type ScanRow } from "./scan.js";
 
 /** User context passed via props from OAuth layer */
 interface McpProps extends Record<string, unknown> {
@@ -219,13 +214,17 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           .optional()
           .describe(
             "ISO 8601 timestamp (inclusive) — keep only results whose updated_at >= since. " +
-              "Pair with sort=\"updated_desc\" + empty query for an activity scan.",
+              "Pair with sort=\"updated_desc\" + empty query for an activity scan. " +
+              "Default in scan mode: 7 days back from until (or from now when until is omitted).",
           ),
         until: z
           .string()
           .optional()
           .describe(
-            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until.",
+            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until. " +
+              "In scan mode the [since, until) window is applied inside the index, so any window " +
+              "holding rows returns rows however far back it sits; the response carries " +
+              "truncated: true when the window holds more than one page.",
           ),
         include_content: z
           .boolean()
@@ -287,381 +286,25 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         const includeContent = include_content ?? false;
 
         // ── Scan mode (empty query): pull time-ordered metadata ─────
-        // Skip Vectorize / FTS5 / reranker entirely and aggregate from
-        // IssueStore's recency endpoints. This path subsumes the former
-        // list_recent_activity tool; `since` acts as the window floor and
-        // `until` as the upper bound (applied after the store returns).
+        // Aggregated in `scan.ts`; both window bounds are pushed down to the
+        // store so the per-endpoint row cap applies inside [since, until).
         if (isScanMode) {
-          const store = this.getStore();
-          const effectiveSince =
-            since ??
-            new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-          // Overfetch so the `until` filter + type filter can drop rows
-          // without starving the final page. Bounded at 100 (the store's
-          // per-endpoint cap).
-          const storeLimit = Math.min(requestedTopK * 5, 100);
-
-          const buildParams = (): URLSearchParams => {
-            const p = new URLSearchParams();
-            p.set("since", effectiveSince);
-            p.set("limit", String(storeLimit));
-            if (repo) p.set("repo", repo);
-            return p;
-          };
-
-          type ScanRow = {
-            type:
-              | "issue"
-              | "pull_request"
-              | "release"
-              | "doc"
-              | "wiki_doc"
-              | "diff"
-              | "issue_comment"
-              | "pr_review"
-              | "pr_review_comment";
-            repo: string;
-            number: number;
-            title: string;
-            state: string;
-            labels: string[];
-            milestone: string;
-            assignees: string[];
-            url: string;
-            updated_at: string;
-            created_at: string;
-            tag_name?: string;
-            prerelease?: boolean;
-            doc_path?: string;
-            /** Wiki page slug (wiki_doc rows only) */
-            wiki_path?: string;
-            /** Wiki page extension (wiki_doc rows only, e.g. "md", "org") */
-            wiki_extension?: string;
-            commit_sha?: string;
-            file_path?: string;
-            file_status?: string;
-            commit_date?: string;
-            commit_author?: string;
-            /** Comment / review author login */
-            author?: string;
-            /** GitHub comment / review id (comment rows only) */
-            comment_id?: number;
-            /** GitHub review id (pr_review rows only) */
-            review_id?: number;
-            /** Inline review-comment line number (pr_review_comment rows only) */
-            line?: number;
-          };
-          const rows: ScanRow[] = [];
-
-          const wantType = (t: ScanRow["type"]): boolean =>
-            !type || type === "all" || type === t;
-
-          // Issues / PRs
-          if (wantType("issue") || wantType("pull_request")) {
-            try {
-              const res = await store.fetch(
-                new Request(`http://store/recent?${buildParams().toString()}`),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as IssueRecord[];
-                for (const r of records) {
-                  if (!wantType(r.type)) continue;
-                  rows.push({
-                    type: r.type,
-                    repo: r.repo,
-                    number: r.number,
-                    title: r.title,
-                    state: r.state,
-                    labels: r.labels,
-                    milestone: r.milestone,
-                    assignees: r.assignees,
-                    url: `https://github.com/${r.repo}/issues/${r.number}`,
-                    updated_at: r.updatedAt,
-                    created_at: r.createdAt,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical; continue with other sources.
-            }
-          }
-
-          // Releases
-          if (wantType("release")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-releases?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as ReleaseRecord[];
-                for (const r of records) {
-                  rows.push({
-                    type: "release",
-                    repo: r.repo,
-                    number: 0,
-                    title: r.name || r.tagName,
-                    state: "published",
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${r.repo}/releases/tag/${r.tagName}`,
-                    updated_at: r.publishedAt,
-                    created_at: r.createdAt,
-                    tag_name: r.tagName,
-                    prerelease: r.prerelease,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // Docs
-          if (wantType("doc")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-docs?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as DocRecord[];
-                for (const d of records) {
-                  rows.push({
-                    type: "doc",
-                    repo: d.repo,
-                    number: 0,
-                    title: d.path,
-                    state: "active",
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${d.repo}/blob/main/${d.path}`,
-                    updated_at: d.updatedAt,
-                    created_at: d.updatedAt,
-                    doc_path: d.path,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // Wiki docs
-          if (wantType("wiki_doc")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-wiki-docs?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as WikiDocRecord[];
-                for (const w of records) {
-                  rows.push({
-                    type: "wiki_doc",
-                    repo: w.repo,
-                    number: 0,
-                    title: w.pageName,
-                    state: "active",
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${w.repo}/wiki/${encodeURIComponent(w.pageName)}`,
-                    updated_at: w.updatedAt,
-                    created_at: w.updatedAt,
-                    wiki_path: w.pageName,
-                    wiki_extension: w.extension,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // Diffs
-          if (wantType("diff")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-diffs?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as DiffRecord[];
-                for (const diff of records) {
-                  const shortSha = diff.commitSha.slice(0, 7);
-                  rows.push({
-                    type: "diff",
-                    repo: diff.repo,
-                    number: 0,
-                    title: `${shortSha} ${diff.filePath}`,
-                    state: "active",
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${diff.repo}/commit/${diff.commitSha}`,
-                    updated_at: diff.commitDate,
-                    created_at: diff.indexedAt,
-                    commit_sha: diff.commitSha,
-                    file_path: diff.filePath,
-                    file_status: diff.fileStatus,
-                    commit_date: diff.commitDate,
-                    commit_author: diff.commitAuthor,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // Issue / PR top-level comments
-          if (wantType("issue_comment")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-comments?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as IssueCommentRecord[];
-                for (const c of records) {
-                  rows.push({
-                    type: "issue_comment",
-                    repo: c.repo,
-                    number: c.number,
-                    title: `${c.author} on #${c.number}`,
-                    state: "active",
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${c.repo}/issues/${c.number}#issuecomment-${c.commentId}`,
-                    updated_at: c.updatedAt,
-                    created_at: c.createdAt,
-                    author: c.author,
-                    comment_id: c.commentId,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // PR reviews (approve / request_changes / comment body)
-          if (wantType("pr_review")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-reviews?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as PRReviewRecord[];
-                for (const r of records) {
-                  rows.push({
-                    type: "pr_review",
-                    repo: r.repo,
-                    number: r.number,
-                    title: `${r.author} ${r.state} on #${r.number}`,
-                    state: r.state,
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${r.repo}/pull/${r.number}#pullrequestreview-${r.reviewId}`,
-                    updated_at: r.updatedAt,
-                    created_at: r.submittedAt,
-                    author: r.author,
-                    review_id: r.reviewId,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // PR inline review comments
-          if (wantType("pr_review_comment")) {
-            try {
-              const res = await store.fetch(
-                new Request(
-                  `http://store/recent-review-comments?${buildParams().toString()}`,
-                ),
-              );
-              if (res.ok) {
-                const records = (await res.json()) as PRReviewCommentRecord[];
-                for (const rc of records) {
-                  rows.push({
-                    type: "pr_review_comment",
-                    repo: rc.repo,
-                    number: rc.number,
-                    title: `${rc.author} @ ${rc.filePath}:${rc.line}`,
-                    state: "active",
-                    labels: [],
-                    milestone: "",
-                    assignees: [],
-                    url: `https://github.com/${rc.repo}/pull/${rc.number}#discussion_r${rc.commentId}`,
-                    updated_at: rc.updatedAt,
-                    created_at: rc.createdAt,
-                    author: rc.author,
-                    comment_id: rc.commentId,
-                    file_path: rc.filePath,
-                    line: rc.line,
-                    commit_sha: rc.commitId,
-                  });
-                }
-              }
-            } catch {
-              // Non-critical.
-            }
-          }
-
-          // State / milestone / assignee / labels post-filters (best-effort
-          // over the metadata we have; assignees / labels are already arrays).
-          let filteredRows = rows;
-          if (state && state !== "all") {
-            filteredRows = filteredRows.filter((r) => r.state === state);
-          }
-          if (milestone) {
-            filteredRows = filteredRows.filter((r) => r.milestone === milestone);
-          }
-          if (assignee) {
-            filteredRows = filteredRows.filter((r) =>
-              r.assignees.includes(assignee),
-            );
-          }
-          if (labels && labels.length > 0) {
-            filteredRows = filteredRows.filter((r) =>
-              labels.every((l) => r.labels.includes(l)),
-            );
-          }
-          if (until) {
-            filteredRows = filteredRows.filter((r) => r.updated_at < until);
-          }
-
-          // Time sort. "created_desc" sorts by created_at; "updated_desc"
-          // (default for scan mode) sorts by updated_at. "relevance" has no
-          // meaning in scan mode and falls back to updated_desc.
-          const sortKey: "updated_at" | "created_at" =
-            effectiveSort === "created_desc" ? "created_at" : "updated_at";
-          filteredRows.sort((a, b) => {
-            const av = (a[sortKey] as string) ?? "";
-            const bv = (b[sortKey] as string) ?? "";
-            return bv.localeCompare(av);
+          const scan = await runScan(this.getStore(), {
+            repo,
+            state,
+            labels,
+            milestone,
+            assignee,
+            type,
+            topK: requestedTopK,
+            sort: effectiveSort,
+            since,
+            until,
           });
-
-          const pageRows = filteredRows.slice(0, requestedTopK);
 
           // Optional doc content inlining (scan mode).
           type ScanResultRow = ScanRow & { content?: string };
-          const items: ScanResultRow[] = pageRows;
+          const items: ScanResultRow[] = scan.rows;
           if (includeContent) {
             await this.inlineDocContent(items, repo);
           }
@@ -675,8 +318,9 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
                     count: items.length,
                     mode: "scan",
                     sort: effectiveSort,
-                    since: effectiveSince,
+                    since: scan.since,
                     until: until ?? null,
+                    truncated: scan.truncated,
                     results: items,
                   },
                   null,

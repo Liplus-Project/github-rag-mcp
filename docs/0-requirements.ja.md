@@ -281,6 +281,8 @@ Durable Object + SQLite は次の structured record を保持する。
 - `list_recent_activity`
 - semantic search hit の enrichment
 
+**recency window.** `/recent*` 系 endpoint は、各 surface 自身の timestamp 列（`updated_at` / `published_at` / `commit_date`）に対する半開区間 `[since, until)` を新しい順・最大 `limit` 件で読む。両端とも SQL の条件である。`until` を返り値側で後置フィルタすると古い窓に到達できない——cap が先に最新側を取り、フィルタがそれを全部落とすため、数千行ある窓でも 0 件に見える（issue #194）。endpoint あたりの cap は subrequest / D1 読み取り予算の境界として維持するが、これは「窓を置き換える」ものではなく「窓の中を打ち切る」ものになった。
+
 ### 8. Graph Index（opt-in, D1 `doc_edges`）
 
 判断知（Decision Structure = wiki の kebab エントリ）の関係を索引化する additive なグラフ層。dense（Vectorize）/ sparse（FTS5）に並ぶ第3の surface だが、**既定では retrieval から読まれない**。
@@ -386,12 +388,17 @@ Parameters:
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
+- `since` / `until` optional — 半開区間 `[since, until)` の時間窓
 
 Returns:
 
 - repository、type、state、labels、milestone、assignees、URL、RRF fused score を含む ranked match
 - 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`、`rerank_score`（rerank 無効時または fallback 時は null）
 - top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`
+
+**scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` は store 側へ push down されるので、窓に行があれば、その窓がどれだけ古くても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。
+
+scan mode は top-level に `truncated` を追加する。窓が応答に載せた以上の行を持つとき true になる（endpoint が cap 一杯まで返した、または merge 後の件数が `top_k` を超えた）。これが「該当なし」と「読み切れていない」を呼び出し側に区別させる: 返った最古の行の時刻を次の `until` にして遡ればよい。両者を区別できない欠損調査ツールは、存在しない欠損を報告し実在する取り込みを見落とす——#178 の再検証で 1 日に 2 度踏んだ誤りがこれである。
 
 ### `get_issue_context`
 
