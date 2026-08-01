@@ -84,12 +84,15 @@ Responsibilities:
 - downstream agent がそのまま使える形式で state を返す
 
 スキーマの source of truth は Worker 側の tool 定義。client proxy
-(`mcp-server/server/index.js`) は `tools/list` を Worker へ転送せず、`search`
+(`mcp-server/server/tools.js`) は `tools/list` を Worker へ転送せず、`search`
 params の静的ミラーから応答する（起動時を auth/network なしに保つため）。ミラーは
 手動保守ゆえ、Worker に param を足して proxy を忘れると、MCP クライアントが
 `additionalProperties: false` で黙って落とし Worker に届かない（gh#157）。
 `scripts/check-schema-drift.mjs` を CI で実行し、proxy の `search` スキーマが Worker
 からズレたら build を失敗させる。両者は同期せずに出荷できない。
+比較する軸は 2 つ、param 名と enum param の値。名前だけの比較では proxy の `type`
+enum から `wiki_doc` が抜けたまま気付けず、Worker は受け付けるのにクライアント側で
+値が弾かれていた（gh#181）。
 
 ### 2. Webhook Receiver
 
