@@ -278,7 +278,7 @@ Response:
 
 ```json
 { "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
-  "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5,
+  "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5, "orphansWithheld": 0,
   "startCursor": "", "nextCursor": "current-architecture-as-concession",
   "lapAnchor": "", "wrapped": false, "enumerated": true, "done": false }
 ```
@@ -290,6 +290,7 @@ Operational notes:
 - `lapAnchor` is the slug the current lap started after (`""` = the head of the enumeration). The lap runs from the page after the anchor around to the anchor itself, so `lapAnchor` plus `nextCursor` shows how far the lap has come
 - `enumerated: false` means the `/wiki/_pages` scrape failed — nothing was indexed and, deliberately, nothing was reaped; retry rather than treating it as an empty wiki
 - `orphansDeferred` counts pages still to be reaped past the per-run cap; keep calling until it reaches 0
+- `orphansWithheld` counts reap candidates whose content still served (or whose existence probe could not conclude), so the delete was withheld. Non-zero means the `_pages` scrape came back **short of the live wiki** — the pages themselves are intact and were protected, but the enumeration is what to investigate; the worker log names each withheld page (issue #187)
 - verify coverage by comparing `search_docs` rows (`type = 'wiki_doc'`) against the page list at `https://github.com/{repo}/wiki/_pages`
 
 ## Troubleshooting

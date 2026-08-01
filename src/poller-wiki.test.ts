@@ -558,6 +558,105 @@ describe("poller: pollWiki orphan reap", () => {
     expect(summary.orphansDeferred).toBe(4);
   });
 
+  it("withholds the reap for a page the short enumeration dropped", async () => {
+    // The partial-enumeration failure (issue #187): `_pages` came back missing
+    // `live-page`, but the page is still there. A set-level diff cannot see the
+    // difference between that and a real deletion, so the guard addresses the
+    // page itself — its content still serves, so the delete is withheld.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h", "live-page": "still here" },
+    };
+    const store = makeWikiStore([
+      {
+        repo: REPO,
+        pageName: "live-page",
+        extension: "md",
+        contentHash: "h",
+        updatedAt: "2026-05-01T00:00:00Z",
+      },
+    ]);
+    const { env, vectorDeletes } = makeWikiEnv(["current", "live-page"]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.removed).toBe(0);
+    expect(summary.orphansWithheld).toBe(1);
+    expect(vectorDeletes).toEqual([]);
+    expect(deleteFtsRowMock).not.toHaveBeenCalled();
+    expect(deleteEdgesForVectorMock).not.toHaveBeenCalled();
+    expect(store.deletes).toEqual([]);
+    expect(store.records.has("live-page")).toBe(true);
+  });
+
+  it("reaps the genuinely deleted page in the same run it withholds a live one", async () => {
+    // The guard must not degrade into "stop reaping when anything looks off":
+    // the verdict is per page, so a real deletion still drains while a live
+    // page in the same candidate set is spared.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h", "live-page": "still here" },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv(["current", "live-page", "really-deleted"]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.removed).toBe(1);
+    expect(summary.orphansWithheld).toBe(1);
+    expect(store.deletes).toEqual(["really-deleted"]);
+  });
+
+  it("withholds the reap when the existence probe cannot conclude", async () => {
+    // A 5xx is not evidence of deletion. Withholding costs one deferred run;
+    // deleting on it costs a live page.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const { env, vectorDeletes } = makeWikiEnv(["current", "unreachable"]);
+    stubWiki(wiki);
+
+    const inner = globalThis.fetch as unknown as (input: string | URL) => Promise<Response>;
+    vi.stubGlobal("fetch", async (input: string | URL) => {
+      const url = String(input);
+      if (url.startsWith(`${RAW_PREFIX}unreachable.`)) {
+        return new Response("upstream error", { status: 503 });
+      }
+      return inner(input);
+    });
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.removed).toBe(0);
+    expect(summary.orphansWithheld).toBe(1);
+    expect(vectorDeletes).toEqual([]);
+    expect(store.deletes).toEqual([]);
+  });
+
+  it("keeps the probe off the walk's fetch budget and bounds its cost", async () => {
+    // The guard's ceiling is delete budget x extension count, spent outside the
+    // walk. `fetches` must still report only what the walk itself issued.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const orphans = Array.from({ length: 9 }, (_, i) => `orphan-${i}`);
+    const { env } = makeWikiEnv(["current", ...orphans]);
+    const { rawRequests } = stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 4 });
+
+    expect(summary.fetches).toBeLessThanOrEqual(4);
+    expect(summary.removed).toBe(5);
+    // 4 walk attempts + 5 reaped candidates probed across `md` and `markdown`.
+    expect(rawRequests.length).toBeLessThanOrEqual(4 + 5 * 2);
+  });
+
   it("reaps nothing when the page index could not be read", async () => {
     // An unreadable `_pages` yields an empty slug set. Treating that as "every
     // page was deleted" would wipe the repo's entire wiki index.
