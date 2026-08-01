@@ -1026,6 +1026,14 @@ const MAX_WIKI_FETCHES_PER_REPO_PER_RUN = 20;
  *  set only shrinks, so the drain is monotonic (issue #184). */
 const MAX_WIKI_DELETIONS_PER_REPO_PER_RUN = 5;
 
+/** Fraction of the indexed page set which, once the reap candidate set reaches
+ *  it, is logged as an anomaly. Warn-only on purpose: a ratio cannot separate a
+ *  legitimate bulk cleanup (wiki tidy-up, mass rename) from an enumeration that
+ *  came back short, so it must not block a delete. The per-page existence probe
+ *  owns that verdict; this only leaves the shape of the run in the logs for a
+ *  human to read afterwards (issue #187). */
+const WIKI_ORPHAN_RATIO_WARN = 0.5;
+
 /** Watermark namespace holding the wiki poller's resume cursor for one repo.
  *  The cursor is the last page slug probed; the next run resumes at the first
  *  slug ordering after it, wrapping at the end. Stored in the watermark row's
@@ -1392,6 +1400,74 @@ async function fetchWikiContent(
   return { result: null, attempts };
 }
 
+/** Verdict of the pre-reap existence probe. `gone` is the only one that
+ *  authorizes a delete. */
+type WikiReapProbe = "alive" | "gone" | "inconclusive";
+
+/**
+ * Ask the wiki directly whether an orphan candidate's content still serves.
+ *
+ * The reap set is `store ∪ search_docs` minus the `_pages` enumeration, so an
+ * enumeration that silently returns *fewer* pages than the wiki holds pushes
+ * live pages into it. Issue #185 guarded the total failure (`ok: false`), but a
+ * partial one is indistinguishable from a real deletion at the set level: the
+ * check has to leave the set and address the page itself (issue #187).
+ *
+ * Only an observed 404 on every candidate extension returns `gone`. A 200
+ * (`alive`) and anything else — a network error, or a status that is neither
+ * 200 nor 404 (`inconclusive`) — both withhold the delete, because neither
+ * proves the page is absent. Withholding never deadlocks: a page that really
+ * was deleted keeps answering 404 and is reaped on this run or the next.
+ *
+ * The rendered URL `github.com/{repo}/wiki/{slug}` is deliberately *not* the
+ * oracle here. Measured 2026-08-01: a nonexistent page 302-redirects to the
+ * wiki root and lands on 200, so it can never report absence — every candidate
+ * would read as alive and nothing would ever be reaped. `raw.githubusercontent`
+ * is the same surface the walk already fetches from, with 200/404 semantics the
+ * poller relies on elsewhere.
+ *
+ * Residual gap, unchanged from before this guard: the probe can only address
+ * the page by its slug, and a page whose file is stored under a title-derived
+ * name (`E.-Li-language` → `E.-Li+language.md`, issue #184) answers 404 to the
+ * slug. The enumeration's link text is the only carrier of that name, and an
+ * orphan is by definition absent from the enumeration. Such a page reaps as it
+ * would have without the guard.
+ *
+ * Cost: at most `WIKI_EXTENSIONS.length` subrequests per candidate, and one
+ * when the stored extension serves the verdict on the first attempt. The reap
+ * loop is already capped at `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`, so the
+ * guard's per-run ceiling is that product. It is separate from the walk's fetch
+ * budget and never consumes it.
+ */
+async function probeWikiPageAlive(
+  repo: string,
+  pageName: string,
+  preferredExtension?: string,
+): Promise<WikiReapProbe> {
+  const exts = preferredExtension
+    ? [preferredExtension, ...WIKI_EXTENSIONS.filter((e) => e !== preferredExtension)]
+    : Array.from(WIKI_EXTENSIONS);
+
+  let inconclusive = false;
+  for (const ext of exts) {
+    const url = `https://raw.githubusercontent.com/wiki/${repo}/${encodeURIComponent(pageName)}.${ext}`;
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "github-rag-mcp/0.1.0" },
+      });
+      if (resp.ok) return "alive";
+      if (resp.status !== 404) inconclusive = true;
+    } catch (err) {
+      console.error(
+        `Reap probe ${ext} failed for wiki ${repo}/${pageName}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      inconclusive = true;
+    }
+  }
+  return inconclusive ? "inconclusive" : "gone";
+}
+
 /** Budget / cursor overrides for one wiki poll pass. Defaults are the cron
  *  values; the admin backfill endpoint supplies its own so an operator can
  *  drain a wiki without waiting out the hourly cadence. */
@@ -1424,6 +1500,10 @@ export interface WikiPollSummary {
   removed: number;
   /** Orphans detected but deferred past the delete budget. */
   orphansDeferred: number;
+  /** Reap candidates whose content still served (or whose probe could not
+   *  complete), so the delete was withheld. Non-zero means the `_pages`
+   *  enumeration came back short of the live wiki (issue #187). */
+  orphansWithheld: number;
   startCursor: string;
   nextCursor: string;
   /** Slug the current lap started after ("" = the lap began at the head).
@@ -1460,7 +1540,9 @@ export interface WikiPollSummary {
  * Pages absent from the current `_pages` index but still present in the store
  * *or in the D1 FTS index* are reaped from Vectorize, D1 FTS5, the graph edge
  * table, and the structured store. Reaping is skipped entirely when the
- * enumeration failed, and capped per run.
+ * enumeration failed, capped per run, and — because a *partially* enumerated
+ * index is indistinguishable from a real deletion at the set level — withheld
+ * for any candidate whose raw content still serves (issue #187).
  */
 export async function pollWiki(
   repo: string,
@@ -1483,6 +1565,7 @@ export async function pollWiki(
     failed: 0,
     removed: 0,
     orphansDeferred: 0,
+    orphansWithheld: 0,
     startCursor,
     nextCursor: startCursor,
     lapAnchor: startCursor,
@@ -1535,6 +1618,7 @@ export async function pollWiki(
   let skipped = 0;
   let failed = 0;
   let removed = 0;
+  let orphansWithheld = 0;
   let fetches = 0;
   let visited = 0;
   let nextCursor = startCursor;
@@ -1649,7 +1733,43 @@ export async function pollWiki(
     );
   }
 
+  // Warn-only anomaly signal. A reap set this large against what is indexed is
+  // either a legitimate bulk cleanup or an enumeration that came back short;
+  // the ratio cannot tell them apart, so it decides nothing and only makes the
+  // shape of the run readable in the logs (issue #187).
+  const indexedTotal = new Set([
+    ...existing.map((w) => w.pageName),
+    ...indexed.pages,
+  ]).size;
+  if (indexedTotal > 0 && orphans.length / indexedTotal >= WIKI_ORPHAN_RATIO_WARN) {
+    console.warn(
+      `${repo} wiki: reap set is ${orphans.length}/${indexedTotal} of the indexed pages ` +
+        `(>= ${WIKI_ORPHAN_RATIO_WARN}). Legitimate bulk deletion and a short ` +
+        `\`_pages\` enumeration both look like this; each candidate is probed before deletion.`,
+    );
+  }
+
   for (const pageName of orphans.slice(0, deleteBudget)) {
+    // Existence check before the delete. The candidate is only "orphaned" as
+    // far as the enumeration knows, and the enumeration is exactly what may
+    // have come back short (issue #187).
+    const probe = await probeWikiPageAlive(
+      repo,
+      pageName,
+      existingMap.get(pageName)?.extension,
+    );
+    if (probe !== "gone") {
+      orphansWithheld++;
+      console.warn(
+        probe === "alive"
+          ? `${repo} wiki: ${pageName} is absent from \`_pages\` but its content still ` +
+              `serves — the enumeration is short of the live wiki. Reap withheld.`
+          : `${repo} wiki: could not confirm ${pageName} is deleted (probe inconclusive). ` +
+              `Reap withheld this run.`,
+      );
+      continue;
+    }
+
     const wvid = await wikiDocVectorId(repo, pageName);
     // Each surface is torn down independently: a Vectorize failure must not
     // strand the D1 rows, which are the ones users actually retrieve.
@@ -1696,6 +1816,7 @@ export async function pollWiki(
   console.log(
     `${repo} wiki: ${pages.length} pages, ${visited} visited, ${fetches}/${fetchBudget} fetches, ` +
       `${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${removed} deleted, ` +
+      `${orphansWithheld} reap withheld, ` +
       `cursor ${startCursor || "<head>"} -> ${nextCursor || "<head>"}, ` +
       `lap ${lapAnchor || "<head>"}${wrapped ? " complete" : ` -> ${lapFinalSlug}`}`,
   );
@@ -1710,6 +1831,7 @@ export async function pollWiki(
     failed,
     removed,
     orphansDeferred,
+    orphansWithheld,
     startCursor,
     nextCursor,
     lapAnchor,
