@@ -354,9 +354,13 @@ async function handleReleaseEvent(
  *
  * Only processes pushes to the default branch.
  * Filters commit file lists for `docs/**\/*.md` and `README.md`.
- * Added/modified files are fetched and embedded; removed files are deleted.
+ * Added/modified files are fetched and embedded; removed files are deleted from
+ * Vectorize, D1 FTS5, and the structured store — each surface independently, so
+ * one failing surface cannot strand the others (issue #206).
+ *
+ * Exported for tests; production callers reach it through `handleWebhook`.
  */
-async function handlePushEvent(
+export async function handlePushEvent(
   payload: Record<string, unknown>,
   env: Env,
   storeStub: DurableObjectStub,
@@ -486,32 +490,59 @@ async function handlePushEvent(
   }
 
   // Delete removed doc files from Vectorize, D1 FTS5, and the structured store.
+  // Each surface is torn down independently, matching the cron reap in
+  // `pollDocs`. Previously one outer try wrapped the whole item: a Vectorize
+  // failure jumped straight to the catch, so the store row (and the FTS5 row
+  // with it) stayed behind and the deleted doc kept surfacing in search — the
+  // D1 rows are the ones users actually retrieve (issue #206).
+  //
+  // No graph-edge teardown here, same as the cron reap: both endpoints of every
+  // `doc_edges` row are wiki vector IDs (`indexWikiEdges` is the only writer,
+  // and the dst ID it computes is a `wikiDocVectorId` too), so a doc vector ID
+  // is never an edge endpoint. Add the teardown if that invariant changes
+  // (issue #203).
+  //
+  // No per-run cap either: a push payload names its own removals, so this loop
+  // is bounded by the event rather than by the accumulated backlog the cron reap
+  // walks (issue #206).
   let deleted = 0;
   for (const path of removed) {
-    try {
-      const dvid = await docVectorId(repo, path);
-      await env.VECTORIZE.deleteByIds([dvid]);
+    const dvid = await docVectorId(repo, path);
+    let allSurfacesTornDown = true;
+
+    for (const [surface, run] of [
+      ["vector", () => env.VECTORIZE.deleteByIds([dvid])],
+      ["FTS5 row", () => deleteFtsRow(env.DB_FTS, dvid)],
+      [
+        "store record",
+        () =>
+          storeStub.fetch(
+            new Request(
+              `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`,
+              { method: "DELETE" },
+            ),
+          ),
+      ],
+    ] as Array<[string, () => Promise<unknown>]>) {
       try {
-        await deleteFtsRow(env.DB_FTS, dvid);
-      } catch (ftsErr) {
+        await run();
+      } catch (err) {
+        allSurfacesTornDown = false;
         console.error(
-          `Webhook: failed to delete FTS5 row for doc ${repo}/${path}:`,
-          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+          `Webhook: failed to delete ${surface} for doc ${repo}/${path}:`,
+          err instanceof Error ? err.message : String(err),
         );
       }
-      await storeStub.fetch(
-        new Request(
-          `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}`,
-          { method: "DELETE" },
-        ),
-      );
-      deleted++;
-    } catch (err) {
-      console.error(
-        `Webhook: failed to delete doc vector ${repo}/${path}:`,
-        err instanceof Error ? err.message : String(err),
-      );
     }
+
+    // `deleted` counts docs whose three surfaces all came down, so
+    // `removed - deleted` is the partial-teardown count. The cron reap's
+    // counter instead counts *attempts*, because there it is a budget counter
+    // that also gates the ETag hold. There is no budget here, so counting
+    // attempts would only restate `removed` — already in the same response —
+    // and would hide partial failures from the delivery-log body, the cheapest
+    // place an operator sees them.
+    if (allSurfacesTornDown) deleted++;
   }
 
   return jsonResponse(202, {

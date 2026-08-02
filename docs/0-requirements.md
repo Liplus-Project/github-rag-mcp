@@ -115,6 +115,8 @@ Responsibilities:
 
 `push` is used to detect changes in all `.md` files across the repository. The same `push` events also drive per-commit diff indexing: each commit produces N vectors (one per file with a textual patch), with embedding input being `commit message + file path + patch`. This surface makes deleted files and non-`.md` extensions searchable as judgment history.
 
+**Doc deletions on the `push` path** tear down the same three surfaces the cron reap does — Vectorize, D1 FTS5, and the structured store — each independently, so one failing surface cannot strand the others (issue #206). Graph edges are again not torn down, for the same reason as the cron reap: a doc vector ID is never a `doc_edges` endpoint. Unlike the cron reap there is no per-run deletion cap: a push payload names its own removals, so the loop is bounded by the event rather than by an accumulated backlog. The `deleted` count in the response body counts docs whose three surfaces all came down, so `removed - deleted` is the partial-teardown count visible in the delivery log; the cron reap's counter instead counts attempts, because there it doubles as the budget counter that gates the ETag hold.
+
 ### 3. Cron Poller
 
 The cron poller is the fallback path.

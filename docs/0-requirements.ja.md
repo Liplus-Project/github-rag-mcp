@@ -114,6 +114,8 @@ Responsibilities:
 
 `push` はリポジトリ内の全 `.md` ファイルの変更検出に使う。同じ `push` event から per-commit diff も index する（1 commit × N files → N vector、各 vector は commit message + file path + patch を embedding input にする）。これにより削除済みファイルや非 `.md` 拡張子の判断履歴も semantic 検索可能になる。
 
+**`push` 経路の doc 削除**は cron reap と同じ 3 面を teardown する — Vectorize / D1 FTS5 / structured store — それぞれ独立に実行するので、1 面の失敗が他を取り残すことはない（issue #206）。graph edge を teardown しないのも cron reap と同じ理由で、doc vector ID が `doc_edges` の端点になりえないため。cron reap と違い per-run の削除枠は持たない。push payload が自分の削除件数を持っており、蓄積した backlog ではなく event で上限が決まるからである。レスポンスの `deleted` は 3 面すべてが落ちた doc を数えるので、`removed - deleted` が部分失敗の件数として delivery log から読める。cron reap 側の counter は代わりに**試行数**を数えるが、あちらではその counter が ETag hold を制御する budget counter を兼ねているためである。
+
 ### 3. Cron Poller
 
 cron poller は fallback path である。
