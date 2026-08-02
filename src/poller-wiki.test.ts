@@ -481,6 +481,85 @@ describe("poller: pollWiki lap completion", () => {
   });
 });
 
+describe("poller: pollWiki budget below one page's candidate count", () => {
+  /** 3 listed pages whose title differs from the slug, so each costs a miss on
+   *  the title-derived name before the slug-named file resolves. Plus the
+   *  unlisted `Home`, which resolves on its first candidate. Slug order is
+   *  `Home, p1, p2, p3` (comparison is case-insensitive). */
+  const twoCandidateWiki = (): FakeWiki => ({
+    listed: [1, 2, 3].map((i) => ({ slug: `p${i}`, title: `T p${i}` })),
+    files: { p1: "b1", p2: "b2", p3: "b3", Home: "h" },
+  });
+
+  it("advances the cursor when the budget is smaller than the first page's candidate list", async () => {
+    // The stall: the walk breaks *before* `visited++` when the budget runs out
+    // mid-probe (issue #185), so a budget under one page's candidate count left
+    // the cursor untouched and every later call re-probed the same page
+    // (issue #192). Only the first page of a pass may overspend, and only far
+    // enough to observe its own candidate list.
+    const wiki = twoCandidateWiki();
+    const store = makeWikiStore([], "Home");
+    const { env } = makeWikiEnv();
+
+    const cursors: string[] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      stubWiki(wiki);
+      const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 1 });
+      vi.unstubAllGlobals();
+
+      expect(summary.startCursor).not.toBe(summary.nextCursor);
+      expect(summary.visited).toBe(1);
+      // Two candidates observed: the title-derived miss and the slug-named hit.
+      expect(summary.fetches).toBe(2);
+      cursors.push(summary.nextCursor);
+    }
+
+    expect(cursors).toEqual(["p1", "p2", "p3"]);
+    expect(embeddedSlugs()).toEqual(["p1", "p2", "p3"]);
+  });
+
+  it("records the failure once the whole candidate list has 404ed", async () => {
+    // Exempting the first page from the budget must not resurrect the failure
+    // #185 removed: the miss is only counted because every candidate was
+    // actually observed, which is also what lets the cursor move past it.
+    const wiki: FakeWiki = {
+      listed: [{ slug: "p1", title: "T p1" }],
+      files: { Home: "h" },
+    };
+    const store = makeWikiStore([], "Home");
+    const { env } = makeWikiEnv();
+    const { rawRequests } = stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 1 });
+
+    // 2 filename candidates x 2 extensions, all 404.
+    expect(rawRequests.length).toBe(4);
+    expect(summary.fetches).toBe(4);
+    expect(summary.failed).toBe(1);
+    expect(summary.nextCursor).toBe("p1");
+  });
+
+  it("holds the budget for every page after the first", async () => {
+    // The exemption is scoped to `visited === 0`. Once a page has been visited,
+    // a probe that the budget truncates still breaks before `visited++`, so no
+    // unobserved failure is recorded and the pass cannot overspend.
+    const wiki = twoCandidateWiki();
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv();
+    const { rawRequests } = stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub, { fetchBudget: 2 });
+
+    // `Home` resolves on its single candidate; `p1` gets one attempt and is
+    // abandoned mid-list.
+    expect(summary.fetches).toBe(2);
+    expect(rawRequests.length).toBe(2);
+    expect(summary.visited).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.nextCursor).toBe("Home");
+  });
+});
+
 describe("poller: pollWiki orphan reap", () => {
   it("reaps a page that survives in the index but not in the store", async () => {
     // The production failure: the store row was gone, so the store-only diff

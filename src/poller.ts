@@ -1507,7 +1507,10 @@ export interface WikiPollSummary {
   repo: string;
   /** Pages in the current enumeration (0 when the index could not be read). */
   pages: number;
-  /** Raw-content fetch attempts issued. Never exceeds the fetch budget. */
+  /** Raw-content fetch attempts issued. Bounded by the fetch budget, except
+   *  that the pass's first page always finishes its candidate list — so a
+   *  budget below that page's candidate count is exceeded by at most
+   *  `candidates - 1`, once per pass (issue #192). */
   fetches: number;
   /** Pages whose content was examined this pass. */
   visited: number;
@@ -1549,6 +1552,11 @@ export interface WikiPollSummary {
  * where this one stopped and every page is reached within
  * ceil(pages / budget) runs. Restarting at the head each run is what pinned
  * coverage to the first ~20 pages forever (issue #184, cause A).
+ *
+ * The budget yields to the candidate list for the pass's *first* page only:
+ * breaking mid-probe leaves the cursor unmoved, so a budget smaller than one
+ * page's candidate count would otherwise re-probe that same page forever
+ * (issue #192). Every later page keeps the strict budget check.
  *
  * A second watermark — the lap anchor — records where the current sweep began,
  * so `wrapped` reports "the cursor came back around to the anchor" rather than
@@ -1681,18 +1689,27 @@ export async function pollWiki(
     }
 
     const prior = existingMap.get(page.slug);
+    // While nothing has been visited yet, the candidate list outranks the
+    // budget: a pass that breaks before its first page leaves the cursor where
+    // it found it, so a budget below one page's candidate count stalls the walk
+    // forever instead of self-healing on the next pass (issue #192). Letting the
+    // first page finish its probes costs at most `candidates - 1` extra
+    // subrequests, once per pass, against an invocation budget of 1000.
     const { result: fetched, attempts } = await fetchWikiContent(
       repo,
       page,
       prior?.extension,
-      fetchBudget - fetches,
+      visited === 0 ? Number.POSITIVE_INFINITY : fetchBudget - fetches,
     );
     fetches += attempts;
 
-    if (!fetched && fetches >= fetchBudget) {
+    if (!fetched && visited > 0 && fetches >= fetchBudget) {
       // The budget ran out inside this page's candidate list, so "no content"
       // is inconclusive. Leave the cursor before the page and retry next run
       // rather than recording a failure we did not actually observe.
+      // Not reachable while `visited === 0`: that probe was allowed to run to
+      // the end of the candidate list, so its miss *was* observed and falls
+      // through to the failure path below, advancing the cursor.
       console.warn(
         `Wiki fetch batch limit reached for ${repo} (${fetchBudget}) while probing ` +
           `${page.slug}; the cursor resumes at this page next run.`,
