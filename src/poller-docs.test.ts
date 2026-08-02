@@ -2,19 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Env, DocRecord } from "./types.js";
 
 // `pollDocs` fans out to the embed pipeline (Contents API + Workers AI +
-// Vectorize + D1 + Store DO) and to the two D1 teardown helpers. What is under
+// Vectorize + D1 + Store DO) and to the D1 FTS teardown helper. What is under
 // test here is the *reap* — the delete fan-out and its per-run budget — so the
-// embed entry point and both teardown helpers are replaced with controllable
+// embed entry point and the teardown helper are replaced with controllable
 // fakes and only the Git Trees API call reaches the stubbed global fetch.
 // `docVectorId` and the rest of `./pipeline.js` stay real.
-const {
-  processAndUpsertDocMock,
-  deleteFtsRowMock,
-  deleteEdgesForVectorMock,
-} = vi.hoisted(() => ({
+const { processAndUpsertDocMock, deleteFtsRowMock } = vi.hoisted(() => ({
   processAndUpsertDocMock: vi.fn(),
   deleteFtsRowMock: vi.fn(),
-  deleteEdgesForVectorMock: vi.fn(),
 }));
 
 vi.mock("./pipeline.js", async (importOriginal) => {
@@ -25,11 +20,6 @@ vi.mock("./pipeline.js", async (importOriginal) => {
 vi.mock("./fts.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./fts.js")>();
   return { ...actual, deleteFtsRow: deleteFtsRowMock };
-});
-
-vi.mock("./graph.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./graph.js")>();
-  return { ...actual, deleteEdgesForVector: deleteEdgesForVectorMock };
 });
 
 const { pollDocs } = await import("./poller.js");
@@ -157,7 +147,6 @@ beforeEach(() => {
   processAndUpsertDocMock.mockReset();
   processAndUpsertDocMock.mockResolvedValue({ embedded: true, failed: false });
   deleteFtsRowMock.mockReset().mockResolvedValue(undefined);
-  deleteEdgesForVectorMock.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -165,10 +154,9 @@ afterEach(() => {
 });
 
 describe("poller: pollDocs delete fan-out", () => {
-  it("tears down graph edges alongside the vector, the FTS5 row and the store record", async () => {
-    // One doc still in the store, gone from the tree. Pre-fix the reap hit three
-    // surfaces and left the edge table untouched, so a doc vector ID could stay
-    // an edge endpoint with nothing to remove it (issue #203).
+  it("reaps only the doc absent from the tree, on all three surfaces", async () => {
+    // One doc still in the store, gone from the tree. All three surfaces are
+    // keyed to the same `docVectorId`, and the surviving doc is left alone.
     stubTree(["docs/keep.md"]);
     const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")]);
     const { env, vectorDeletes } = makeDocEnv();
@@ -181,13 +169,14 @@ describe("poller: pollDocs delete fan-out", () => {
     expect(vectorDeletes).toEqual([goneId]);
     expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
     expect(deleteFtsRowMock.mock.calls[0][1]).toBe(goneId);
-    expect(deleteEdgesForVectorMock).toHaveBeenCalledTimes(1);
-    expect(deleteEdgesForVectorMock.mock.calls[0][1]).toBe(goneId);
+    expect(store.records.has("docs/keep.md")).toBe(true);
   });
 
   it("keeps tearing down the later surfaces when Vectorize fails", async () => {
-    // The D1 rows are the ones users actually retrieve; a dense-side failure
-    // must not strand them. Same independence the wiki reap already has.
+    // The surfaces are torn down independently. Pre-fix one outer try wrapped
+    // the whole item, so a Vectorize failure skipped the store DELETE and left
+    // the row behind — while the FTS5 row, guarded by its own inner try, was
+    // already gone. The D1 rows are the ones users actually retrieve.
     stubTree(["docs/keep.md"]);
     const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")]);
     const { env } = makeDocEnv();
@@ -198,7 +187,18 @@ describe("poller: pollDocs delete fan-out", () => {
     await pollDocs(REPO, env, store.stub);
 
     expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
-    expect(deleteEdgesForVectorMock).toHaveBeenCalledTimes(1);
+    expect(store.deletes).toEqual(["docs/gone.md"]);
+  });
+
+  it("keeps tearing down the store record when the FTS5 delete fails", async () => {
+    stubTree(["docs/keep.md"]);
+    const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")]);
+    const { env, vectorDeletes } = makeDocEnv();
+    deleteFtsRowMock.mockRejectedValue(new Error("d1 down"));
+
+    await pollDocs(REPO, env, store.stub);
+
+    expect(vectorDeletes).toHaveLength(1);
     expect(store.deletes).toEqual(["docs/gone.md"]);
   });
 
@@ -212,14 +212,13 @@ describe("poller: pollDocs delete fan-out", () => {
     expect(store.deletes).toEqual([]);
     expect(vectorDeletes).toEqual([]);
     expect(deleteFtsRowMock).not.toHaveBeenCalled();
-    expect(deleteEdgesForVectorMock).not.toHaveBeenCalled();
   });
 });
 
 describe("poller: pollDocs delete budget", () => {
   it("caps deletions per run and drains the rest on later runs", async () => {
     // The case that raised the issue: a single PR removed 66 `.md` files, all of
-    // which land on the next run. Unbounded, that is ~4 subrequests x 66 in one
+    // which land on the next run. Unbounded, that is 3 subrequests x 66 in one
     // LIGHT_CRON invocation shared with pollRepo and pollReleases (issue #203).
     const deletedPaths = Array.from(
       { length: DELETE_BUDGET * 2 + 1 },

@@ -107,17 +107,17 @@ const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 10;
  *  unchanged in the store until the doc is successfully upserted). */
 const MAX_DOC_FETCHES_PER_REPO_PER_RUN = 10;
 
-/** Maximum docs reaped (Vectorize + FTS5 + graph edges + store row) per repo per
- *  cron run. Mirrors `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`: each reap fans out
- *  to 4 subrequests, so an unbounded loop over a mass deletion could exhaust the
+/** Maximum docs reaped (Vectorize + FTS5 + store row) per repo per cron run.
+ *  Mirrors `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`: each reap fans out to 3
+ *  subrequests, so an unbounded loop over a mass deletion could exhaust the
  *  LIGHT_CRON invocation budget on its own and starve every repo behind it —
  *  docs share that invocation with `pollRepo` and `pollReleases` (issue #203).
  *  A real case: github-webhook-mcp deleted 66 `.md` files in one PR, all of
  *  which land on the next single run.
  *
- *  Numeric design: 5 deletes x 4 subrequests x 5 repos = 100 subrequests for the
+ *  Numeric design: 5 deletes x 3 subrequests x 5 repos = 75 subrequests for the
  *  reap, on top of the ~250 the docs fetch cap already allows. Together with
- *  pollRepo and pollReleases the LIGHT_CRON worst case stays around 850, inside
+ *  pollRepo and pollReleases the LIGHT_CRON worst case stays around 825, inside
  *  the 1000 ceiling.
  *
  *  Remaining deletions are reaped next run: a reaped doc's store row is gone, so
@@ -810,9 +810,9 @@ async function fetchFileContent(
  * Uses Git Trees API for change detection and Contents API for fetching changed files.
  *
  * Files present in the store but absent from the current tree are reaped from
- * Vectorize, D1 FTS5, the graph edge table, and the structured store — capped
- * per repo per run, with the tree ETag held back while a backlog remains so the
- * next run can still see it (issue #203).
+ * Vectorize, D1 FTS5, and the structured store — each surface independently,
+ * capped per repo per run, with the tree ETag held back while a backlog remains
+ * so the next run can still see it (issue #203).
  *
  * Exported for tests; production callers reach it through `handleScheduled`.
  */
@@ -944,16 +944,12 @@ export async function pollDocs(
     }
   }
 
-  // Handle deleted files: remove from Vectorize, D1 FTS5, the graph edge table,
-  // and the structured store — the same four surfaces the wiki reap tears down.
-  //
-  // The edge teardown is a symmetry guard, not a backlog drain. Today every
-  // `doc_edges` endpoint is a wiki vector ID on both sides (`indexWikiEdges` is
-  // the only writer and `knownWikiSlugs` filters `type = 'wiki_doc'`), so a doc
-  // vector ID matches no row and the DELETE is a no-op. What it buys is that
-  // "delete a vector" means the same thing on both paths: if repository docs
-  // ever become edge endpoints, the reap already tears them down instead of
-  // leaking rows that retrieval silently skips as dangling (issue #203).
+  // Handle deleted files: remove from Vectorize, D1 FTS5, and the structured
+  // store. No graph-edge teardown here, unlike the wiki reap: both endpoints of
+  // every `doc_edges` row are wiki vector IDs (`indexWikiEdges` is the only
+  // writer, and the dst ID it computes is a `wikiDocVectorId` too), so a doc
+  // vector ID is never an edge endpoint. Add the teardown here if that
+  // invariant changes (issue #203).
   let removedDocs = 0;
   let deleteBudgetExhausted = false;
   for (const doc of deletedDocs) {
@@ -973,7 +969,6 @@ export async function pollDocs(
     for (const [surface, run] of [
       ["vector", () => env.VECTORIZE.deleteByIds([dvid])],
       ["FTS5 row", () => deleteFtsRow(env.DB_FTS, dvid)],
-      ["graph edges", () => deleteEdgesForVector(env.DB_FTS, dvid)],
       [
         "store record",
         () =>
