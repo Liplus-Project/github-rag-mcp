@@ -149,7 +149,7 @@ commit diff poller は 2-phase 構成:
 
 トレードオフは liveness で、毎回失敗し続ける commit はその phase の watermark を止める。run log に境界 commit の SHA が出るほか、`POST /admin/diff-watermark`（installation guide 参照）で watermark を手動で移動できる。旧版 poller が取りこぼした期間を再走査させる経路も同じ endpoint。
 
-docs poller は `If-None-Match` 付きの条件付きリクエストで repository tree を読み、保存済みの doc record と差分を取る。blob SHA が動いた entry は re-embed し、store にあって tree に無い entry は削除する。**削除は 3 面を teardown する** — Vectorize / D1 FTS5 / structured store — それぞれ独立に実行するので、Vectorize の失敗が実際に retrieval される D1 行を取り残すことはない。wiki 側の 4 面に対してここが 3 面なのは、doc vector ID が `doc_edges` の端点になりえないため。`indexWikiEdges` が唯一の writer であり、src 側も算出される dst 側も wiki vector ID になる。この不変条件が変わったら、ここに edge の teardown を足すこと（issue #203）。
+docs poller は `If-None-Match` 付きの条件付きリクエストで repository tree を読み、保存済みの doc record と差分を取る。blob SHA が動いた entry は re-embed し、store にあって tree に無い entry は削除する。**削除は 3 面を teardown する** — Vectorize / D1 FTS5 / structured store — それぞれ独立に実行するので、Vectorize の失敗が実際に retrieval される D1 行を取り残すことはない。wiki 側の 4 面に対してここが 3 面なのは、doc vector ID が `doc_edges` の端点になりえないため。`indexWikiEdges` が唯一の writer であり、src 側も算出される dst 側も wiki vector ID になる。この不変条件が変わったら、ここに edge の teardown を足すこと（issue #203）。なお削除が届くのは現行の vector ID 世代だけで、移行前世代は構造上到達できず、別経路で掃除する（Vector Store の「移行前世代」を参照）。
 
 **削除の枠.** 削除は 1 repo 1 run あたり `MAX_DOC_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap する。wiki の削除と同じ guard で、1 件あたり 3 subrequest かかるため、大量削除に対して上限なく回すと light cron の invocation 予算を単独で食い潰し、後ろに並ぶ repo を飢えさせうる — 1 つの PR が `.md` を 66 件削除すれば、その全件が 1 run に集中する。削除済み doc の store 行は消えるので残りの集合は縮む一方であり、drain は単調。したがってこの surface には per-run cap が 2 本あり、**どちらが効いても tree ETag は据え置く**: fetch 枠は未処理の変更 doc を残し（issue #149）、削除枠は未削除の doc を残す（issue #203）。どちらの場合も ETag を進めてしまうと次 run が 304 で返り、残りを見ないまま終わる。`lastPolledAt` は進めるので run 自体は観測できる。
 
@@ -219,6 +219,10 @@ Metadata index（10/10 枠使用）:
 - 将来の pre-filter 用に格納: label_0, label_1, label_2, label_3, assignee_0, assignee_1
 
 Vectorize の metadata filter はフィールド間で AND のみサポートし、OR は非対応。`label_0 = "bug" OR label_1 = "bug"` のようなクエリは表現できない。そのため labels / assignees は overfetch + post-filter で recall を改善している。Vectorize が OR または `$in`-across-fields をサポートした時点で、個別フィールドは即座に pre-filter 化可能。
+
+**vector ID 体系.** ID は `{prefix}:{base64url(sha256(NUL 区切りで連結した parts))}` — surface ごとの短い prefix と 43 文字の digest で、Vectorize の 64 byte 上限に対して 45〜46 byte。hash 化したのは、それ以前の平文形式（`{repo}#doc-{path}`）が長い path で上限を超えたため。2026 年 4 月に置き換えた（`215e2e2` / PR #84）。
+
+**移行前世代.** 平文形式で書かれたベクトルは、どの削除経路からも到達できない — いずれも現行 ID を計算するため。index に残り続け、移行前の内容のまま dense 検索に出て、同じファイルの現行行から候補枠を 1 つ奪う。ファイルを削除しても現行世代の行が reap されるだけである（issue #204）。`POST /admin/purge-legacy-vectors?repo=owner/repo`（installation guide を参照）が repository ごとにこれを畳む。旧 ID は path から決定的に定まるので、孤児集合を repository tree から組み直し — すでに削除済みで worker 側からは列挙できない path は明示 `paths` で補い — 上限付きのバッチで削除する。再 embed は伴わない。削除呼び出しに渡すのは組み直した旧 ID だけであり、64 byte 上限を超える ID は送らずに落とす（upsert 時点で弾かれており、対応するベクトルが存在しないため）。残差は増えずに閉じている（旧形式の書き込みは移行時点で止まっている）ので、この purge は repository ごとに一回性であって定期実行ではない。
 
 vector store は semantic retrieval layer であり、canonical state store ではない。
 

@@ -730,7 +730,10 @@ async function fetchRepoTree(
   token: string,
   ref: string,
   etag?: string,
-): Promise<{ tree: GitTreeEntry[]; treeSha: string; etag?: string } | typeof NOT_MODIFIED> {
+): Promise<
+  | { tree: GitTreeEntry[]; treeSha: string; truncated: boolean; etag?: string }
+  | typeof NOT_MODIFIED
+> {
   const url = `https://api.github.com/repos/${repo}/git/trees/${ref}?recursive=1`;
 
   const headers: Record<string, string> = {
@@ -760,7 +763,40 @@ async function fetchRepoTree(
 
   const data = (await resp.json()) as GitTreeResponse;
   const responseEtag = resp.headers.get("etag") ?? undefined;
-  return { tree: data.tree, treeSha: data.sha, etag: responseEtag };
+  return {
+    tree: data.tree,
+    treeSha: data.sha,
+    truncated: data.truncated === true,
+    etag: responseEtag,
+  };
+}
+
+/**
+ * List every `.md` blob path in the repository's current tree.
+ *
+ * Same filter `pollDocs` indexes from, but unconditional: no ETag is sent, so the
+ * call always returns a full listing instead of the 304 short-circuit the poller
+ * relies on. `truncated` is passed through because the Trees API caps its
+ * response — a truncated listing means the caller saw only part of the repo.
+ *
+ * Exported for the legacy-vector purge (issue #204), which needs exactly the path
+ * set the doc indexer works from.
+ */
+export async function listRepoDocPaths(
+  repo: string,
+  token: string,
+): Promise<{ paths: string[]; truncated: boolean }> {
+  const result = await fetchRepoTree(repo, token, "HEAD");
+  if (result === NOT_MODIFIED) {
+    // Unreachable: 304 requires an If-None-Match, which this call never sends.
+    throw new Error(`Trees API answered 304 without a conditional request for ${repo}`);
+  }
+  return {
+    paths: result.tree
+      .filter((entry) => entry.type === "blob" && isDocFile(entry.path))
+      .map((entry) => entry.path),
+    truncated: result.truncated,
+  };
 }
 
 /**

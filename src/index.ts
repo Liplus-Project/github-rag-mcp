@@ -17,6 +17,7 @@
  *   POST /admin/diff-watermark?repo=owner/repo&since=ISO8601[&phase=forward|backfill] -- Rewind the commit-diff poller watermark (requires GITHUB_TOKEN header)
  *   POST /admin/backfill-fts-segments[?repo=owner/repo][&cursor=N][&limit=N] -- Re-segment one batch of natural-language FTS rows (requires GITHUB_TOKEN header)
  *   POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG] -- Walk one batch of a repo's wiki without waiting for the :45 cron (requires GITHUB_TOKEN header)
+ *   POST /admin/purge-legacy-vectors?repo=owner/repo[&dry_run=true][&surface=doc][&limit=N][&cursor=N] -- Delete pre-migration doc vectors the reap cannot name (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
@@ -40,6 +41,11 @@ import { handleWebhook } from "./webhook.js";
 import { RagMcpAgentV2 } from "./mcp.js";
 import { indexWikiEdges } from "./graph.js";
 import { backfillNatSegments } from "./fts.js";
+import {
+  DEFAULT_PURGE_LIMIT,
+  MAX_PURGE_LIMIT,
+  purgeLegacyDocVectors,
+} from "./purge-legacy.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
@@ -347,6 +353,97 @@ const innerHandler: ExportedHandler<Env> = {
         JSON.stringify({ repo, phase, watermarkKey: key, lastPolledAt }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
+    }
+
+    // -- Admin: purge pre-migration doc vectors that no delete path can name --
+    // POST /admin/purge-legacy-vectors?repo=owner/repo[&dry_run=true][&surface=doc][&limit=N][&cursor=N]
+    // Body (optional): {"paths": ["path/one.md", ...]} — files already gone from
+    // the tree, whose legacy IDs nothing left in the worker can enumerate.
+    // Rebuilds the pre-`215e2e2` ID (`{repo}#doc-{path}`) for each candidate path
+    // and deletes it. No re-embedding: this is a cleanup, not a rebuild
+    // (issue #204).
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/purge-legacy-vectors") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      // doc is the only surface with confirmed legacy orphans. The migration
+      // changed every surface's ID scheme, but `updated_at` means something
+      // different per type, so the other surfaces could not be judged from the
+      // observed data — they stay out of scope until measured (issue #204).
+      const surface = url.searchParams.get("surface") ?? "doc";
+      if (surface !== "doc") {
+        return new Response(
+          "surface must be doc — the only surface with confirmed legacy orphans",
+          { status: 400 },
+        );
+      }
+
+      const dryRun = url.searchParams.get("dry_run") === "true";
+
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? DEFAULT_PURGE_LIMIT : Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PURGE_LIMIT) {
+        return new Response(`limit must be an integer in 1..${MAX_PURGE_LIMIT}`, {
+          status: 400,
+        });
+      }
+
+      const rawCursor = url.searchParams.get("cursor");
+      const cursor = rawCursor === null ? 0 : Number(rawCursor);
+      if (!Number.isInteger(cursor) || cursor < 0) {
+        return new Response("cursor must be a non-negative integer", { status: 400 });
+      }
+
+      let paths: string[] = [];
+      const rawBody = await request.text();
+      if (rawBody.trim() !== "") {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawBody);
+        } catch {
+          return new Response("body must be JSON when present", { status: 400 });
+        }
+        const candidate = (parsed as { paths?: unknown }).paths;
+        if (candidate !== undefined) {
+          if (
+            !Array.isArray(candidate) ||
+            candidate.some((p) => typeof p !== "string" || p === "")
+          ) {
+            return new Response("paths must be an array of non-empty strings", {
+              status: 400,
+            });
+          }
+          paths = candidate as string[];
+        }
+      }
+
+      try {
+        const summary = await purgeLegacyDocVectors(repo, env, {
+          dryRun,
+          limit,
+          cursor,
+          paths,
+        });
+        return new Response(JSON.stringify(summary), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
     }
 
     // -- MCP endpoint (OAuth-protected, ctx.props set by OAuthProvider) --
