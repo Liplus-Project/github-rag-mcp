@@ -107,6 +107,26 @@ const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 10;
  *  unchanged in the store until the doc is successfully upserted). */
 const MAX_DOC_FETCHES_PER_REPO_PER_RUN = 10;
 
+/** Maximum docs reaped (Vectorize + FTS5 + store row) per repo per cron run.
+ *  Mirrors `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`: each reap fans out to 3
+ *  subrequests, so an unbounded loop over a mass deletion could exhaust the
+ *  LIGHT_CRON invocation budget on its own and starve every repo behind it —
+ *  docs share that invocation with `pollRepo` and `pollReleases` (issue #203).
+ *  A real case: github-webhook-mcp deleted 66 `.md` files in one PR, all of
+ *  which land on the next single run.
+ *
+ *  Numeric design: 5 deletes x 3 subrequests x 5 repos = 75 subrequests for the
+ *  reap, on top of the ~250 the docs fetch cap already allows. Together with
+ *  pollRepo and pollReleases the LIGHT_CRON worst case stays around 825, inside
+ *  the 1000 ceiling.
+ *
+ *  Remaining deletions are reaped next run: a reaped doc's store row is gone, so
+ *  the leftover set only shrinks and the drain is monotonic. The tree ETag is
+ *  deliberately *not* advanced while deletions are outstanding — the next run
+ *  would otherwise short-circuit on 304 and never see them (same hold as the
+ *  fetch cap, see the watermark write below). */
+const MAX_DOC_DELETIONS_PER_REPO_PER_RUN = 5;
+
 /** Maximum number of release records the releases poller upserts per repo per
  *  cron run. The GitHub Releases endpoint returns all recent releases in a
  *  single API call, so the GH-side fetch cost is fixed at 1, but each release
@@ -788,8 +808,15 @@ async function fetchFileContent(
 /**
  * Poll a single repository for documentation file updates.
  * Uses Git Trees API for change detection and Contents API for fetching changed files.
+ *
+ * Files present in the store but absent from the current tree are reaped from
+ * Vectorize, D1 FTS5, and the structured store — each surface independently,
+ * capped per repo per run, with the tree ETag held back while a backlog remains
+ * so the next run can still see it (issue #203).
+ *
+ * Exported for tests; production callers reach it through `handleScheduled`.
  */
-async function pollDocs(
+export async function pollDocs(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
@@ -917,61 +944,77 @@ async function pollDocs(
     }
   }
 
-  // Handle deleted files: remove from Vectorize, D1 FTS5, and the structured store.
+  // Handle deleted files: remove from Vectorize, D1 FTS5, and the structured
+  // store. No graph-edge teardown here, unlike the wiki reap: both endpoints of
+  // every `doc_edges` row are wiki vector IDs (`indexWikiEdges` is the only
+  // writer, and the dst ID it computes is a `wikiDocVectorId` too), so a doc
+  // vector ID is never an edge endpoint. Add the teardown here if that
+  // invariant changes (issue #203).
+  let removedDocs = 0;
+  let deleteBudgetExhausted = false;
   for (const doc of deletedDocs) {
-    try {
-      const dvid = await docVectorId(repo, doc.path);
-      await env.VECTORIZE.deleteByIds([dvid]);
+    if (removedDocs >= MAX_DOC_DELETIONS_PER_REPO_PER_RUN) {
+      deleteBudgetExhausted = true;
+      console.warn(
+        `pollDocs: delete budget reached for ${repo} ` +
+          `(${MAX_DOC_DELETIONS_PER_REPO_PER_RUN} deletions). ` +
+          `${deletedDocs.length - removedDocs} remaining docs will be reaped next cron run.`,
+      );
+      break;
+    }
+
+    const dvid = await docVectorId(repo, doc.path);
+    // Each surface is torn down independently: a Vectorize failure must not
+    // strand the D1 rows, which are the ones users actually retrieve.
+    for (const [surface, run] of [
+      ["vector", () => env.VECTORIZE.deleteByIds([dvid])],
+      ["FTS5 row", () => deleteFtsRow(env.DB_FTS, dvid)],
+      [
+        "store record",
+        () =>
+          storeStub.fetch(
+            new Request(
+              `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(doc.path)}`,
+              { method: "DELETE" },
+            ),
+          ),
+      ],
+    ] as Array<[string, () => Promise<unknown>]>) {
       try {
-        await deleteFtsRow(env.DB_FTS, dvid);
-      } catch (ftsErr) {
+        await run();
+      } catch (err) {
         console.error(
-          `Failed to delete FTS5 row for doc ${repo}/${doc.path}:`,
-          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+          `Failed to delete ${surface} for doc ${repo}/${doc.path}:`,
+          err instanceof Error ? err.message : String(err),
         );
       }
-      await storeStub.fetch(
-        new Request(
-          `http://store/doc?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(doc.path)}`,
-          { method: "DELETE" },
-        ),
-      );
-    } catch (err) {
-      console.error(
-        `Failed to delete doc vector ${repo}/${doc.path}:`,
-        err instanceof Error ? err.message : String(err),
-      );
     }
+    removedDocs++;
   }
 
   // Update watermark with ETag — but only when the run completed without
-  // hitting the per-run fetch cap. If we did hit the cap, leftover changed
-  // docs still need to be processed; persisting the new ETag would cause the
-  // next cron to short-circuit on 304 and never see them. Skipping the ETag
-  // update forces a fresh tree fetch next run so `changedEntries` repopulates
-  // (issue #149).
-  if (!fetchBudgetExhausted) {
-    await storeStub.fetch(
-      new Request("http://store/watermark", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: watermarkKey, lastPolledAt: now, etag: responseEtag }),
+  // hitting a per-run cap. If either cap was hit, leftover work remains:
+  // changed docs still to embed (issue #149) or deleted docs still to reap
+  // (issue #203). Persisting the new ETag would cause the next cron to
+  // short-circuit on 304 and never see either. Holding the prior ETag forces a
+  // fresh tree fetch next run so `changedEntries` and `deletedDocs` both
+  // repopulate. lastPolledAt is still bumped so observability sees the run.
+  const holdEtag = fetchBudgetExhausted || deleteBudgetExhausted;
+  await storeStub.fetch(
+    new Request("http://store/watermark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: watermarkKey,
+        lastPolledAt: now,
+        etag: holdEtag ? storedEtag : responseEtag,
       }),
-    );
-  } else {
-    // Still bump lastPolledAt so observability can see the run happened, but
-    // keep the prior ETag so the next cron re-fetches the tree.
-    await storeStub.fetch(
-      new Request("http://store/watermark", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: watermarkKey, lastPolledAt: now, etag: storedEtag }),
-      }),
-    );
-  }
+    }),
+  );
 
   console.log(
-    `${repo} docs: ${docEntries.length} found, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${deletedDocs.length} deleted, ` +
+    `${repo} docs: ${docEntries.length} found, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ` +
+      `${removedDocs}/${deletedDocs.length} deleted, ` +
       `fetches_issued=${fetchesIssued}/${MAX_DOC_FETCHES_PER_REPO_PER_RUN}`,
   );
 }
