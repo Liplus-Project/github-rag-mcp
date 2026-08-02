@@ -657,6 +657,62 @@ describe("poller: pollWiki orphan reap", () => {
     expect(rawRequests.length).toBeLessThanOrEqual(4 + 5 * 2);
   });
 
+  it("reaps a deleted page sitting behind a run of withheld candidates", async () => {
+    // Issue #197: a withheld candidate used to spend a delete slot. The orphan
+    // list is stably sorted, so five withheld heads filled the whole budget on
+    // every run and the page that really was deleted, ordering after them, was
+    // never even looked at until the enumeration recovered.
+    const live = Array.from({ length: 5 }, (_, i) => `a-live-${i}`);
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: {
+        current: "c",
+        Home: "h",
+        // Present in the wiki but missing from `_pages`: the short enumeration.
+        ...Object.fromEntries(live.map((p) => [p, "still here"])),
+      },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv(["current", ...live, "z-really-deleted"]);
+    stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    expect(summary.orphansWithheld).toBe(5);
+    expect(summary.removed).toBe(1);
+    expect(store.deletes).toEqual(["z-really-deleted"]);
+    // All six candidates were reached, so nothing was deferred.
+    expect(summary.orphansDeferred).toBe(0);
+  });
+
+  it("caps the probes per run and defers the candidates it never reached", async () => {
+    // The probe budget is what keeps "walk the whole orphan list" bounded: 20
+    // live candidates, none of them deletable, must not cost 20 probes.
+    const live = Array.from({ length: 20 }, (_, i) => `live-${String(i).padStart(2, "0")}`);
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: {
+        current: "c",
+        Home: "h",
+        ...Object.fromEntries(live.map((p) => [p, "still here"])),
+      },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv(["current", ...live]);
+    const { requestedNames } = stubWiki(wiki);
+
+    const summary = await pollWiki(REPO, env, store.stub);
+
+    // MAX_WIKI_REAP_PROBES_PER_REPO_PER_RUN = 15. Each live candidate answers
+    // 200 on its first extension, so one probe is one raw request here.
+    const probed = requestedNames().filter((n) => n.startsWith("live-"));
+    expect(probed).toHaveLength(15);
+    expect(summary.orphansWithheld).toBe(15);
+    expect(summary.removed).toBe(0);
+    // Deferred = candidates this run never reached, not "past the delete cap".
+    expect(summary.orphansDeferred).toBe(5);
+  });
+
   it("reaps nothing when the page index could not be read", async () => {
     // An unreadable `_pages` yields an empty slug set. Treating that as "every
     // page was deleted" would wipe the repo's entire wiki index.

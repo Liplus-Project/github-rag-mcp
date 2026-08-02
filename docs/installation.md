@@ -289,7 +289,7 @@ Operational notes:
 - `done` (= `wrapped`) means the cursor completed a lap of the enumeration, not that one call covered every page. A wiki with more `pages` than `limit` cannot finish in one call; the lap closes after `ceil(pages / limit)` calls — 4 for a 77-page wiki at the default `limit=20` (issue #188)
 - `lapAnchor` is the slug the current lap started after (`""` = the head of the enumeration). The lap runs from the page after the anchor around to the anchor itself, so `lapAnchor` plus `nextCursor` shows how far the lap has come
 - `enumerated: false` means the `/wiki/_pages` scrape failed — nothing was indexed and, deliberately, nothing was reaped; retry rather than treating it as an empty wiki
-- `orphansDeferred` counts pages still to be reaped past the per-run cap; keep calling until it reaches 0
+- `orphansDeferred` counts reap candidates the call never reached, because it hit either the per-run delete cap or the per-run probe cap; keep calling until it reaches 0. A candidate that was reached and withheld is reported by `orphansWithheld`, not here — the two budgets are separate so a withheld candidate cannot spend a delete slot and stall the real deletions ordering behind it (issue #197)
 - `orphansWithheld` counts reap candidates whose content still served (or whose existence probe could not conclude), so the delete was withheld. Non-zero means the `_pages` scrape came back **short of the live wiki** — the pages themselves are intact and were protected, but the enumeration is what to investigate; the worker log names each withheld page (issue #187)
 - verify coverage by comparing `search_docs` rows (`type = 'wiki_doc'`) against the page list at `https://github.com/{repo}/wiki/_pages`
 
