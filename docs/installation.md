@@ -294,6 +294,56 @@ Operational notes:
 - `orphansWithheld` counts reap candidates whose content still served (or whose existence probe could not conclude), so the delete was withheld. Non-zero means the `_pages` scrape came back **short of the live wiki** — the pages themselves are intact and were protected, but the enumeration is what to investigate; the worker log names each withheld page (issue #187)
 - verify coverage by comparing `search_docs` rows (`type = 'wiki_doc'`) against the page list at `https://github.com/{repo}/wiki/_pages`
 
+## 13. Purge pre-migration doc vectors (one-off)
+
+Vector IDs moved from plain text (`{repo}#doc-{path}`) to a hashed scheme in April 2026. Every delete path computes the *current* ID, so doc vectors written before that migration can never be named again: they stay in Vectorize, answer dense queries with their pre-migration content, and take a candidate slot away from the live row for the same file. Deleting the file does not help — the reap removes the current-generation row and leaves the legacy one (issue #204).
+
+Run this once per repository indexed before the migration. It deletes only IDs it rebuilds in the legacy format, and re-embeds nothing.
+
+Admin endpoint:
+
+```text
+POST /admin/purge-legacy-vectors?repo=owner/repo
+```
+
+Parameters:
+
+- `repo` — `owner/repo`
+- `dry_run` — `true` reports the counts and calls Vectorize not at all
+- `surface` — `doc` (default), the only value accepted. The migration changed every surface's ID, but doc is the only surface where orphans have actually been measured
+- `limit` — IDs per call, `1..2000` (default `500`)
+- `cursor` — offset to resume from; pass back the `nextCursor` of the previous response
+
+Body (optional):
+
+```json
+{ "paths": [".claude/CLAUDE.md", ".claude/rules/model/absolute.md"] }
+```
+
+Paths already deleted from the repository. Their legacy IDs cannot be enumerated from anything the worker still holds, so they have to be named explicitly. Candidates from `paths` are covered before the tree, so a capped run reaches them first.
+
+Authentication:
+
+- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+
+Response:
+
+```json
+{ "repo": "owner/repo", "surface": "doc", "dryRun": false, "candidates": 512,
+  "skippedOversize": 3, "treeTruncated": false, "cursor": 0, "limit": 500,
+  "targeted": 500, "deleted": 500, "remaining": 12, "nextCursor": 500, "done": false }
+```
+
+Operational notes:
+
+- call it repeatedly, feeding `nextCursor` back in, until `done` is `true`. `remaining` is the count the per-run cap left behind. Send the same `paths` body on every call of a walk: the cursor indexes an ordered list that starts with them, so dropping them shifts every later position
+- safe to repeat: deleting an absent ID is a no-op, so a re-run of a finished purge reports the same `candidates` and changes nothing. If a call fails mid-walk, resume from the same `cursor`
+- `skippedOversize` counts legacy IDs longer than Vectorize's 64-byte ID cap. Those were rejected at upsert time — that overflow is what forced the migration — so no vector is keyed to them and they are not sent
+- `treeTruncated: true` means the Git Trees API cut its listing short, so the tree half of the candidate set is partial. The explicit `paths` half is unaffected
+- current-generation vectors are never at risk: the two ID formats are disjoint (`{repo}#doc-…` vs `d:…`) and only rebuilt legacy IDs are passed to the delete call
+- the residue is closed, not growing — the legacy scheme stopped writing at the migration — so this endpoint is a one-off per repository, not a recurring job
+- verify by searching for a file that was double-indexed: the pre-migration copy (old content, dense-only) should stop appearing
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

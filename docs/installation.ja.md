@@ -294,6 +294,56 @@ POST /admin/backfill-wiki?repo=owner/repo
 - `orphansWithheld` は、削除候補に挙がったが content がまだ配信されていた（あるいは実在確認が結論を出せなかった）ため削除を見送った page 数。0 でない場合、`_pages` の scrape が**実際の wiki より少なく返っている**という意味。page 自体は無傷で守られており、調べるべきは列挙のほう。見送った page 名は worker のログに出る（issue #187）
 - カバレッジの確認は `search_docs` の `type = 'wiki_doc'` 行と `https://github.com/{repo}/wiki/_pages` の page 一覧を突き合わせる
 
+## 13. 移行前の doc ベクトルを掃除する（一回性）
+
+vector id は 2026 年 4 月に平文形式（`{repo}#doc-{path}`）から hash 形式へ移行した。削除経路はいずれも**現行**の id を計算するため、移行前に書かれた doc ベクトルは二度と名指しできない。Vectorize に残り続け、移行前の内容のまま dense 検索に出て、同じファイルの現行行から候補枠を 1 つ奪う。ファイルを消しても解決しない — reap は現行世代の行だけを消し、旧世代を残す（issue #204）。
+
+移行前から索引していた repository ごとに一度だけ実行する。旧形式で組み直した id だけを削除し、再 embed は伴わない。
+
+Admin endpoint:
+
+```text
+POST /admin/purge-legacy-vectors?repo=owner/repo
+```
+
+パラメータ:
+
+- `repo` — `owner/repo`
+- `dry_run` — `true` で件数だけ返し、Vectorize を一切呼ばない
+- `surface` — `doc`（既定）。受け付ける値はこれだけ。移行は全 surface の id を変えているが、孤児が実測できているのは doc だけ
+- `limit` — 1 回の呼び出しで扱う id 数、`1..2000`（既定 `500`）
+- `cursor` — 再開位置。前回のレスポンスの `nextCursor` をそのまま渡す
+
+ボディ（任意）:
+
+```json
+{ "paths": [".claude/CLAUDE.md", ".claude/rules/model/absolute.md"] }
+```
+
+すでに repository から削除済みの path。旧 id は worker に残っている情報からは列挙できないので、明示的に名指す必要がある。`paths` 由来の候補はツリー由来より先に処理されるので、上限に当たる run でも先に到達する。
+
+認証:
+
+- `GITHUB_TOKEN` ヘッダに worker secret と同じ値を送る
+
+レスポンス:
+
+```json
+{ "repo": "owner/repo", "surface": "doc", "dryRun": false, "candidates": 512,
+  "skippedOversize": 3, "treeTruncated": false, "cursor": 0, "limit": 500,
+  "targeted": 500, "deleted": 500, "remaining": 12, "nextCursor": 500, "done": false }
+```
+
+運用上の注意:
+
+- `done` が `true` になるまで `nextCursor` を渡して繰り返し呼ぶ。`remaining` が per-run 上限で残った件数。1 回の walk では毎回同じ `paths` ボディを送ること — cursor は `paths` を先頭に並べた順序リストへの添字なので、途中で外すと以降の位置が全部ずれる
+- 何度実行しても安全。存在しない id の削除は no-op なので、完了済みの purge を再実行しても `candidates` は同じで何も変わらない。途中で失敗した場合は同じ `cursor` から再開する
+- `skippedOversize` は Vectorize の 64 byte id 上限を超える旧 id の数。これらは upsert 時点で弾かれている（その溢れこそが移行の理由）ので、対応するベクトルは存在せず、送信もしない
+- `treeTruncated: true` は Git Trees API が一覧を打ち切ったという意味で、候補のうちツリー由来の側が部分的になる。明示 `paths` の側は影響を受けない
+- 現行世代のベクトルが巻き込まれることはない。2 つの id 形式は交わらず（`{repo}#doc-…` と `d:…`）、削除呼び出しに渡すのは組み直した旧 id だけ
+- 残差は増えない — 旧形式が書き込まれた期間は移行時点で閉じている。したがってこの endpoint は repository ごとに一回性で、定期実行するものではない
+- 確認は二重索引されていたファイルを検索し、移行前のコピー（古い内容・dense のみ）が出なくなることを見る
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`
