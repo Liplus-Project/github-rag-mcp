@@ -309,12 +309,13 @@ retrieval layer は hybrid search（dense + sparse）+ cross-encoder rerank + st
 
 1. query の embedding を Workers AI BGE-M3 で生成
 2. structured params から Vectorize filter（dense 側）と D1 SQL WHERE（sparse 側）を同時構築（repo, state, type, milestone は pre-filter）
-3. labels / assignee フィルタ指定時、または reranker 有効時は内部 topK をオーバーフェッチ（requestedTopK × 5, max 50）。reranker は最大 50 件まで処理
+3. 内部 topK を常にオーバーフェッチ（requestedTopK × 5, max 50）。条件なしなのは、8 の entity 集約がどの経路でも複数行を 1 件に畳むため、rerank 無効時でも候補プールが top_k を上回っていなければ要求件数を満たせないからである。reranker は最大 50 件まで処理
 4. dense (Vectorize.query) と sparse (D1 FTS5 MATCH + BM25) を並列実行
 5. 両 ranker の結果を Reciprocal Rank Fusion（RRF、k=60）で合成
 6. 合成後の rank 順に、labels（AND ロジック、個別フィールド + CSV フォールバック）と assignee を post-filter
 7. reranker 有効時（default ON）は post-filter 後の候補を `@cf/baai/bge-reranker-base` で re-score し、reranker score 降順に並び替え
-8. requestedTopK にトリムして structured context と共に返す
+8. 同一 entity を指す行を畳み、最上位の行を代表にする（Entity Aggregation 参照）
+9. requestedTopK にトリムして structured context と共に返す
 
 #### Reciprocal Rank Fusion (RRF)
 
@@ -355,6 +356,47 @@ score(d) = sum_over_rankers ( 1 / (k + rank_r(d)) )
 - 1 検索あたり試算: 約 7.5 neurons (query 30 tokens + 候補 50 件 × 平均 500 tokens, embedding 含む)
 - Free tier 10,000 neurons/day で約 1,300 検索/day 上限
 - neuron 実測値はレスポンスに `usage` フィールドが含まれる場合に取得し、理論試算と照合する（公式未文書化のため存在しない場合は黙ってスキップ）
+
+### Entity Aggregation
+
+1 つの実体が複数行として索引される。ファイルは `doc` 行 + それを触った commit の数だけの `diff` 行、issue は本体 + コメント数だけの `issue_comment` 行、PR は本体 + `pr_review` / `pr_review_comment` 行。これらが同一の `top_k` プールで枠を奪い合う。本番索引での実測（2026-08-01、`top_k: 10`、rrf + rerank）では独立した情報は 10 枠中 6 前後、`dense_only` では 5 枠中 3 枠が同一ファイルだった。
+
+diff を索引し続けるのは意図的である——diff は判断履歴そのものであり、変更を commit diff として持つ設計が索引の容量を抑えている。したがって畳むのは表示段（fusion / rerank / time sort の後、trim の手前）であって索引側ではない。
+
+**同一実体の定義.** 実体とはその行が指している対象（referent）であって、その行を生んだ作業（event）ではない。
+
+| 行 | key | 畳む |
+|---|---|---|
+| ファイルの `doc` 行 + 複数 commit の `diff` 行 | `file:{repo}:{doc_path ?? file_path}` | する |
+| issue + その `issue_comment` 行 | `thread:{repo}:{number}` | する |
+| PR + その `pr_review` / `pr_review_comment` 行 | `thread:{repo}:{number}` | する |
+| 同一 commit が触った別々のファイル | — | **しない** |
+| issue と、それを閉じる PR | — | **しない** |
+| 同一ソースファイルの他 repo への複製 | — | **しない** |
+
+同じ対象の複数の版を畳んでも対象の数は減らないので、集約が独立した情報を隠すことはない。一方「作業」で畳むと、1 つの commit が触った別々のファイルが 1 枠になり、実際に独立した対象が隠れる。だから key はパスを持ち commit SHA を持たない。issue と、それを閉じる PR も 2 実体のまま残す——同一の作業単位ではあるが、両者を結ぶ `Closes #N` は索引に無く、入れるには索引側の変更が要る。
+
+repo 横断の複製（Li+ source が各 user repo の `.claude/` に複製されている件）は対象外。同一と判定するには内容 hash を索引に持たせるか、パスの正規化ヒューリスティクスを置くかが要る。前者は索引側の変更で、後者は本当に別物のファイルを誤って畳む。加えて配布先が古い場合はその差異自体が情報である。
+
+`wiki_doc` / `release` は 1 実体 1 行なので行の identity を key にし、畳まれることはない。
+
+**代表の選び方.** fusion / rerank / time sort 後の順位が最上位の行。最新版は固定**しない**。これが「いつ変わったか」を問うクエリへの答えを残す: そのクエリでは該当する古い `diff` が最上位に来るので、それが代表として残る。最新版固定だと答えそのものが消える。
+
+**返却形式.** `top_k` は実体の数で数えるので、10 を要求した呼び出し側には独立実体 10 件が返る。他の行を吸収した代表 item にはフィールドが 1 つ増える。畳んだ行は参照として付され、捨てられない:
+
+```json
+{
+  "...": "(代表 item の既存フィールド)",
+  "same_entity": {
+    "count": 3,
+    "others": [
+      { "type": "diff", "url": "...", "updated_at": "...", "score": 0.0161, "commit_sha": "601aa38" }
+    ]
+  }
+}
+```
+
+`count` は代表を含むので必ず 2 以上。1 件以上畳んだ場合のみ付く。フィールド追加であって既存フィールドの変更ではないので、無視する client には集約前と同じ形に見える。
 
 ### 切替オプション
 
@@ -398,6 +440,7 @@ Returns:
 
 - repository、type、state、labels、milestone、assignees、URL、RRF fused score を含む ranked match
 - 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`、`rerank_score`（rerank 無効時または fallback 時は null）
+- 同一実体の他の行を吸収した結果には `same_entity`（Entity Aggregation 参照）。`top_k` は行数ではなく実体数で数える
 - top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`
 
 **scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` は store 側へ push down されるので、窓に行があれば、その窓がどれだけ古くても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。

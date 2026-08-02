@@ -311,12 +311,13 @@ Expected retrieval behavior:
 
 1. Generate an embedding for the query via Workers AI BGE-M3.
 2. Build Vectorize metadata filter (dense side) and D1 SQL WHERE clause (sparse side) from the same structured params (repo, state, type, milestone are pre-filtered on both sides).
-3. When labels or assignee filters are present, OR when the reranker is enabled, overfetch internally on both sides (requestedTopK × 5, max 50). The reranker processes at most 50 candidates per call.
+3. Overfetch internally on both sides (requestedTopK × 5, max 50). Unconditional: entity aggregation (step 8) collapses several rows into one result on every path, so the candidate pool must exceed top_k even when the reranker is off. The reranker processes at most 50 candidates per call.
 4. Query Vectorize (dense) and D1 FTS5 (sparse, BM25) in parallel.
 5. Combine the two rankers via Reciprocal Rank Fusion (RRF, k=60).
 6. Post-filter labels (AND logic, expanded fields + CSV fallback) and assignee over the fused view.
 7. When the reranker is enabled (default ON), re-score the post-filtered candidates with `@cf/baai/bge-reranker-base` and reorder by reranker score, descending.
-8. Trim to requestedTopK and return results with structured context.
+8. Collapse rows that point at the same entity, keeping the highest-ranked row as the representative (see Entity Aggregation).
+9. Trim to requestedTopK and return results with structured context.
 
 #### Reciprocal Rank Fusion (RRF)
 
@@ -357,6 +358,47 @@ Cost estimate:
 - Per-search estimate: ~7.5 neurons (query 30 tokens + 50 candidates × 500 avg tokens, embedding included).
 - Free tier (10,000 neurons/day) supports ~1,300 searches/day at this rate.
 - Actual neuron usage is read from a `usage` field on the response when present and reconciled against the estimate. The field is not officially documented as of 2026-04, so absence is tolerated silently.
+
+### Entity Aggregation
+
+One underlying thing is indexed as several rows: a file is a `doc` row plus one `diff` row per commit that touched it, an issue is its own row plus one `issue_comment` row per comment, a PR is its own row plus its `pr_review` / `pr_review_comment` rows. They all compete for slots in the same `top_k` pool. Measured on the production index (2026-08-01, `top_k: 10`, rrf + rerank), roughly 6 of 10 slots held independent information; a `dense_only` probe put 3 of 5 slots on one file.
+
+Keeping the diff rows indexed is deliberate — they are the judgment history, and storing changes as commit diffs is what keeps the index small — so the collapse happens at the presentation stage (after fusion, rerank and time sort; before the trim), not in the index.
+
+**What counts as one entity.** The entity is the *referent* a row points at, never the *event* that produced the row.
+
+| rows | key | collapse |
+|---|---|---|
+| a file's `doc` row + its `diff` rows across commits | `file:{repo}:{doc_path ?? file_path}` | yes |
+| an issue + its `issue_comment` rows | `thread:{repo}:{number}` | yes |
+| a PR + its `pr_review` / `pr_review_comment` rows | `thread:{repo}:{number}` | yes |
+| different files touched by one commit | — | **no** |
+| an issue and the PR that closes it | — | **no** |
+| the same source file copied into another repo | — | **no** |
+
+Collapsing versions of one referent cannot hide an independent thing, because the number of referents is unchanged. Collapsing by event would: one commit touches several distinct files, and folding them into a single slot hides files that are genuinely independent. So the key carries the path and not the commit SHA, and an issue and the PR that closes it stay two entities — they are one unit of work, but the `Closes #N` link that would join them is not in the index, and putting it there is an index-side change.
+
+Cross-repo duplication (the same Li+ source file copied into every user repo's `.claude/`) is out of scope: deciding those are one entity needs either a content hash in the index or a path-normalizing heuristic — the first is an index change, the second folds genuinely different files, and a stale copy's difference is itself information.
+
+`wiki_doc` and `release` rows have exactly one row per referent, so they key on the row identity and never collapse.
+
+**Representative.** The highest-ranked row of the group after fusion / rerank / time sort — the newest version is *not* pinned. This is what keeps "when did this change" answerable: for such a query the relevant old `diff` ranks top, so it is the row that survives. Pinning the newest version would delete the answer.
+
+**Response shape.** `top_k` counts entities, so a caller asking for 10 gets 10 independent entities. A representative that absorbed other rows carries one additional field; the collapsed rows are referenced, never dropped:
+
+```json
+{
+  "...": "(the representative's existing fields)",
+  "same_entity": {
+    "count": 3,
+    "others": [
+      { "type": "diff", "url": "...", "updated_at": "...", "score": 0.0161, "commit_sha": "601aa38" }
+    ]
+  }
+}
+```
+
+`count` includes the representative, so it is at least 2. The field is present only when at least one row was collapsed, and it is additive — a client that ignores it sees the pre-aggregation shape.
 
 ### Fusion mode toggle
 
@@ -400,6 +442,7 @@ Returns:
 
 - ranked matches with repository, type, state, labels, milestone, assignees, URL, and RRF fused `score`
 - additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`, `rerank_score` (null when rerank disabled or when graceful fallback engaged)
+- `same_entity` on results that absorbed other rows of the same entity (see Entity Aggregation); `top_k` counts entities, not rows
 - top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`
 
 **Scan mode (empty query).** Vectorize / FTS5 / reranker are skipped and the result set is aggregated from the structured store's recency endpoints. `since` / `until` are pushed down to the store, so a window returns rows whenever it holds rows, however far back it sits. `since` defaults to 7 days before `until` (before now when `until` is omitted), so an `until`-only query does not degenerate into an empty window above its own ceiling.

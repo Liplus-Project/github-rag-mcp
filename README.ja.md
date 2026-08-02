@@ -108,7 +108,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `milestone` | string | milestone title で絞り込み。 |
 | `assignee` | string | assignee login で絞り込み。 |
 | `type` | 下記参照 | type で絞り込み (既定 `all`)。 |
-| `top_k` | number | 最大件数 (既定 10、上限 50)。 |
+| `top_k` | number | 最大件数 (既定 10、上限 50)。索引の行数ではなく実体の数で数えます。下記「実体単位の集約」参照。 |
 | `fusion` | `"rrf"` / `"dense_only"` / `"sparse_only"` | fusion 戦略 (既定 `rrf`)。scan モードでは無視。 |
 | `rerank` | boolean | cross-encoder rerank (既定 `true`)。scan モードでは無視。 |
 | `sort` | `"relevance"` / `"updated_desc"` / `"created_desc"` | 並び順。query ありの既定は `relevance`、query なしの既定は `updated_desc`。時系列指定は ranker score を上書きします。 |
@@ -132,6 +132,12 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `"pr_review"` | PR レビュー本文 (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`)。 |
 | `"pr_review_comment"` | PR の per-line インラインレビューコメント。 |
 | `"all"` | 上記すべての union (既定)。 |
+
+#### 実体単位の集約
+
+1 つの実体は複数行として索引されます。ファイルは `doc` 行 + それを触った commit の数だけの `diff` 行、issue / PR は本体 + そのコメントやレビュー、という形です。応答を `top_k` 件に切り詰める前にこれらを 1 件へ畳むので、`top_k` はそのまま独立した実体の数になります。畳む基準は「その行が何を指しているか」であって「どの作業がその行を生んだか」ではありません。同一 commit が触った別々のファイルは別々の結果として残り、issue とそれを閉じる PR も別々に残ります。
+
+代表になるのはその group で最上位に来た行です。したがって「いつ変わったか」を問う検索では、現在の版ではなく該当する古い commit diff が返ります。他の行を吸収した結果には `same_entity` フィールドが付き（`count` は自身を含む件数、`others[]` は畳んだ各行の type / URL / 時刻 / score）、畳んだ分は捨てられません。完全な規則は [docs/0-requirements.ja.md](docs/0-requirements.ja.md) を参照してください。
 
 #### 使用例
 

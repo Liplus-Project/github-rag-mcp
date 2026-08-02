@@ -108,7 +108,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `milestone` | string | Filter by milestone title. |
 | `assignee` | string | Filter by assignee login. |
 | `type` | see below | Filter by type (default `all`). |
-| `top_k` | number | Max results (default 10, max 50). |
+| `top_k` | number | Max results (default 10, max 50). Counts distinct entities, not index rows — see Entity aggregation below. |
 | `fusion` | `"rrf"` \| `"dense_only"` \| `"sparse_only"` | Fusion strategy (default `rrf`). Ignored in scan mode. |
 | `rerank` | boolean | Cross-encoder rerank (default `true`). Ignored in scan mode. |
 | `sort` | `"relevance"` \| `"updated_desc"` \| `"created_desc"` | Result ordering. Default `relevance` with a query, `updated_desc` without. Time sorts override ranker score. |
@@ -132,6 +132,12 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `"pr_review"` | PR review bodies (`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED`). |
 | `"pr_review_comment"` | PR inline review comments (per-line diff comments). |
 | `"all"` | Union of every type above (default). |
+
+#### Entity aggregation
+
+One thing is indexed as several rows: a file is a `doc` row plus one `diff` row per commit that touched it, an issue or PR is its own row plus its comments and reviews. Those rows are collapsed into one result before the response is trimmed, so `top_k` returns that many distinct entities. Rows are grouped by what they point at, not by the work that produced them — different files touched by one commit stay separate results, and so do an issue and the PR that closes it.
+
+The representative is the highest-ranked row of the group, so a query about when something changed still returns the relevant old commit diff rather than the current version. A result that absorbed other rows carries a `same_entity` field (`count` including itself, plus `others[]` with the type, URL, timestamp and score of each collapsed row) so nothing is lost. See [docs/0-requirements.md](docs/0-requirements.md) for the full rule.
 
 #### Examples
 
