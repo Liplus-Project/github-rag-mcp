@@ -149,6 +149,10 @@ commit diff poller は 2-phase 構成:
 
 トレードオフは liveness で、毎回失敗し続ける commit はその phase の watermark を止める。run log に境界 commit の SHA が出るほか、`POST /admin/diff-watermark`（installation guide 参照）で watermark を手動で移動できる。旧版 poller が取りこぼした期間を再走査させる経路も同じ endpoint。
 
+docs poller は `If-None-Match` 付きの条件付きリクエストで repository tree を読み、保存済みの doc record と差分を取る。blob SHA が動いた entry は re-embed し、store にあって tree に無い entry は削除する。**削除は 4 面を teardown する** — Vectorize / D1 FTS5 / graph edge table / structured store — それぞれ独立に実行するので、Vectorize の失敗が実際に retrieval される D1 行を取り残すことはない。edge の teardown は溜まったものを流すためではなく wiki 側との対称性のためで、現状 `doc_edges` の端点は両側とも wiki vector ID なので doc vector ID は 1 行も一致しない。将来 repository doc が edge の端点になったときに、「vector を削除する」の意味が 2 経路で同じであり続けることが効果（issue #203）。
+
+**削除の枠.** 削除は 1 repo 1 run あたり `MAX_DOC_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap する。wiki の削除と同じ guard で、1 件あたり約 4 subrequest かかるため、大量削除に対して上限なく回すと light cron の invocation 予算を単独で食い潰し、後ろに並ぶ repo を飢えさせうる — 1 つの PR が `.md` を 66 件削除すれば、その全件が 1 run に集中する。削除済み doc の store 行は消えるので残りの集合は縮む一方であり、drain は単調。したがってこの surface には per-run cap が 2 本あり、**どちらが効いても tree ETag は据え置く**: fetch 枠は未処理の変更 doc を残し（issue #149）、削除枠は未削除の doc を残す（issue #203）。どちらの場合も ETag を進めてしまうと次 run が 304 で返り、残りを見ないまま終わる。`lastPolledAt` は進めるので run 自体は観測できる。
+
 wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込み経路。Wiki は別 git repo (`{repo}.wiki.git`) に存在し、REST API も webhook event も持たないため、poller が repo ごとに 3 段の HTTP 呼び出しで処理する:
 
 1. `https://github.com/{repo}.wiki.git/info/refs?service=git-upload-pack` を打って wiki 存在検出（200 = 存在、404 = 無効化済 or 未設置 = skip）。
@@ -295,7 +299,7 @@ Durable Object + SQLite は次の structured record を保持する。
 - **エッジ抽出**: wiki ページ index 時（`processAndUpsertWikiDoc`）、同 repo の既知 wiki slug が本文に出現したら A→B の "mention" エッジを生成（`src/graph.ts` の `indexWikiEdges`）。**決定的 slug-match（LLM 不要・ロスなし）**。dst は計算で求まるので未 index でも記録可（dangling 可）。typed（supersede/depend/conflict）は将来スコープ。
 - **traversal**: `queryNeighbors` が `WITH RECURSIVE`（標準 SQLite、拡張不要）で seed の 1–2 hop neighbor を無向に辿る。
 - **retrieval 統合**: `search` の `graph_expand`（既定 false）/ `graph_hops`（既定 1）。true の時のみ、RRF 後の最終結果を seed に neighbor を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで末尾に append。**false の時は既存挙動と完全同一（回帰なし）**。
-- **delete fan-out**: wiki ページ削除時に `deleteEdgesForVector`（当該 vector を端点に持つエッジを除去）。
+- **delete fan-out**: `deleteEdgesForVector` が当該 vector を端点に持つエッジを除去する。cron の削除は両方これを呼ぶ — 実際に行が存在する wiki 側と、doc vector ID が 1 行も一致しない repository docs 側（後者は将来 doc 側 edge writer が入ったときのための対称性、issue #203）。
 - **backfill**: `POST /admin/backfill-edges?repo=owner/repo`（GITHUB_TOKEN ヘッダ）。既存 index 済み wiki の content から一括抽出（GitHub 再取得不要）。
 - **評価**: 本番 ship 後の実運用観測（judgment-learning が関連判断を拾えるか）。offline eval harness は作らない。
 
