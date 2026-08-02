@@ -33,6 +33,7 @@ import {
 import { rerankCandidates, rerankWasApplied, RERANK_MAX_CANDIDATES } from "./rerank.js";
 import { queryNeighbors, getDocsByVectorIds } from "./graph.js";
 import { runScan, type ScanRow } from "./scan.js";
+import { entityKey, groupByEntity } from "./aggregate.js";
 
 /** User context passed via props from OAuth layer */
 interface McpProps extends Record<string, unknown> {
@@ -62,6 +63,111 @@ function githubHeaders(token: string): Record<string, string> {
  * additional queries rather than lifting this cap.
  */
 const INCLUDE_CONTENT_MAX_DOCS = 5;
+
+/**
+ * Per-candidate payload assembled after fusion: the dense metadata, the sparse
+ * FTS row, and each ranker's raw score. Either side may be missing — a hit can
+ * come from one ranker only.
+ */
+interface RowPayload {
+  meta: VectorMetadata | undefined;
+  ftsRow: FtsHit | undefined;
+  denseScore: number | undefined;
+  sparseScore: number | undefined;
+}
+
+/**
+ * A candidate's fields resolved from whichever side saw it. Single resolution
+ * site for the three consumers that need them: the entity key (aggregation),
+ * the result item, and the `same_entity.others` references.
+ */
+interface ResolvedRow {
+  repo: string;
+  number: number;
+  type: string;
+  state: string;
+  labelsCsv: string;
+  milestone: string;
+  assigneesCsv: string;
+  updatedAt: string;
+  tagName: string;
+  docPath: string;
+  wikiPath: string;
+  wikiExtension: string;
+  commitSha: string;
+  filePath: string;
+  fileStatus: string;
+  commitDate: string;
+  commitAuthor: string;
+  author: string;
+  commentId: number;
+  reviewId: number;
+  line: number;
+}
+
+/**
+ * Resolve one candidate's fields. Dense metadata wins when present (it carries
+ * the dedicated fields), the FTS row fills the gaps for sparse-only hits.
+ */
+function resolveRow(p: RowPayload | undefined): ResolvedRow {
+  const meta = p?.meta;
+  const ftsRow = p?.ftsRow;
+  const type = meta?.type ?? (ftsRow?.type as VectorMetadata["type"] | undefined) ?? "";
+  return {
+    repo: meta?.repo ?? ftsRow?.repo ?? "",
+    number: meta?.number ?? ftsRow?.number ?? 0,
+    type,
+    state: meta?.state ?? ftsRow?.state ?? "",
+    labelsCsv: meta?.labels ?? ftsRow?.labels ?? "",
+    milestone: meta?.milestone ?? ftsRow?.milestone ?? "",
+    assigneesCsv: meta?.assignees ?? ftsRow?.assignees ?? "",
+    updatedAt: meta?.updated_at ?? ftsRow?.updatedAt ?? "",
+    tagName: meta?.tag_name ?? ftsRow?.tagName ?? "",
+    docPath: meta?.doc_path ?? ftsRow?.docPath ?? "",
+    // wiki_doc rows reuse the FTS5 `doc_path` column for the page slug — the
+    // schema-level field is unified across "where did this come from",
+    // distinguished by the row's `type`. Vectorize metadata carries the
+    // dedicated `wiki_path` / `wiki_extension` fields so we prefer them when
+    // present and fall back to the FTS row when the dense hit lost.
+    wikiPath: meta?.wiki_path ?? (type === "wiki_doc" ? ftsRow?.docPath ?? "" : ""),
+    wikiExtension: meta?.wiki_extension ?? "",
+    commitSha: meta?.commit_sha ?? ftsRow?.commitSha ?? "",
+    filePath: meta?.file_path ?? ftsRow?.filePath ?? "",
+    fileStatus: meta?.file_status ?? ftsRow?.fileStatus ?? "",
+    commitDate: meta?.commit_date ?? ftsRow?.commitDate ?? "",
+    commitAuthor: meta?.commit_author ?? ftsRow?.commitAuthor ?? "",
+    author: meta?.author ?? "",
+    commentId: meta?.comment_id ?? 0,
+    reviewId: meta?.review_id ?? 0,
+    line: meta?.line ?? 0,
+  };
+}
+
+/** Canonical GitHub URL for a resolved row, by type. */
+function buildResultUrl(r: ResolvedRow): string {
+  if (r.type === "release" && r.tagName) {
+    return `https://github.com/${r.repo}/releases/tag/${r.tagName}`;
+  }
+  if (r.type === "doc" && r.docPath) {
+    return `https://github.com/${r.repo}/blob/main/${r.docPath}`;
+  }
+  if (r.type === "wiki_doc" && r.wikiPath) {
+    return `https://github.com/${r.repo}/wiki/${encodeURIComponent(r.wikiPath)}`;
+  }
+  if (r.type === "diff" && r.commitSha) {
+    return `https://github.com/${r.repo}/commit/${r.commitSha}`;
+  }
+  if (r.type === "issue_comment" && r.commentId) {
+    return `https://github.com/${r.repo}/issues/${r.number}#issuecomment-${r.commentId}`;
+  }
+  if (r.type === "pr_review" && r.reviewId) {
+    return `https://github.com/${r.repo}/pull/${r.number}#pullrequestreview-${r.reviewId}`;
+  }
+  if (r.type === "pr_review_comment" && r.commentId) {
+    return `https://github.com/${r.repo}/pull/${r.number}#discussion_r${r.commentId}`;
+  }
+  return `https://github.com/${r.repo}/issues/${r.number}`;
+}
 
 /**
  * Legacy class retained solely to satisfy Cloudflare's "class must exist in
@@ -119,7 +225,10 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files " +
         "and non-.md files that are not present in the live document index. " +
         "Use type: \"issue_comment\" / \"pr_review\" / \"pr_review_comment\" to retrieve comment-level judgment history " +
-        "(Master's feedback, AI responses, self-review now/later/accepted classifications).",
+        "(Master's feedback, AI responses, self-review now/later/accepted classifications).\n" +
+        "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
+        "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
+        "and a result that absorbed others carries same_entity { count, others[] } with links to them.",
       {
         query: z
           .string()
@@ -332,17 +441,17 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         }
 
         // ── Search mode (non-empty query): existing hybrid pipeline ─
-        // Overfetch on both sides when label/assignee post-filter is needed.
-        // Also overfetch when the reranker is enabled, so the cross-encoder
-        // sees enough candidates (issue #91 default: top_k × 5, capped at 50).
+        // Overfetch on both sides (issue #91 default: top_k × 5, capped at 50).
         // RERANK_MAX_CANDIDATES is the AI-side upper bound; we mirror it here
         // so dense and sparse fetch enough rows to feed the reranker.
-        const needsPostFilter = (labels && labels.length > 0) || !!assignee;
-        const needsTimeFilter = !!since || !!until;
-        const internalTopK =
-          needsPostFilter || needsTimeFilter || rerankEnabled
-            ? Math.min(requestedTopK * 5, RERANK_MAX_CANDIDATES)
-            : requestedTopK;
+        //
+        // The overfetch used to be conditional (label / assignee post-filter,
+        // time window, or reranker enabled). Entity aggregation (#189) removes
+        // that condition: every search-mode query now collapses several rows of
+        // one referent into a single result, so the candidate pool must exceed
+        // top_k on every path — including `rerank: false` — or the caller gets
+        // fewer than the top_k it asked for.
+        const internalTopK = Math.min(requestedTopK * 5, RERANK_MAX_CANDIDATES);
 
         // ── Dense path: Vectorize embedding query ────────────────
         const densePromise: Promise<{
@@ -448,15 +557,7 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         // Build a vector_id → payload lookup combining dense metadata and sparse rows.
         // Dense metadata wins when both sides see a vector; sparse hits fill in the gaps
         // (e.g., when BM25 surfaces a row that dense missed entirely).
-        const payload = new Map<
-          string,
-          {
-            meta: VectorMetadata | undefined;
-            ftsRow: FtsHit | undefined;
-            denseScore: number | undefined;
-            sparseScore: number | undefined;
-          }
-        >();
+        const payload = new Map<string, RowPayload>();
         for (const h of denseResult.hits) {
           payload.set(h.vectorId, {
             meta: h.meta,
@@ -672,8 +773,37 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           });
         }
 
-        // Trim to requested top-K after fusion + post-filter (+ rerank / time sort).
-        filtered = filtered.slice(0, requestedTopK);
+        // ── Entity aggregation (issue #189) ──────────────────────
+        // Several rows can point at one referent: a file is a `doc` row plus a
+        // `diff` row per commit, an issue or PR is its own row plus its
+        // comments / reviews. They crowd out independent results in the same
+        // top_k pool. Collapse them here — after every reordering stage, before
+        // the trim — so `top_k` counts referents and the representative is
+        // whichever row the final order ranked highest (see aggregate.ts for
+        // why the newest version is deliberately NOT pinned).
+        const groups = groupByEntity(filtered, (f) => {
+          const r = resolveRow(payload.get(f.vectorId));
+          return entityKey({
+            vectorId: f.vectorId,
+            repo: r.repo,
+            type: r.type,
+            number: r.number,
+            docPath: r.docPath,
+            filePath: r.filePath,
+          });
+        });
+
+        // vector_id of a representative → the rows folded into it, in rank order.
+        const collapsedInto = new Map<string, typeof filtered>();
+        for (const g of groups.slice(0, requestedTopK)) {
+          if (g.others.length > 0) {
+            collapsedInto.set(g.representative.vectorId, g.others);
+          }
+        }
+
+        // Trim to requested top-K after fusion + post-filter (+ rerank / time
+        // sort / entity aggregation).
+        filtered = groups.slice(0, requestedTopK).map((g) => g.representative);
 
         // ── Format results ───────────────────────────────────────
         type ResultItem = {
@@ -709,67 +839,56 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
           content?: string;
           graph_hop?: number;
           graph_from?: string;
+          /**
+           * Present only when this item is the representative of an entity that
+           * had other rows in the candidate pool (issue #189). `count` includes
+           * the representative, so it is always ≥ 2 when the field is present.
+           * Additive: a client that ignores it sees the pre-#189 shape.
+           */
+          same_entity?: {
+            count: number;
+            others: Array<{
+              type: string;
+              url: string;
+              updated_at: string;
+              score: number;
+              commit_sha?: string;
+            }>;
+          };
         };
 
         const items: ResultItem[] = filtered.map((f) => {
           const p = payload.get(f.vectorId);
-          const meta = p?.meta;
-          const ftsRow = p?.ftsRow;
+          const r = resolveRow(p);
 
-          const itemRepo = meta?.repo ?? ftsRow?.repo ?? "";
-          const number = meta?.number ?? ftsRow?.number ?? 0;
-          const itemType = meta?.type ?? (ftsRow?.type as VectorMetadata["type"] | undefined) ?? "";
-          const itemState = meta?.state ?? ftsRow?.state ?? "";
-          const labelsCsv = meta?.labels ?? ftsRow?.labels ?? "";
-          const milestoneVal = meta?.milestone ?? ftsRow?.milestone ?? "";
-          const assigneesCsv = meta?.assignees ?? ftsRow?.assignees ?? "";
-          const updatedAt = meta?.updated_at ?? ftsRow?.updatedAt ?? "";
-          const tagName = meta?.tag_name ?? ftsRow?.tagName ?? "";
-          const docPath = meta?.doc_path ?? ftsRow?.docPath ?? "";
-          // wiki_doc rows reuse the FTS5 `doc_path` column for the page slug —
-          // the schema-level field is unified across "where did this come from",
-          // distinguished by the row's `type`. Vectorize metadata carries the
-          // dedicated `wiki_path` / `wiki_extension` fields so we prefer them
-          // when present and fall back to the FTS row when the dense hit lost.
-          const wikiPath = (meta?.wiki_path as string | undefined) ?? (itemType === "wiki_doc" ? ftsRow?.docPath ?? "" : "");
-          const wikiExtension = (meta?.wiki_extension as string | undefined) ?? "";
-          const commitSha = meta?.commit_sha ?? ftsRow?.commitSha ?? "";
-          const filePath = meta?.file_path ?? ftsRow?.filePath ?? "";
-          const fileStatus = meta?.file_status ?? ftsRow?.fileStatus ?? "";
-          const commitDate = meta?.commit_date ?? ftsRow?.commitDate ?? "";
-          const commitAuthor = meta?.commit_author ?? ftsRow?.commitAuthor ?? "";
-          const author = meta?.author ?? "";
-          const commentId = meta?.comment_id ?? 0;
-          const reviewId = meta?.review_id ?? 0;
-          const line = meta?.line ?? 0;
-
-          let url: string;
-          if (itemType === "release" && tagName) {
-            url = `https://github.com/${itemRepo}/releases/tag/${tagName}`;
-          } else if (itemType === "doc" && docPath) {
-            url = `https://github.com/${itemRepo}/blob/main/${docPath}`;
-          } else if (itemType === "wiki_doc" && wikiPath) {
-            url = `https://github.com/${itemRepo}/wiki/${encodeURIComponent(wikiPath)}`;
-          } else if (itemType === "diff" && commitSha) {
-            url = `https://github.com/${itemRepo}/commit/${commitSha}`;
-          } else if (itemType === "issue_comment" && commentId) {
-            url = `https://github.com/${itemRepo}/issues/${number}#issuecomment-${commentId}`;
-          } else if (itemType === "pr_review" && reviewId) {
-            url = `https://github.com/${itemRepo}/pull/${number}#pullrequestreview-${reviewId}`;
-          } else if (itemType === "pr_review_comment" && commentId) {
-            url = `https://github.com/${itemRepo}/pull/${number}#discussion_r${commentId}`;
-          } else {
-            url = `https://github.com/${itemRepo}/issues/${number}`;
-          }
+          // Rows folded into this representative. Kept as references (never
+          // dropped) so the caller can still reach every version / comment.
+          const folded = collapsedInto.get(f.vectorId) ?? [];
+          const sameEntity =
+            folded.length > 0
+              ? {
+                  count: folded.length + 1,
+                  others: folded.map((o) => {
+                    const or = resolveRow(payload.get(o.vectorId));
+                    return {
+                      type: or.type,
+                      url: buildResultUrl(or),
+                      updated_at: or.updatedAt,
+                      score: o.fusedScore,
+                      ...(or.type === "diff" ? { commit_sha: or.commitSha } : {}),
+                    };
+                  }),
+                }
+              : undefined;
 
           return {
-            number,
+            number: r.number,
             title: "", // Enriched below
-            state: itemState,
-            type: itemType,
-            labels: labelsCsv ? labelsCsv.split(",").filter(Boolean) : [],
-            milestone: milestoneVal,
-            assignees: assigneesCsv ? assigneesCsv.split(",").filter(Boolean) : [],
+            state: r.state,
+            type: r.type,
+            labels: r.labelsCsv ? r.labelsCsv.split(",").filter(Boolean) : [],
+            milestone: r.milestone,
+            assignees: r.assigneesCsv ? r.assigneesCsv.split(",").filter(Boolean) : [],
             score: f.fusedScore,
             dense_score: p?.denseScore ?? null,
             sparse_score: p?.sparseScore ?? null,
@@ -780,47 +899,48 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             // otherwise. `rerank_applied: true` guarantees at least one row in
             // the response carries a non-null score.
             rerank_score: rerankScores.get(f.vectorId) ?? null,
-            url,
-            updated_at: updatedAt,
-            repo: itemRepo,
-            ...(itemType === "release" ? { tag_name: tagName } : {}),
-            ...(itemType === "doc" ? { doc_path: docPath } : {}),
-            ...(itemType === "wiki_doc"
+            url: buildResultUrl(r),
+            updated_at: r.updatedAt,
+            repo: r.repo,
+            ...(r.type === "release" ? { tag_name: r.tagName } : {}),
+            ...(r.type === "doc" ? { doc_path: r.docPath } : {}),
+            ...(r.type === "wiki_doc"
               ? {
-                  wiki_path: wikiPath,
-                  ...(wikiExtension ? { wiki_extension: wikiExtension } : {}),
+                  wiki_path: r.wikiPath,
+                  ...(r.wikiExtension ? { wiki_extension: r.wikiExtension } : {}),
                 }
               : {}),
-            ...(itemType === "diff"
+            ...(r.type === "diff"
               ? {
-                  commit_sha: commitSha,
-                  file_path: filePath,
-                  file_status: fileStatus,
-                  commit_date: commitDate,
-                  commit_author: commitAuthor,
+                  commit_sha: r.commitSha,
+                  file_path: r.filePath,
+                  file_status: r.fileStatus,
+                  commit_date: r.commitDate,
+                  commit_author: r.commitAuthor,
                 }
               : {}),
-            ...(itemType === "issue_comment"
+            ...(r.type === "issue_comment"
               ? {
-                  author,
-                  comment_id: commentId,
+                  author: r.author,
+                  comment_id: r.commentId,
                 }
               : {}),
-            ...(itemType === "pr_review"
+            ...(r.type === "pr_review"
               ? {
-                  author,
-                  review_id: reviewId,
+                  author: r.author,
+                  review_id: r.reviewId,
                 }
               : {}),
-            ...(itemType === "pr_review_comment"
+            ...(r.type === "pr_review_comment"
               ? {
-                  author,
-                  comment_id: commentId,
-                  file_path: filePath,
-                  line,
-                  commit_sha: commitSha,
+                  author: r.author,
+                  comment_id: r.commentId,
+                  file_path: r.filePath,
+                  line: r.line,
+                  commit_sha: r.commitSha,
                 }
               : {}),
+            ...(sameEntity ? { same_entity: sameEntity } : {}),
           };
         });
 

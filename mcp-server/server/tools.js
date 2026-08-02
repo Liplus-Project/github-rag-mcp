@@ -24,7 +24,10 @@ export const TOOLS = [
       "optionally narrow via since / until; " +
       "(3) doc content fetch — include_content: true inlines raw content on top doc and wiki_doc results. " +
       "Structured filters (repo, state, labels, milestone, assignee, type) apply across all modes; " +
-      "type: \"wiki_doc\" narrows to GitHub Wiki pages only.",
+      "type: \"wiki_doc\" narrows to GitHub Wiki pages only. " +
+      "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
+      "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
+      "and a result that absorbed others carries same_entity { count, others[] } with links to them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -81,7 +84,9 @@ export const TOOLS = [
         },
         top_k: {
           type: "number",
-          description: "Max results (default: 10, max: 50)",
+          description:
+            "Max results (default: 10, max: 50). Counts distinct entities, not index rows " +
+            "(a file's doc row and its commit diffs collapse into one result).",
         },
         fusion: {
           type: "string",
