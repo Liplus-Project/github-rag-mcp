@@ -1026,6 +1026,23 @@ const MAX_WIKI_FETCHES_PER_REPO_PER_RUN = 20;
  *  set only shrinks, so the drain is monotonic (issue #184). */
 const MAX_WIKI_DELETIONS_PER_REPO_PER_RUN = 5;
 
+/** Maximum pre-reap existence probes issued per repo per cron run.
+ *
+ *  Separate from MAX_WIKI_DELETIONS_PER_REPO_PER_RUN because a withheld
+ *  candidate must not spend a delete slot. The orphan list is stably sorted, so
+ *  while an enumeration stays short the same withheld candidates hold the head
+ *  of it on every run, and a page that really was deleted sitting behind them
+ *  is never reached — the index stays correct, but the delete stalls until the
+ *  enumeration recovers (issue #197). With the budgets split, the reap loop
+ *  walks the whole orphan list and stops on whichever budget runs out first:
+ *  withholding costs a probe, deleting costs a probe *and* a delete slot.
+ *
+ *  Sized at 3x the delete budget. A probe costs at most `WIKI_EXTENSIONS.length`
+ *  = 2 subrequests, so this ceiling is 30, alongside the ~4-per-delete fan-out
+ *  of at most 5 deletes. Both are spent outside the walk's fetch budget and stay
+ *  well inside the Worker's 1000-subrequest invocation ceiling (issue #130). */
+const MAX_WIKI_REAP_PROBES_PER_REPO_PER_RUN = 15;
+
 /** Fraction of the indexed page set which, once the reap candidate set reaches
  *  it, is logged as an anomaly. Warn-only on purpose: a ratio cannot separate a
  *  legitimate bulk cleanup (wiki tidy-up, mass rename) from an enumeration that
@@ -1435,9 +1452,9 @@ type WikiReapProbe = "alive" | "gone" | "inconclusive";
  *
  * Cost: at most `WIKI_EXTENSIONS.length` subrequests per candidate, and one
  * when the stored extension serves the verdict on the first attempt. The reap
- * loop is already capped at `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`, so the
- * guard's per-run ceiling is that product. It is separate from the walk's fetch
- * budget and never consumes it.
+ * loop caps the number of calls at `MAX_WIKI_REAP_PROBES_PER_REPO_PER_RUN`, so
+ * the guard's per-run ceiling is that product. It is separate from the walk's
+ * fetch budget and never consumes it.
  */
 async function probeWikiPageAlive(
   repo: string,
@@ -1501,7 +1518,9 @@ export interface WikiPollSummary {
   skipped: number;
   failed: number;
   removed: number;
-  /** Orphans detected but deferred past the delete budget. */
+  /** Orphan candidates the reap loop never reached, because it stopped on the
+   *  delete or the probe budget. A withheld candidate *was* reached, so it is
+   *  reported by `orphansWithheld` and not counted here (issue #197). */
   orphansDeferred: number;
   /** Reap candidates whose content still served (or whose probe could not
    *  complete), so the delete was withheld. Non-zero means the `_pages`
@@ -1550,7 +1569,10 @@ export interface WikiPollSummary {
  * table, and the structured store. Reaping is skipped entirely when the
  * enumeration failed, capped per run, and — because a *partially* enumerated
  * index is indistinguishable from a real deletion at the set level — withheld
- * for any candidate whose raw content still serves (issue #187).
+ * for any candidate whose raw content still serves (issue #187). The per-run
+ * cap is two budgets, not one: a withheld candidate spends a probe but no
+ * delete slot, so it cannot hold the head of the sorted candidate list and
+ * starve the real deletions behind it (issue #197).
  */
 export async function pollWiki(
   repo: string,
@@ -1561,6 +1583,7 @@ export async function pollWiki(
   const fetchBudget = opts.fetchBudget ?? MAX_WIKI_FETCHES_PER_REPO_PER_RUN;
   const embedBudget = opts.embedBudget ?? MAX_WIKI_EMBEDDINGS_PER_RUN;
   const deleteBudget = opts.deleteBudget ?? MAX_WIKI_DELETIONS_PER_REPO_PER_RUN;
+  const probeBudget = MAX_WIKI_REAP_PROBES_PER_REPO_PER_RUN;
   const persistCursor = opts.persistCursor ?? true;
 
   const empty = (startCursor: string): WikiPollSummary => ({
@@ -1742,13 +1765,6 @@ export async function pollWiki(
     if (!currentSlugs.has(pageName)) orphanSet.add(pageName);
   }
   const orphans = Array.from(orphanSet).sort(compareSlugs);
-  const orphansDeferred = Math.max(0, orphans.length - deleteBudget);
-  if (orphansDeferred > 0) {
-    console.warn(
-      `${repo} wiki: ${orphans.length} orphans found, reaping ${deleteBudget} this run ` +
-        `(${orphansDeferred} deferred to the next run).`,
-    );
-  }
 
   // Warn-only anomaly signal. A reap set this large against what is indexed is
   // either a legitimate bulk cleanup or an enumeration that came back short;
@@ -1766,10 +1782,19 @@ export async function pollWiki(
     );
   }
 
-  for (const pageName of orphans.slice(0, deleteBudget)) {
+  // The loop walks the *whole* candidate list and stops on whichever budget
+  // runs out. Slicing to the delete budget instead let a withheld candidate
+  // spend a delete slot, and since the list is stably sorted the same withheld
+  // heads would repeat every run while the real deletions behind them waited
+  // for the enumeration to recover (issue #197).
+  let probes = 0;
+  for (const pageName of orphans) {
+    if (removed >= deleteBudget || probes >= probeBudget) break;
+
     // Existence check before the delete. The candidate is only "orphaned" as
     // far as the enumeration knows, and the enumeration is exactly what may
     // have come back short (issue #187).
+    probes++;
     const probe = await probeWikiPageAlive(
       repo,
       pageName,
@@ -1815,6 +1840,18 @@ export async function pollWiki(
       }
     }
     removed++;
+  }
+
+  // Every candidate the loop reached cost exactly one probe, so the probe count
+  // is also the reached count: what is left over is what this run never looked
+  // at. Withheld candidates were looked at and are reported separately.
+  const orphansDeferred = Math.max(0, orphans.length - probes);
+  if (orphansDeferred > 0) {
+    console.warn(
+      `${repo} wiki: ${orphans.length} orphans found, ${removed} reaped and ` +
+        `${orphansWithheld} withheld this run ` +
+        `(${orphansDeferred} not reached, deferred to the next run).`,
+    );
   }
 
   // A completed lap re-anchors on the page that closed it, so the next lap

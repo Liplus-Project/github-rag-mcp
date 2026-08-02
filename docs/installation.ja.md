@@ -289,7 +289,7 @@ POST /admin/backfill-wiki?repo=owner/repo
 - `done`（= `wrapped`）は「cursor が列挙を一周した」という意味で、1 回の呼び出しで全 page を踏破したという意味ではない。`pages` が `limit` を超える wiki では 1 回で `true` にはならず、`ceil(pages / limit)` 回で成立する。77 page を既定 `limit=20` で回すなら 4 回（issue #188）
 - `lapAnchor` は現在の周回の起点 slug（`""` は列挙の先頭）。周回は `lapAnchor` の次の page から始まり、`lapAnchor` に戻ってきた時点で閉じる。`nextCursor` と併せて見れば途中経過が分かる
 - `enumerated: false` は `/wiki/_pages` の scrape が失敗したという意味。何も索引せず、意図的に何も削除していない。空の wiki と解釈せず再試行すること
-- `orphansDeferred` は per-run cap を超えて削除待ちの page 数。0 になるまで呼び続ける
+- `orphansDeferred` は、その run で**到達しなかった**削除候補の数。削除枠と probe 枠のどちらかが尽きて打ち切った分にあたる。0 になるまで呼び続ける。到達した上で見送った候補は `orphansWithheld` の側に数えられる — 枠が分かれているので、見送りが削除枠を消費して後ろに並ぶ実削除を止めることはない（issue #197）
 - `fetches` は、その call の**先頭** page が予算より多くの候補を必要とした場合に限り `limit` を最大 3 超える。1 page の probe は最大 4 回（ファイル名候補 2 × `md` / `markdown`）で、途中で打ち切った probe は結果を観測したことにならないため、そのままでは cursor を進めないまま毎回同じ page を probe し直すことになる。そこで各 call の先頭 page だけ候補リストを試し切らせている。2 page 目以降は予算どおりに打ち切る（issue #192）
 - `orphansWithheld` は、削除候補に挙がったが content がまだ配信されていた（あるいは実在確認が結論を出せなかった）ため削除を見送った page 数。0 でない場合、`_pages` の scrape が**実際の wiki より少なく返っている**という意味。page 自体は無傷で守られており、調べるべきは列挙のほう。見送った page 名は worker のログに出る（issue #187）
 - カバレッジの確認は `search_docs` の `type = 'wiki_doc'` 行と `https://github.com/{repo}/wiki/_pages` の page 一覧を突き合わせる
