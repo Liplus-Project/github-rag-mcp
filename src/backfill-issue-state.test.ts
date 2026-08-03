@@ -8,6 +8,9 @@ import {
 
 const REPO = "acme/widgets";
 
+/** Vectorize's documented `getByIds` payload cap. */
+const VECTORIZE_GET_BY_IDS_MAX = 20;
+
 /** Stub the GitHub `state=open` listing, paginating at 100 like the real API. */
 function stubOpenListing(openNumbers: number[]) {
   const pages: Array<Array<{ number: number }>> = [];
@@ -84,6 +87,14 @@ function mkEnv(
       getByIds: vi.fn(async (ids: string[]) => {
         getBatchSizes.push(ids.length);
         if (opts.vectorizeThrows) throw new Error("vectorize down");
+        // The real binding rejects the call outright past 20 IDs, so the stub does
+        // too — an oversized batch must fail the test that produced it (#213).
+        if (ids.length > VECTORIZE_GET_BY_IDS_MAX) {
+          throw new Error(
+            `VECTOR_GET_ERROR (code = 40007): too many ids in payload; ` +
+              `max id count is ${VECTORIZE_GET_BY_IDS_MAX}, got ${ids.length}`,
+          );
+        }
         return ids
           .filter((id) => !(opts.missingVectors ?? []).includes(id))
           .map((id) => ({ id, values: [0.1, 0.2], metadata: { repo: REPO, state: "open" } }));
@@ -248,7 +259,20 @@ describe("backfill-issue-state: per-call budget", () => {
 
     await backfillIssueState(REPO, env, { limit: 200 });
 
-    expect(getBatchSizes).toEqual([50, 50, 20]);
+    expect(getBatchSizes).toEqual([20, 20, 20, 20, 20, 20]);
+  });
+
+  it("never sends more IDs to getByIds than Vectorize accepts", async () => {
+    // `getByIds` caps the payload at 20 IDs (error 40007). A larger batch made the
+    // whole call throw before D1 was touched, so any repo with more than 20 stale
+    // rows was unrepairable (#213).
+    stubOpenListing([]);
+    const { env, getBatchSizes } = mkEnv(openRows(53));
+
+    await backfillIssueState(REPO, env, { limit: 200 });
+
+    expect(Math.max(...getBatchSizes)).toBeLessThanOrEqual(VECTORIZE_GET_BY_IDS_MAX);
+    expect(getBatchSizes.reduce((a, b) => a + b, 0)).toBe(53);
   });
 });
 
