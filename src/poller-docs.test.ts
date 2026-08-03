@@ -28,6 +28,7 @@ const { docVectorId } = await import("./pipeline.js");
 const REPO = "acme/widgets";
 const WATERMARK_KEY = `docs:${REPO}`;
 const TREE_URL = `https://api.github.com/repos/${REPO}/git/trees/HEAD?recursive=1`;
+const CONTENTS_PREFIX = `https://api.github.com/repos/${REPO}/contents/`;
 
 /** Constant mirrored from `src/poller.ts`. */
 const DELETE_BUDGET = 5;
@@ -39,11 +40,22 @@ const DELETE_BUDGET = 5;
  * the conditional-request contract by returning 304 when the poller sends back
  * the matching `If-None-Match`.
  */
-function stubTree(paths: string[], etag = 'W/"tree-1"') {
+function stubTree(
+  paths: string[],
+  etag = 'W/"tree-1"',
+  opts: { failContent?: boolean } = {},
+) {
   const conditionalHits: string[] = [];
+  /** Doc paths whose content the poller actually fetched this run. */
+  const contentFetches: string[] = [];
 
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.startsWith(CONTENTS_PREFIX)) {
+      contentFetches.push(url.slice(CONTENTS_PREFIX.length));
+      if (opts.failContent) throw new Error("simulated Contents API outage");
+      return Response.json({ content: btoa("# doc body"), encoding: "base64" });
+    }
     if (url !== TREE_URL) {
       throw new Error(`unexpected fetch in docs stub: ${url}`);
     }
@@ -64,7 +76,7 @@ function stubTree(paths: string[], etag = 'W/"tree-1"') {
   });
 
   vi.stubGlobal("fetch", fetchMock);
-  return { fetchMock, conditionalHits };
+  return { fetchMock, conditionalHits, contentFetches };
 }
 
 /**
@@ -141,6 +153,13 @@ const stored = (path: string): DocRecord => ({
   path,
   blobSha: `blob-${path}`,
   updatedAt: "2026-08-01T00:00:00Z",
+});
+
+/** A stored doc whose blob SHA is stale, so the poller sees it as changed and
+ *  routes it into the embed path. */
+const staleStored = (path: string): DocRecord => ({
+  ...stored(path),
+  blobSha: "blob-outdated",
 });
 
 beforeEach(() => {
@@ -282,6 +301,73 @@ describe("poller: pollDocs delete budget", () => {
     await pollDocs(REPO, env, store.stub);
 
     expect(store.deletes).toEqual(["docs/gone.md"]);
+    expect(store.etag()).toBe('W/"tree-1"');
+  });
+});
+
+describe("poller: pollDocs ETag hold on embed failure", () => {
+  // The hole issue #211 closed. Both per-run caps held the tree ETag back, but a
+  // failed embed did not — and a failed embed leaves exactly the same leftover: a
+  // doc still absent from the retrieval surfaces. Storing the fresh ETag made the
+  // next run answer 304 and return before `changedEntries` was even computed, so
+  // the doc waited for some *other* file in the repo to change.
+  const PRIOR_ETAG = 'W/"tree-prior"';
+
+  it("holds the prior ETag when a doc failed to embed", async () => {
+    stubTree(["docs/broken.md"]);
+    const store = makeDocStore([staleStored("docs/broken.md")], PRIOR_ETAG);
+    const { env } = makeDocEnv();
+    processAndUpsertDocMock.mockResolvedValue({ embedded: false, failed: true });
+
+    await pollDocs(REPO, env, store.stub);
+
+    expect(processAndUpsertDocMock).toHaveBeenCalledTimes(1);
+    expect(store.etag()).toBe(PRIOR_ETAG);
+  });
+
+  it("holds the prior ETag when the content fetch threw", async () => {
+    // The `catch` arm of the loop counts as a failure too — same leftover.
+    const store = makeDocStore([staleStored("docs/broken.md")], PRIOR_ETAG);
+    const { env } = makeDocEnv();
+    stubTree(["docs/broken.md"], 'W/"tree-1"', { failContent: true });
+
+    await pollDocs(REPO, env, store.stub);
+
+    expect(processAndUpsertDocMock).not.toHaveBeenCalled();
+    expect(store.etag()).toBe(PRIOR_ETAG);
+  });
+
+  it("re-detects the failed doc on the next run, which is what the hold buys", async () => {
+    const store = makeDocStore([staleStored("docs/broken.md")], PRIOR_ETAG);
+    const { env } = makeDocEnv();
+    processAndUpsertDocMock.mockResolvedValue({ embedded: false, failed: true });
+
+    stubTree(["docs/broken.md"]);
+    await pollDocs(REPO, env, store.stub);
+
+    // Next run: the held ETag does not match the tree (this run proved that by
+    // getting a 200 for it), so the tree comes back 200 and the doc — whose
+    // `blobSha` the failed embed never advanced — is changed again.
+    const second = stubTree(["docs/broken.md"]);
+    processAndUpsertDocMock.mockClear();
+    processAndUpsertDocMock.mockResolvedValue({ embedded: true, failed: false });
+    await pollDocs(REPO, env, store.stub);
+
+    expect(second.conditionalHits).toEqual([PRIOR_ETAG]);
+    expect(second.contentFetches).toEqual(["docs/broken.md"]);
+    expect(processAndUpsertDocMock).toHaveBeenCalledTimes(1);
+    // Nothing left behind now, so the ETag is finally allowed to advance.
+    expect(store.etag()).toBe('W/"tree-1"');
+  });
+
+  it("advances the ETag when every changed doc embedded cleanly", async () => {
+    const store = makeDocStore([staleStored("docs/ok.md")], PRIOR_ETAG);
+    const { env } = makeDocEnv();
+    const { contentFetches } = stubTree(["docs/ok.md"]);
+
+    await pollDocs(REPO, env, store.stub);
+
+    expect(contentFetches).toEqual(["docs/ok.md"]);
     expect(store.etag()).toBe('W/"tree-1"');
   });
 });

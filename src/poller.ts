@@ -39,12 +39,23 @@ import { deleteEdgesForVector } from "./graph.js";
 /** GitHub API page size */
 const PER_PAGE = 100;
 
-/** Maximum number of embeddings to generate per single cron run.
+/** Maximum number of embeddings the issue / PR poller generates per cron run.
  *  Prevents Workers AI rate-limit errors on large repos.
  *  Remaining issues are stored with empty bodyHash and retried next cron.
  *  The retry only happens because the watermark is held at the first such item
- *  (see `nextIssueWatermark`); the empty hash marks the item, it does not fetch it. */
-const MAX_EMBEDDINGS_PER_RUN = 50;
+ *  (see `nextIssueWatermark`); the empty hash marks the item, it does not fetch it.
+ *
+ *  Scope: `pollRepo` only. The releases and docs surfaces are bounded by their
+ *  own fan-out caps (`MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN` /
+ *  `MAX_DOC_FETCHES_PER_REPO_PER_RUN`, both 10), which sit below this number and
+ *  therefore always fire first — so those loops carry no embedding guard of their
+ *  own (issue #211). Raising either cap past this value means reinstating one;
+ *  the note at each cap site says so. Comments and wiki have their own budgets
+ *  (`MAX_COMMENTS_EMBEDDED_PER_REPO` / `MAX_WIKI_EMBEDDINGS_PER_RUN`).
+ *
+ *  Exported so the relation that keeps those two loops guard-free is asserted by
+ *  a test rather than only stated in comments (issue #211). */
+export const MAX_EMBEDDINGS_PER_RUN = 50;
 
 /** Maximum number of API pages to fetch per single cron run.
  *  Prevents Cloudflare Worker CPU time limit on large repos (e.g. 900+ issues initial sync).
@@ -106,8 +117,12 @@ const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 10;
  *    - Cap = 10. Worst-case 5 × 10 × 5 = 250 subrequests for the docs surface
  *      across all repos, well under the per-surface envelope.
  *  Remaining changed docs are picked up on the next cron run (blob SHA stays
- *  unchanged in the store until the doc is successfully upserted). */
-const MAX_DOC_FETCHES_PER_REPO_PER_RUN = 10;
+ *  unchanged in the store until the doc is successfully upserted).
+ *
+ *  Must stay below `MAX_EMBEDDINGS_PER_RUN`: that relation is what makes the
+ *  docs loop's embed count bounded without a guard of its own (issue #211).
+ *  Asserted by a test; see the note at the cap site in `pollDocs`. */
+export const MAX_DOC_FETCHES_PER_REPO_PER_RUN = 10;
 
 /** Maximum docs reaped (Vectorize + FTS5 + store row) per repo per cron run.
  *  Mirrors `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`: each reap fans out to 3
@@ -144,8 +159,12 @@ const MAX_DOC_DELETIONS_PER_REPO_PER_RUN = 5;
  *      `MAX_EMBEDDINGS_PER_RUN=50` × ~5 ≈ 250, the LIGHT_CRON worst case stays
  *      around 750 subrequests, well under the 1000 ceiling.
  *  Remaining releases are stored with empty bodyHash so the next cron run
- *  retries them (existing pattern in `pollReleases`). */
-const MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN = 10;
+ *  retries them (existing pattern in `pollReleases`).
+ *
+ *  Must stay below `MAX_EMBEDDINGS_PER_RUN`: that relation is what makes the
+ *  releases loop's embed count bounded without a guard of its own (issue #211).
+ *  Asserted by a test; see the note at the cap site in `pollReleases`. */
+export const MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN = 10;
 
 /** Maximum number of commits fetched in the forward (webhook-redundancy) phase
  *  of the diff poller per repo per run.
@@ -631,8 +650,14 @@ async function fetchReleases(
 
 /**
  * Poll a single repository for release updates.
+ *
+ * Holds the releases ETag back whenever the run leaves work behind — the upsert
+ * cap deferred releases (issue #149) or an embed failed (issue #211) — so the
+ * next run is not answered 304 before it can see the retry markers.
+ *
+ * Exported for tests; production callers reach it through `handleScheduled`.
  */
-async function pollReleases(
+export async function pollReleases(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
@@ -720,36 +745,15 @@ async function pollReleases(
       continue;
     }
 
-    // Enforce per-run embedding limit
-    if (embedded >= MAX_EMBEDDINGS_PER_RUN) {
-      if (embedded === MAX_EMBEDDINGS_PER_RUN) {
-        console.warn(
-          `Release embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
-          `Remaining releases will be retried next cron run.`,
-        );
-      }
-      // Store record with empty bodyHash to trigger retry on next poll
-      const name = release.name ?? release.tag_name;
-      const record: ReleaseRecord = {
-        repo,
-        tagName: release.tag_name,
-        name,
-        body: release.body ?? "",
-        prerelease: release.prerelease,
-        bodyHash: "",
-        createdAt: release.created_at,
-        publishedAt: release.published_at ?? release.created_at,
-      };
-      await storeStub.fetch(
-        new Request("http://store/upsert-release", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(record),
-        }),
-      );
-      continue;
-    }
-
+    // No embedding cap of its own on this surface: `embedded` can never exceed
+    // `upsertsIssued`, and the cap above stops the loop at
+    // MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN (10), below MAX_EMBEDDINGS_PER_RUN
+    // (50). A guard here used to exist and was unreachable by that relation;
+    // issue #211 removed it, because an unreachable branch cannot be exercised by
+    // a test and left the reader unable to tell whether it also owed the ETag
+    // hold below. Raise this cap past MAX_EMBEDDINGS_PER_RUN and an embedding
+    // guard has to come back here, folded into `leftWorkBehind`. Same note in
+    // `pollDocs`.
     upsertsIssued++;
     const result = await processAndUpsertRelease(env, storeStub, repo, release);
 
@@ -762,31 +766,33 @@ async function pollReleases(
     }
   }
 
-  // Update watermark with ETag — but skip the ETag write when the run hit
-  // the per-run upsert cap, otherwise the next cron will short-circuit on
-  // 304 and never reprocess the deferred (empty-bodyHash) releases (issue
-  // #149).
-  if (!upsertBudgetExhausted) {
-    await storeStub.fetch(
-      new Request("http://store/watermark", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: watermarkKey, lastPolledAt: new Date().toISOString(), etag: responseEtag }),
+  // Update watermark with ETag — but hold the prior ETag whenever the run left
+  // work behind, on the same condition the issue / PR and docs surfaces use
+  // (issue #215 / #211): the upsert cap deferred releases (issue #149), or an
+  // embed failed. Both mark the release with an empty `bodyHash` for retry, and
+  // both need the next run to actually look. Storing the fresh ETag would make
+  // that run's conditional request answer 304 and return before it did — the
+  // marked release would then wait for some *other* release to change.
+  // Holding the prior ETag is enough to force a 200: this run sent it and got
+  // 200 back, so the list already differs from it. `lastPolledAt` still advances
+  // so the run stays observable.
+  const leftWorkBehind = upsertBudgetExhausted || failed > 0;
+  await storeStub.fetch(
+    new Request("http://store/watermark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: watermarkKey,
+        lastPolledAt: new Date().toISOString(),
+        etag: leftWorkBehind ? storedEtag : responseEtag,
       }),
-    );
-  } else {
-    await storeStub.fetch(
-      new Request("http://store/watermark", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: watermarkKey, lastPolledAt: new Date().toISOString(), etag: storedEtag }),
-      }),
-    );
-  }
+    }),
+  );
 
   console.log(
     `${repo} releases: ${releases.length} total, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ` +
-      `upserts_issued=${upsertsIssued}/${MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN}`,
+      `upserts_issued=${upsertsIssued}/${MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN}` +
+      `${leftWorkBehind ? " (ETag held)" : ""}`,
   );
 }
 
@@ -1044,15 +1050,14 @@ export async function pollDocs(
       break;
     }
 
-    if (embedded >= MAX_EMBEDDINGS_PER_RUN) {
-      console.warn(
-        `Doc embedding batch limit reached (${MAX_EMBEDDINGS_PER_RUN}). ` +
-        `Remaining docs will be retried next cron run.`,
-      );
-      // Stop processing — unchanged blobSha in store means next poll retries
-      break;
-    }
-
+    // No embedding cap of its own on this surface: `embedded` can never exceed
+    // `fetchesIssued`, and the cap above stops the loop at
+    // MAX_DOC_FETCHES_PER_REPO_PER_RUN (10), below MAX_EMBEDDINGS_PER_RUN (50).
+    // A guard here used to exist and was unreachable by that relation; issue #211
+    // removed it, because an unreachable branch cannot be exercised by a test and
+    // left the reader unable to tell whether it also owed the ETag hold below.
+    // Raise this cap past MAX_EMBEDDINGS_PER_RUN and an embedding guard has to
+    // come back here, folded into `holdEtag`. Same note in `pollReleases`.
     try {
       // Fetch file content
       fetchesIssued++;
@@ -1122,14 +1127,18 @@ export async function pollDocs(
     removedDocs++;
   }
 
-  // Update watermark with ETag — but only when the run completed without
-  // hitting a per-run cap. If either cap was hit, leftover work remains:
-  // changed docs still to embed (issue #149) or deleted docs still to reap
-  // (issue #203). Persisting the new ETag would cause the next cron to
-  // short-circuit on 304 and never see either. Holding the prior ETag forces a
-  // fresh tree fetch next run so `changedEntries` and `deletedDocs` both
-  // repopulate. lastPolledAt is still bumped so observability sees the run.
-  const holdEtag = fetchBudgetExhausted || deleteBudgetExhausted;
+  // Update watermark with ETag — but only when the run left no work behind, the
+  // same condition the issue / PR and releases surfaces use (issue #215 / #211).
+  // Three ways work is left: changed docs still to embed (fetch cap, issue
+  // #149), deleted docs still to reap (delete cap, issue #203), or a doc whose
+  // embed failed (issue #211 — its store row keeps the old `blobSha`, so it is
+  // still "changed" next run). Persisting the new ETag would cause the next cron
+  // to short-circuit on 304 and never see any of them. Holding the prior ETag
+  // forces a fresh tree fetch next run so `changedEntries` and `deletedDocs`
+  // both repopulate — this run sent that ETag and got 200 back, so the tree
+  // already differs from it. lastPolledAt is still bumped so observability sees
+  // the run.
+  const holdEtag = fetchBudgetExhausted || deleteBudgetExhausted || failed > 0;
   await storeStub.fetch(
     new Request("http://store/watermark", {
       method: "POST",
@@ -1145,7 +1154,8 @@ export async function pollDocs(
   console.log(
     `${repo} docs: ${docEntries.length} found, ${embedded} embedded, ${skipped} unchanged, ${failed} failed, ` +
       `${removedDocs}/${deletedDocs.length} deleted, ` +
-      `fetches_issued=${fetchesIssued}/${MAX_DOC_FETCHES_PER_REPO_PER_RUN}`,
+      `fetches_issued=${fetchesIssued}/${MAX_DOC_FETCHES_PER_REPO_PER_RUN}` +
+      `${holdEtag ? " (ETag held)" : ""}`,
   );
 }
 

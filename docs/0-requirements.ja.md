@@ -136,9 +136,17 @@ Responsibilities:
 
 各 invocation は独立した subrequest 予算を持つ。dispatch は `controller.cron` で `handleScheduled` 内で行う。未知の cron 表現は no-op log で silent regression を防止する。
 
+**ETag の据え置き.** 条件付き request を出す surface は 3 つある — issue / PR（issues list への `If-None-Match`）、releases（releases list）、docs（repository tree）— そしてこの 3 面は 1 つの規則に従う: **やり残しがある run は、受け取った ETag を保存しない。** やり残しとは retrieval surface に載らなかった項目のことで、理由は問わない — per-run cap が見送った場合も、embed が失敗した場合も同じ。どちらでも項目には retry の印が付き（空の `bodyHash`、または store 側で進んでいない `blobSha`）、次 run がその項目を見に来ることが前提になる。ところが ETag を保存すると、次 run の条件付き request は 304 を返して項目を見る前に return してしまい、印の付いた項目は同じ surface の**無関係な**項目が変更されるまで待たされる。`lastPolledAt` は進めるので、据え置いた run 自体は観測できる。
+
+条件を 3 面それぞれに持たせず 1 つに揃えているのは、面ごとの条件が離れていくからである。releases 面は upsert cap だけを、docs 面は 2 本の cap だけを見ていたため、どちらも embed 失敗では ETag を更新してしまい retry が止まっていた（issue #211）。この一般形に最初に到達したのは issue / PR 面（issue #215）。*据え置き*の実装は releases / docs 面が「直前に保存した ETag を保持」、issue / PR 面が「何も保存しない」だが、この 2 つは等価である。保存済み ETag を送って 200 が返った run は、その surface が既にその ETag と異なることを証明しているので、次の request はどちらの形でも 200 になる。
+
+残りの取り込み surface がこの規則の外にあるのは、書き漏らしではなく構造上の理由である。comment poller は条件付き request を出さない（毎 run 直近の parent を歩き直す）。wiki poller の `etag` watermark 列が持っているのは HTTP ETag ではなく walk の cursor である。
+
 issue / PR poller は `(lastPolledAt, now]` を `updated_at` 昇順で取得する。1 run あたり最大 `MAX_PAGES_PER_RUN` × 100 = 200 件を fetch し、そのうち embed するのは最大 `MAX_EMBEDDINGS_PER_RUN` = 50 件。この surface は commit diff と同じ watermark 不変条件に従う: **その run が retrieval surface に載せられなかった最も古い項目を watermark が追い越さない** — embedding 予算で見送った項目と、embed に失敗した項目の両方が対象。2 つの境界は別物として扱う。fetch がどこまで届いたか（poll 開始時刻、pagination が打ち切られた場合は最後に fetch した項目の `updated_at`）は上限にすぎず、取り込み境界がその下に watermark を留める。留める位置は境界の 1 秒手前で、GitHub の `since` filter が境界の項目自身を再び含むようにするため。
 
-この pin が無い間、この surface は「fetch 件数 − embed 件数」の速度で取りこぼしていた。旧実装の watermark はどちらの分岐でも見送った項目より**新しい**位置に着地する — batch は昇順なので、予算はいつもその新しい端で尽きる — 一方で見送った項目に付く空の `bodyHash` は retry の印であって、以後どの `since` window もその項目を fetch しない。2026-08-03 の実測で、索引対象 repository の issue / pull request 履歴の約 55% が索引に載っていなかった。欠落が連続した番号帯ではなく散発に見えるのは、脱落が番号順ではなく `updated_at` 順に起きるため（issue #210）。**ETag も同じ条件で書き戻さない。** docs poller が tree ETag を保持するのと同じ理由で、ETag を保存すると次 run の条件付き request が 304 を返し、残りを見る前に return してしまう。
+この pin が無い間、この surface は「fetch 件数 − embed 件数」の速度で取りこぼしていた。旧実装の watermark はどちらの分岐でも見送った項目より**新しい**位置に着地する — batch は昇順なので、予算はいつもその新しい端で尽きる — 一方で見送った項目に付く空の `bodyHash` は retry の印であって、以後どの `since` window もその項目を fetch しない。2026-08-03 の実測で、索引対象 repository の issue / pull request 履歴の約 55% が索引に載っていなかった。欠落が連続した番号帯ではなく散発に見えるのは、脱落が番号順ではなく `updated_at` 順に起きるため（issue #210）。**ETag も同じ条件で書き戻さない**（上記「ETag の据え置き」に従う）。
+
+releases poller は releases list 全体を 1 回の条件付き request で読み、1 repo 1 run あたり最大 `MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN` = 10 件を upsert する。list は有界で毎回全件読み直すため、この面は watermark を持たない。したがって ETag の据え置きがこの面唯一のやり残し機構である。cap が見送った release も、embed に失敗した release も、どちらも空の `bodyHash` で保存され、次 run で拾えるのは ETag を据え置いたからにすぎない（issue #149 / #211）。
 
 commit diff poller は 2-phase 構成:
 
@@ -157,7 +165,9 @@ commit diff poller は 2-phase 構成:
 
 docs poller は `If-None-Match` 付きの条件付きリクエストで repository tree を読み、保存済みの doc record と差分を取る。blob SHA が動いた entry は re-embed し、store にあって tree に無い entry は削除する。**削除は 3 面を teardown する** — Vectorize / D1 FTS5 / structured store — それぞれ独立に実行するので、Vectorize の失敗が実際に retrieval される D1 行を取り残すことはない。wiki 側の 4 面に対してここが 3 面なのは、doc vector ID が `doc_edges` の端点になりえないため。`indexWikiEdges` が唯一の writer であり、src 側も算出される dst 側も wiki vector ID になる。この不変条件が変わったら、ここに edge の teardown を足すこと（issue #203）。なお削除が届くのは現行の vector ID 世代だけで、移行前世代は構造上到達できず、別経路で掃除する（Vector Store の「移行前世代」を参照）。
 
-**削除の枠.** 削除は 1 repo 1 run あたり `MAX_DOC_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap する。wiki の削除と同じ guard で、1 件あたり 3 subrequest かかるため、大量削除に対して上限なく回すと light cron の invocation 予算を単独で食い潰し、後ろに並ぶ repo を飢えさせうる — 1 つの PR が `.md` を 66 件削除すれば、その全件が 1 run に集中する。削除済み doc の store 行は消えるので残りの集合は縮む一方であり、drain は単調。したがってこの surface には per-run cap が 2 本あり、**どちらが効いても tree ETag は据え置く**: fetch 枠は未処理の変更 doc を残し（issue #149）、削除枠は未削除の doc を残す（issue #203）。どちらの場合も ETag を進めてしまうと次 run が 304 で返り、残りを見ないまま終わる。`lastPolledAt` は進めるので run 自体は観測できる。
+**削除の枠.** 削除は 1 repo 1 run あたり `MAX_DOC_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap する。wiki の削除と同じ guard で、1 件あたり 3 subrequest かかるため、大量削除に対して上限なく回すと light cron の invocation 予算を単独で食い潰し、後ろに並ぶ repo を飢えさせうる — 1 つの PR が `.md` を 66 件削除すれば、その全件が 1 run に集中する。削除済み doc の store 行は消えるので残りの集合は縮む一方であり、drain は単調。したがってこの surface にはやり残しの経路が 3 本あり、**どれが効いても tree ETag は据え置く**（上記「ETag の据え置き」に従う）: fetch 枠は未処理の変更 doc を残し（issue #149）、削除枠は未削除の doc を残し（issue #203）、embed 失敗は store 行が古い `blobSha` を保持したままの doc を残す（issue #211）。
+
+docs / releases のどちらの loop も、自前の embedding cap を持たない。両者の fan-out cap（各 10）が `MAX_EMBEDDINGS_PER_RUN` = 50 より小さく、embed 件数を構造的に抑えているため、かつて置かれていた guard は到達不能だった。到達不能な分岐は「それも ETag の据え置きを負うべきか」を読み手が判断できない状態を残し、issue #211 の穴が欠陥ではなく曖昧さとして読めてしまう原因になっていた。**この定数関係はテストで検証している**——各 cap の位置のコメントに委ねてはいない。この repo の fan-out cap は実際に調整される（issue #134 は comment fetch cap を 30 から 10 に下げた）ので、50 より上に引き上げた時に、その面の embed 上限が黙って消えてしまうからである。assertion が落ちることは「新しい cap が誤り」という判定ではない。その loop に embedding guard を戻し、見送った項目が ETag を据え置けるよう、その loop の ETag 据え置き条件に組み込む必要がある、という意味である。
 
 wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込み経路。Wiki は別 git repo (`{repo}.wiki.git`) に存在し、REST API も webhook event も持たないため、poller が repo ごとに 3 段の HTTP 呼び出しで処理する:
 
