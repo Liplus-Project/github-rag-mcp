@@ -401,7 +401,7 @@ Parameters:
 
 - `repo` — `owner/repo`
 - `dry_run` — `true` measures the gap over the scan range and fetches nothing from GitHub
-- `limit` — candidate numbers attempted per call, `1..100` (default `25`). Ignored on a dry run
+- `limit` — candidate numbers attempted per call, `1..20` (default `15`). Ignored on a dry run
 - `cursor` — issue number to resume after; pass back the `nextCursor` of the previous response
 
 Authentication:
@@ -411,19 +411,21 @@ Authentication:
 Response:
 
 ```json
-{ "repo": "owner/repo", "dryRun": false, "cursor": 0, "limit": 25, "maxNumber": 1690,
-  "scannedTo": 613, "candidates": 25, "attempted": 25, "indexed": 24, "absent": 1,
-  "failed": 0, "nextCursor": 613, "done": false }
+{ "repo": "owner/repo", "dryRun": false, "cursor": 0, "limit": 15, "maxNumber": 1690,
+  "scannedTo": 603, "candidates": 15, "attempted": 15, "indexed": 14, "absent": 1,
+  "failed": 0, "nextCursor": 603, "done": false }
 ```
 
 Operational notes:
 
 - start with `dry_run=true` to size the job. It spends no embedding budget and reports `candidates` over the range it scanned (up to 5000 numbers per call)
-- call it repeatedly, feeding `nextCursor` back in, until `done` is `true`. At the default `limit` a repository missing 900 items takes 36 calls
-- this endpoint **embeds**, unlike the two repairs above. `limit` is a Workers AI budget as much as a subrequest budget; raising it above 100 is refused
+- call it repeatedly, feeding `nextCursor` back in, until `done` is `true`. At the default `limit` a repository missing 900 items takes 60 calls
+- this endpoint **embeds**, unlike the two repairs above, and the ingest fan-out per candidate is expensive: measured at roughly 40 of the invocation's 1000 subrequests (issue #216). The defaults are calibrated to it — `15` is the largest value production completed with `failed: 0`, `25` lost its last candidate on every call, and `50` failed the whole call with `Too many subrequests by single Worker invocation`. Anything above `20` is refused
+- the `limit` does not have to be exact. The cursor is **held one below the first candidate the call failed to ingest**, so the next call reopens on that number instead of skipping it — an over-generous `limit` costs a wasted call, not a missing item
 - safe to repeat: a number that already carries a `search_docs` row is never fetched, so a re-run of a finished sweep reports `candidates: 0`. A call that fails mid-sweep is resumed from the same `cursor`
-- `absent` counts numbers GitHub answers 404 for — deleted issues, and numbers whose item was transferred out. They stay candidates on every future sweep, which is why a finished repository still reports a small non-zero `candidates`
-- `failed` counts candidates whose embed did not land. They are retried by the next sweep over the same range, not by the current call
+- `absent` counts numbers GitHub answers 404 for — deleted issues, and numbers whose item was transferred out. They stay candidates on every future sweep, which is why a finished repository still reports a small non-zero `candidates`. They do not hold the cursor: nothing will ever ingest them, so holding there would stall the sweep rather than bound a retry
+- `failed` counts candidates whose embed did not land. The next call retries them first, because the cursor was held below the earliest one
+- a candidate that fails on *every* attempt therefore stops the sweep, and says so: `nextCursor` comes back equal to the `cursor` you passed in, with `failed` at 1 or more. Step over it by hand with `cursor = nextCursor + 1` — the blocking number is `nextCursor + 1`, and the run log names it as `held before #N`
 - the ingest is forced past the body-hash check, so an item whose vector exists but whose FTS5 row is missing is repaired too. This is why the endpoint is not equivalent to waiting for the next poll
 - verify by counting distinct numbers: `SELECT COUNT(DISTINCT number) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request')` should approach the repository's real issue + PR count
 
