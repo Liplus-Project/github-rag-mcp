@@ -41,7 +41,9 @@ const PER_PAGE = 100;
 
 /** Maximum number of embeddings to generate per single cron run.
  *  Prevents Workers AI rate-limit errors on large repos.
- *  Remaining issues are stored with empty bodyHash and retried next cron. */
+ *  Remaining issues are stored with empty bodyHash and retried next cron.
+ *  The retry only happens because the watermark is held at the first such item
+ *  (see `nextIssueWatermark`); the empty hash marks the item, it does not fetch it. */
 const MAX_EMBEDDINGS_PER_RUN = 50;
 
 /** Maximum number of API pages to fetch per single cron run.
@@ -192,6 +194,17 @@ const MAX_DIFF_FORWARD_WINDOW_SHRINKS = 8;
  *  idempotent on (repo, commit_sha, file_path). */
 const DIFF_RETRY_BOUNDARY_BACKOFF_MS = 1000;
 
+/** Safety margin subtracted from the issue / PR poller's retry boundary, for the
+ *  same reason as `DIFF_RETRY_BOUNDARY_BACKOFF_MS`: `/issues` documents `since`
+ *  as "only show results that were last updated *after* the given time", so an
+ *  item whose timestamp equals the watermark may be excluded — and items sharing
+ *  an `updated_at` are common (one bulk label edit touches many). Without the
+ *  margin the very item the watermark is pinned to could fall outside the next
+ *  run's window, which is the defect being fixed, reintroduced one item wide.
+ *  Re-fetching a few already-ingested items costs a hash comparison each and no
+ *  embedding. */
+const ISSUE_RETRY_BOUNDARY_BACKOFF_MS = 1000;
+
 /** Sentinel value indicating GitHub returned 304 Not Modified */
 const NOT_MODIFIED = Symbol("NOT_MODIFIED");
 
@@ -318,23 +331,39 @@ async function fetchAllIssues(
   return { issues: allIssues, capped: false, notModified: false, responseEtag };
 }
 
+/** Outcome of one `processIssues` batch. */
+export interface IssueBatchStats {
+  processed: number;
+  embedded: number;
+  skipped: number;
+  failed: number;
+  /** `updated_at` of the first item the batch did not get onto the retrieval
+   *  surfaces — deferred by the embedding budget, or failed to embed. Absent when
+   *  every item landed. The caller pins the watermark before it (issue #210). */
+  retryBoundary?: string;
+}
+
 /**
  * Process a batch of issues: compute hashes, generate embeddings for changed items,
  * upsert into Vectorize and IssueStore.
  *
  * Delegates per-item embedding+upsert to the shared pipeline, but manages
- * batch-level concerns: embedding count cap and stats tracking.
+ * batch-level concerns: embedding count cap, stats tracking, and reporting the
+ * first item left uningested so the caller can hold the watermark before it.
+ * The batch arrives sorted by `updated_at` ascending, so the first such item is
+ * also the earliest one — pinning to it covers every later one too.
  */
 async function processIssues(
   issues: GitHubIssueData[],
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
-): Promise<{ processed: number; embedded: number; skipped: number; failed: number }> {
+): Promise<IssueBatchStats> {
   let processed = 0;
   let embedded = 0;
   let skipped = 0;
   let failed = 0;
+  let retryBoundary: string | undefined;
 
   for (const issue of issues) {
     // Enforce per-run embedding limit to avoid Workers AI rate limits.
@@ -346,8 +375,8 @@ async function processIssues(
           `Remaining issues will be retried next cron run.`,
         );
       }
+      retryBoundary ??= issue.updated_at;
       // Store record with empty bodyHash to trigger retry on next poll
-      const body = issue.body ?? "";
       const type: IssueRecord["type"] = issue.pull_request
         ? "pull_request"
         : "issue";
@@ -383,18 +412,62 @@ async function processIssues(
       embedded++;
     } else if (result.failed) {
       failed++;
+      retryBoundary ??= issue.updated_at;
     }
 
     processed++;
   }
 
-  return { processed, embedded, skipped, failed };
+  return { processed, embedded, skipped, failed, retryBoundary };
+}
+
+/**
+ * Compute the next issue / PR poller watermark.
+ *
+ * Invariant, mirroring the commit-diff surface (issue #178 / #179): **the
+ * watermark never advances past the earliest item this run left off the
+ * retrieval surfaces.** Before issue #210 the watermark moved unconditionally —
+ * to the poll start time, or to the last fetched item's `updated_at` when
+ * pagination capped. Both are *newer* than every deferred item, because the
+ * fetch is sorted `updated` ascending and the embedding budget always runs out
+ * on the newest end of the batch. So an item the budget deferred fell out of
+ * every later `since` window: it was marked for retry (empty bodyHash) and then
+ * never fetched again. At 200 fetched vs 50 embedded per run, that stranded 150
+ * items per run during an initial sync.
+ *
+ * @param since          watermark the run started from; absent on initial sync
+ * @param candidate      watermark the run would store if everything landed
+ * @param retryBoundary  `updated_at` of the first uningested item, if any
+ * @returns the watermark to persist, or `undefined` to leave it unchanged
+ */
+export function nextIssueWatermark(
+  since: string | undefined,
+  candidate: string,
+  retryBoundary: string | undefined,
+): string | undefined {
+  if (!retryBoundary) return candidate;
+
+  // An item we cannot place on the timeline cannot bound the retry window;
+  // holding keeps the whole period retryable.
+  const boundaryTime = Date.parse(retryBoundary);
+  if (Number.isNaN(boundaryTime)) return since;
+
+  const pinned = new Date(
+    boundaryTime - ISSUE_RETRY_BOUNDARY_BACKOFF_MS,
+  ).toISOString();
+  if (since === undefined) return pinned;
+
+  // Never regress: the boundary sits at (or before) the current watermark when
+  // the first item of the batch is the one that failed.
+  const sinceTime = Date.parse(since);
+  if (Number.isNaN(sinceTime)) return pinned;
+  return Date.parse(pinned) > sinceTime ? pinned : since;
 }
 
 /**
  * Poll a single repository for issue/PR updates.
  */
-async function pollRepo(
+export async function pollRepo(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
@@ -452,40 +525,61 @@ async function pollRepo(
   // Process issues (embedding + store)
   const stats = await processIssues(issues, repo, env, storeStub);
 
-  // Watermark strategy:
+  // Watermark strategy, in two steps.
+  //
+  // Step 1 — how far the *fetch* reached:
   // - If all pages were fetched (not capped): use pollStartTime so next run
   //   picks up anything updated during this fetch.
   // - If pagination was capped: use the updated_at of the last fetched issue
   //   (sorted by updated asc) so the next cron continues from where we left off.
   //   Using pollStartTime here would skip the remaining unfetched issues.
-  let nextWatermark: string;
+  const fetchWatermark = capped
+    ? issues[issues.length - 1].updated_at
+    : pollStartTime;
   if (capped) {
-    const lastIssue = issues[issues.length - 1];
-    nextWatermark = lastIssue.updated_at;
     console.log(
-      `${repo}: pagination was capped — watermark set to last fetched issue updated_at: ${nextWatermark}`,
+      `${repo}: pagination was capped — fetch reached ${fetchWatermark}`,
     );
-  } else {
-    nextWatermark = pollStartTime;
   }
 
-  // Update watermark after successful processing (with new ETag for next conditional request)
-  // When pagination is capped, don't store ETag — the partial fetch means the ETag
-  // wouldn't match the next request which starts from a different watermark position.
-  await storeStub.fetch(
-    new Request("http://store/watermark", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        repo,
-        lastPolledAt: nextWatermark,
-        etag: capped ? undefined : responseEtag,
-      }),
-    }),
+  // Step 2 — how far the *ingest* reached. The fetch bound is an upper bound
+  // only: the embedding budget stops well short of it, and everything past the
+  // stopping point must stay inside the next run's window (issue #210).
+  const nextWatermark = nextIssueWatermark(
+    since,
+    fetchWatermark,
+    stats.retryBoundary,
   );
 
+  // Update watermark after successful processing (with new ETag for next conditional request).
+  // The ETag is withheld whenever the run is leaving work behind — pagination capped,
+  // or the ingest stopped short. Storing it would make the next run's conditional
+  // request answer 304 and return before it looked at the leftover, which is the same
+  // hold the docs poller applies to its tree ETag.
+  const holdEtag = capped || stats.retryBoundary !== undefined;
+  if (nextWatermark === undefined) {
+    console.warn(
+      `${repo}: watermark held — the first uningested item carries no usable updated_at`,
+    );
+  } else {
+    await storeStub.fetch(
+      new Request("http://store/watermark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo,
+          lastPolledAt: nextWatermark,
+          etag: holdEtag ? undefined : responseEtag,
+        }),
+      }),
+    );
+  }
+
   console.log(
-    `${repo}: ${stats.processed} processed, ${stats.embedded} embedded, ${stats.skipped} unchanged, ${stats.failed} failed`,
+    `${repo}: ${stats.processed} processed, ${stats.embedded} embedded, ` +
+    `${stats.skipped} unchanged, ${stats.failed} failed, ` +
+    `watermark=${nextWatermark ?? "held"}` +
+    `${stats.retryBoundary ? ` (pinned before ${stats.retryBoundary})` : ""}`,
   );
 }
 

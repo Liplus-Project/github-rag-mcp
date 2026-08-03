@@ -385,6 +385,48 @@ Operational notes:
 - if the dense write fails, the whole call fails before D1 is touched, leaving the window unrepaired rather than half-repaired. Retry with the same `cursor`
 - verify with a `state: "closed"` search for an item you know was closed, or by counting `search_docs` rows: `SELECT COUNT(*) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request') AND state = 'open'` should match the repository's real open count
 
+## 15. Index the issues and pull requests that never reached the index
+
+The poller embeds at most 50 items per run but fetches up to 200, and it used to move its watermark past the whole batch regardless. Everything the embedding budget deferred was therefore marked for a retry that no later `since` window would fetch, and roughly 55% of the issue and pull request history of the indexed repositories never reached the index (issue #210). The watermark is fixed at the source, but that only stops the leak: a stranded item is re-fetched only when its `updated_at` moves, and closed history never moves again. This endpoint walks the gap directly.
+
+Run it **after** deploying the watermark fix. In the other order, items indexed by the backfill are joined by new ones falling into the same hole.
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-issue-index?repo=owner/repo
+```
+
+Parameters:
+
+- `repo` — `owner/repo`
+- `dry_run` — `true` measures the gap over the scan range and fetches nothing from GitHub
+- `limit` — candidate numbers attempted per call, `1..100` (default `25`). Ignored on a dry run
+- `cursor` — issue number to resume after; pass back the `nextCursor` of the previous response
+
+Authentication:
+
+- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+
+Response:
+
+```json
+{ "repo": "owner/repo", "dryRun": false, "cursor": 0, "limit": 25, "maxNumber": 1690,
+  "scannedTo": 613, "candidates": 25, "attempted": 25, "indexed": 24, "absent": 1,
+  "failed": 0, "nextCursor": 613, "done": false }
+```
+
+Operational notes:
+
+- start with `dry_run=true` to size the job. It spends no embedding budget and reports `candidates` over the range it scanned (up to 5000 numbers per call)
+- call it repeatedly, feeding `nextCursor` back in, until `done` is `true`. At the default `limit` a repository missing 900 items takes 36 calls
+- this endpoint **embeds**, unlike the two repairs above. `limit` is a Workers AI budget as much as a subrequest budget; raising it above 100 is refused
+- safe to repeat: a number that already carries a `search_docs` row is never fetched, so a re-run of a finished sweep reports `candidates: 0`. A call that fails mid-sweep is resumed from the same `cursor`
+- `absent` counts numbers GitHub answers 404 for — deleted issues, and numbers whose item was transferred out. They stay candidates on every future sweep, which is why a finished repository still reports a small non-zero `candidates`
+- `failed` counts candidates whose embed did not land. They are retried by the next sweep over the same range, not by the current call
+- the ingest is forced past the body-hash check, so an item whose vector exists but whose FTS5 row is missing is repaired too. This is why the endpoint is not equivalent to waiting for the next poll
+- verify by counting distinct numbers: `SELECT COUNT(DISTINCT number) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request')` should approach the repository's real issue + PR count
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

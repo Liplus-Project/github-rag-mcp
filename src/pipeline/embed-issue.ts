@@ -37,6 +37,19 @@ export interface GitHubIssueData {
   html_url: string;
 }
 
+/** Per-call overrides for `processAndUpsertIssue`. */
+export interface ProcessIssueOptions {
+  /** Embed and re-upsert even when the stored hash matches.
+   *
+   *  The hash check answers "did the body change", which is the wrong question
+   *  when a retrieval surface is known to be missing the item: an embed whose
+   *  FTS5 mirror failed leaves the hash stored and the sparse row absent, and no
+   *  later poll reconciles it because the diff basis already matches. Only the
+   *  index backfill sets this (issue #210); the poll and webhook paths must keep
+   *  the hash check, or every run would re-embed the whole repository. */
+  force?: boolean;
+}
+
 /**
  * Process and upsert a single issue/PR: check hash, embed if changed, upsert to Vectorize + Store.
  *
@@ -44,6 +57,7 @@ export interface GitHubIssueData {
  * @param storeStub - Durable Object stub for IssueStore
  * @param repo - Repository in "owner/repo" format
  * @param issue - GitHub issue/PR data
+ * @param options - per-call overrides (see `ProcessIssueOptions`)
  * @returns UpsertResult indicating what happened
  */
 export async function processAndUpsertIssue(
@@ -51,6 +65,7 @@ export async function processAndUpsertIssue(
   storeStub: DurableObjectStub,
   repo: string,
   issue: GitHubIssueData,
+  options: ProcessIssueOptions = {},
 ): Promise<UpsertResult> {
   const body = issue.body ?? "";
   const title = issue.title;
@@ -71,7 +86,7 @@ export async function processAndUpsertIssue(
   let existing: IssueRecord | null = null;
   if (existingResp.ok) {
     existing = (await existingResp.json()) as IssueRecord;
-    if (existing.bodyHash === bodyHash) {
+    if (existing.bodyHash === bodyHash && options.force !== true) {
       needsEmbedding = false;
     }
   }

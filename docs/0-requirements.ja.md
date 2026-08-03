@@ -136,6 +136,10 @@ Responsibilities:
 
 各 invocation は独立した subrequest 予算を持つ。dispatch は `controller.cron` で `handleScheduled` 内で行う。未知の cron 表現は no-op log で silent regression を防止する。
 
+issue / PR poller は `(lastPolledAt, now]` を `updated_at` 昇順で取得する。1 run あたり最大 `MAX_PAGES_PER_RUN` × 100 = 200 件を fetch し、そのうち embed するのは最大 `MAX_EMBEDDINGS_PER_RUN` = 50 件。この surface は commit diff と同じ watermark 不変条件に従う: **その run が retrieval surface に載せられなかった最も古い項目を watermark が追い越さない** — embedding 予算で見送った項目と、embed に失敗した項目の両方が対象。2 つの境界は別物として扱う。fetch がどこまで届いたか（poll 開始時刻、pagination が打ち切られた場合は最後に fetch した項目の `updated_at`）は上限にすぎず、取り込み境界がその下に watermark を留める。留める位置は境界の 1 秒手前で、GitHub の `since` filter が境界の項目自身を再び含むようにするため。
+
+この pin が無い間、この surface は「fetch 件数 − embed 件数」の速度で取りこぼしていた。旧実装の watermark はどちらの分岐でも見送った項目より**新しい**位置に着地する — batch は昇順なので、予算はいつもその新しい端で尽きる — 一方で見送った項目に付く空の `bodyHash` は retry の印であって、以後どの `since` window もその項目を fetch しない。2026-08-03 の実測で、索引対象 repository の issue / pull request 履歴の約 55% が索引に載っていなかった。欠落が連続した番号帯ではなく散発に見えるのは、脱落が番号順ではなく `updated_at` 順に起きるため（issue #210）。**ETag も同じ条件で書き戻さない。** docs poller が tree ETag を保持するのと同じ理由で、ETag を保存すると次 run の条件付き request が 304 を返し、残りを見る前に return してしまう。
+
 commit diff poller は 2-phase 構成:
 
 - **forward phase** — `(lastPolledAt, pollStartTime]` の window を列挙し、その中の**古い側から**取り込む（webhook 取りこぼし時の redundancy）。watermark namespace は `diffs:${repo}`。
@@ -201,6 +205,8 @@ Responsibilities:
 - この経路の dense / sparse mirror は互いに独立して書く。vector が欠けている行（issue #210）でも sparse 側の state は更新される
 - commit diff は 1 commit 分の file リストを batch embed（Workers AI の `text: string[]` 対応を利用）し、1 回の Vectorize upsert で N vector を書き込む
 - batch size は `MAX_EMBEDDING_BATCH_SIZE`（既定 20）で上限。これを超える commit は複数 batch call に分割する
+
+**索引欠落の修復.** watermark の修正は漏れを止めるだけで、既に空いた穴は埋まらない — 取り残された項目が再 fetch されるのは `updated_at` が動いたときだけで、閉じた履歴はもう動かない。`POST /admin/backfill-issue-index?repo=owner/repo`（installation guide 参照）が欠落そのものを走査する。repository の issue 番号空間は密かつ有界なので、`search_docs` に issue / PR 行が無い番号がそのまま欠落集合であり、数値 cursor が「どこまで走査したか」を厳密に表せる。同じ集合を時刻 cursor で辿ると、欠陥が突いた順序をそのまま持ち込むことになる。GitHub 側に既に無い番号（削除・transfer 済み）は 404 を返すので、retry せず計上のみ。取り込みは body-hash 判定を強制的に飛ばす: 候補はいずれも retrieval surface が欠けていると分かっている項目であり、hash が一致していると（embed 成功後に FTS5 mirror が失敗した行がこの状態になる）そのまま恒久的に skip されてしまうため。state 修復と違いこちらは embed を伴うので、1 call の予算は Workers AI の予算であり、呼び出し側が batch を跨いで sweep を進める。`dry_run=true` は予算を使わずに欠落量だけを測る。
 
 **取り残した state の修復.** 上の順序欠陥が残した行は、生きている項目として検索に出続ける。通常の poll では到達できない — 差分検出の基準がすでに GitHub と一致しているため。`POST /admin/backfill-issue-state?repo=owner/repo`（installation guide 参照）が repository 単位でこれを揃える。ページングした `state=open` 一覧を正とし、そこに無い索引済み `open` 行を dense / sparse 両側で `closed` にする。再 embed は伴わない（dense 側は既存の値をそのまま再 upsert し、`state` だけ差し替える）。修復は一方向（`open` → `closed`）で、欠陥が生んだ方向に一致する。open 一覧が打ち切られる場合は何もせず中断する — 「一覧に無いこと」が close の根拠だから。
 

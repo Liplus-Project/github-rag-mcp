@@ -19,6 +19,7 @@
  *   POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG] -- Walk one batch of a repo's wiki without waiting for the :45 cron (requires GITHUB_TOKEN header)
  *   POST /admin/purge-legacy-vectors?repo=owner/repo[&dry_run=true][&surface=doc][&limit=N][&cursor=N] -- Delete pre-migration doc vectors the reap cannot name (requires GITHUB_TOKEN header)
  *   POST /admin/backfill-issue-state?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N] -- Close indexed issue/PR rows GitHub no longer lists as open (requires GITHUB_TOKEN header)
+ *   POST /admin/backfill-issue-index?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N] -- Index the issue/PR numbers missing from search_docs (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
@@ -52,6 +53,11 @@ import {
   MAX_ISSUE_STATE_LIMIT,
   backfillIssueState,
 } from "./backfill-issue-state.js";
+import {
+  DEFAULT_INDEX_BACKFILL_LIMIT,
+  MAX_INDEX_BACKFILL_LIMIT,
+  backfillIssueIndex,
+} from "./backfill-issue-index.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
@@ -490,6 +496,59 @@ const innerHandler: ExportedHandler<Env> = {
 
       try {
         const summary = await backfillIssueState(repo, env, { dryRun, limit, cursor });
+        return new Response(JSON.stringify(summary), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
+
+    // -- Admin: index the issue / PR numbers missing from the retrieval surfaces --
+    // POST /admin/backfill-issue-index?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N]
+    // Fills the gap the poller's watermark left behind (issue #210). Walks the repo's
+    // issue-number space, finds the numbers with no `search_docs` issue / PR row, and
+    // ingests them. Unlike `/admin/backfill-issue-state` this embeds, so the per-call
+    // budget is a Workers AI budget; unlike `/admin/reset-hashes` it re-embeds only the
+    // missing items rather than the whole repository.
+    // `dry_run=true` measures the gap over the scan range without spending either budget.
+    // Call repeatedly, passing the returned `nextCursor` back, until `done` is true.
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/backfill-issue-index") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      const dryRun = url.searchParams.get("dry_run") === "true";
+
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? DEFAULT_INDEX_BACKFILL_LIMIT : Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_INDEX_BACKFILL_LIMIT) {
+        return new Response(`limit must be an integer in 1..${MAX_INDEX_BACKFILL_LIMIT}`, {
+          status: 400,
+        });
+      }
+
+      const rawCursor = url.searchParams.get("cursor");
+      const cursor = rawCursor === null ? 0 : Number(rawCursor);
+      if (!Number.isInteger(cursor) || cursor < 0) {
+        return new Response("cursor must be a non-negative integer", { status: 400 });
+      }
+
+      try {
+        const summary = await backfillIssueIndex(repo, env, { dryRun, limit, cursor });
         return new Response(JSON.stringify(summary), {
           status: 200,
           headers: { "Content-Type": "application/json" },

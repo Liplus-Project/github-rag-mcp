@@ -385,6 +385,48 @@ POST /admin/backfill-issue-state?repo=owner/repo
 - dense 側の書き込みが失敗した場合、D1 に触れる前に呼び出し全体が失敗する。中途半端な修復を残さないための設計なので、同じ `cursor` で再実行する
 - 確認は close 済みと分かっている項目を `state: "closed"` で検索するか、`SELECT COUNT(*) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request') AND state = 'open'` が実際の open 数と一致することを見る
 
+## 15. 索引に一度も載らなかった issue / pull request を取り込む
+
+poller は 1 run で最大 200 件を fetch する一方、embed するのは最大 50 件で、旧実装は batch 全体を追い越して watermark を進めていた。embedding 予算で見送った項目には retry の印が付くが、以後どの `since` window もそれを fetch しない。結果として、索引対象 repository の issue / pull request 履歴の約 55% が一度も索引に載っていなかった（issue #210）。watermark は発生源側で修正済みだが、それは漏れを止めるだけ — 取り残された項目が再 fetch されるのは `updated_at` が動いたときだけで、閉じた履歴はもう動かない。この endpoint が欠落そのものを走査する。
+
+実行は watermark 修正の deploy の**後**。順序を逆にすると、backfill 済みの索引に、同じ穴から落ちた新しい項目が混ざる。
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-issue-index?repo=owner/repo
+```
+
+パラメータ:
+
+- `repo` — `owner/repo`
+- `dry_run` — `true` で走査範囲の欠落量だけを測り、GitHub からは何も取得しない
+- `limit` — 1 回の呼び出しで試す候補番号の数、`1..100`（既定 `25`）。dry run では無視される
+- `cursor` — 再開位置の issue 番号。前回のレスポンスの `nextCursor` をそのまま渡す
+
+認証:
+
+- `GITHUB_TOKEN` ヘッダに worker secret と同じ値を送る
+
+レスポンス:
+
+```json
+{ "repo": "owner/repo", "dryRun": false, "cursor": 0, "limit": 25, "maxNumber": 1690,
+  "scannedTo": 613, "candidates": 25, "attempted": 25, "indexed": 24, "absent": 1,
+  "failed": 0, "nextCursor": 613, "done": false }
+```
+
+運用上の注意:
+
+- まず `dry_run=true` で規模を測る。embedding 予算を使わず、走査した範囲（1 回あたり最大 5000 番）の `candidates` を返す
+- `done` が `true` になるまで `nextCursor` を渡して繰り返し呼ぶ。既定の `limit` なら 900 件欠けている repository で 36 回
+- 上の 2 つの修復と違い、この endpoint は **embed する**。`limit` は subrequest 予算であると同時に Workers AI の予算でもあり、100 を超える指定は拒否される
+- 何度実行しても安全。`search_docs` に行がある番号は fetch すらしないので、完了済みの sweep を再実行すると `candidates: 0` が返る。途中で失敗した呼び出しは同じ `cursor` から再開する
+- `absent` は GitHub が 404 を返す番号の数（削除された issue、transfer で repository の外に出た番号）。これらは以後の sweep でも候補に残り続けるので、完了した repository でも `candidates` が小さな非ゼロを返すことがある
+- `failed` は embed が着地しなかった候補の数。現在の呼び出し内では再試行せず、同じ範囲を次に sweep したときに拾い直す
+- 取り込みは body-hash 判定を強制的に飛ばすので、vector はあるが FTS5 行が無い項目も修復される。次の poll を待つのでは代替できない理由がここ
+- 確認は distinct な番号を数える: `SELECT COUNT(DISTINCT number) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request')` が実際の issue + PR 件数に近づく
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`
