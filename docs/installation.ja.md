@@ -344,6 +344,47 @@ POST /admin/purge-legacy-vectors?repo=owner/repo
 - 残差は増えない — 旧形式が書き込まれた期間は移行時点で閉じている。したがってこの endpoint は repository ごとに一回性で、定期実行するものではない
 - 確認は二重索引されていたファイルを検索し、移行前のコピー（古い内容・dense のみ）が出なくなることを見る
 
+## 14. close 済みなのに `open` のまま残っている索引行を揃える
+
+issue / PR が open の状態で索引された行は `state: "open"` を持つ。その後の state 変更を索引へ反映するのは metadata のみを更新する経路だが、この経路は自分が守っている mirror 書き込みより**先に**差分検出の基準を進めていた。そのため mirror が失敗しても二度と再試行されず、行は「まだ生きている項目」として検索に出続けた（issue #209）。順序は発生源側で修正済み。この endpoint は旧順序が残した行を修復する。
+
+再 embed は伴わない。実際の state は repo ごとに 1 回の `state=open` 一覧から取り、sparse 側は `UPDATE`、dense 側は既存の vector 値をそのまま再 upsert して metadata の `state` だけ差し替える。`/admin/reset-hashes` はこの用途には使えない — repository 全体の再 embed を起こす。
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-issue-state?repo=owner/repo
+```
+
+パラメータ:
+
+- `repo` — `owner/repo`
+- `dry_run` — `true` で件数だけ返し、D1 にも Vectorize にも書かない
+- `limit` — 1 回の呼び出しで見る行数、`1..1000`（既定 `200`）
+- `cursor` — 再開位置の issue 番号。前回のレスポンスの `nextCursor` をそのまま渡す
+
+認証:
+
+- `GITHUB_TOKEN` ヘッダに worker secret と同じ値を送る
+
+レスポンス:
+
+```json
+{ "repo": "owner/repo", "dryRun": false, "openOnGitHub": 33, "cursor": 0, "limit": 200,
+  "scanned": 165, "stale": 132, "ftsUpdated": 132, "vectorsUpdated": 130,
+  "vectorsMissing": 2, "nextCursor": null, "done": true }
+```
+
+運用上の注意:
+
+- `done` が `true` になるまで `nextCursor` を渡して繰り返し呼ぶ
+- 何度実行しても安全。GitHub 側でまだ open な行は書き込みなしでスキップされるので、完了済みの修復を再実行すると `stale: 0` が返る
+- 方向は一方向（`open` → `closed`）。欠陥が生んだ方向であり、検索を害する方向（閉じた判断が生きた検討事項として再供給される）でもある。走査対象が索引全体でなく open 集合の大きさに比例する点も、この方向に限る理由
+- open 一覧が 50 ページを超える場合、何も閉じずにエラーで中断する。「一覧に無いこと」が close の根拠なので、部分的な一覧を使ってはならない
+- `vectorsMissing` は対応する vector が無い stale 行の数。これは索引欠落側（issue #210）の面で本 endpoint の範囲外。sparse 側は存在するので、そちらは修復する
+- dense 側の書き込みが失敗した場合、D1 に触れる前に呼び出し全体が失敗する。中途半端な修復を残さないための設計なので、同じ `cursor` で再実行する
+- 確認は close 済みと分かっている項目を `state: "closed"` で検索するか、`SELECT COUNT(*) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request') AND state = 'open'` が実際の open 数と一致することを見る
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

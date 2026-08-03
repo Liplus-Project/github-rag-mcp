@@ -196,9 +196,13 @@ Responsibilities:
 - vector と metadata を Vectorize に upsert する
 - 同じ content を D1 FTS5 の `search_docs` table にも upsert する（sparse 側同期、tokenizer_kind は type に応じて `nat` / `code` を自動選択）
 - embedding 失敗時も次回 retry できる状態を保つ
-- D1 FTS5 upsert 失敗は Vectorize upsert を無効化しない（次回 reindex で reconcile）
+- embed 経路では D1 FTS5 upsert 失敗は Vectorize upsert を無効化しない。保存した bodyHash が次回の試行を駆動し、次の reindex で sparse 側が reconcile される
+- metadata のみの経路（body は変わらず state / labels / milestone / assignees が変わった場合）では、mirror 書き込みの失敗を best-effort 扱いに**しない**。差分検出の基準を進めずに保持し、次の poll / webhook 配信で再試行させる。基準は IssueStore の record そのものなので、失敗した mirror を追い越して基準を進めると取り残しが恒久化する — state だけの変更は、embed 経路が待っている body 変更を二度と連れてこない（issue #209）
+- この経路の dense / sparse mirror は互いに独立して書く。vector が欠けている行（issue #210）でも sparse 側の state は更新される
 - commit diff は 1 commit 分の file リストを batch embed（Workers AI の `text: string[]` 対応を利用）し、1 回の Vectorize upsert で N vector を書き込む
 - batch size は `MAX_EMBEDDING_BATCH_SIZE`（既定 20）で上限。これを超える commit は複数 batch call に分割する
+
+**取り残した state の修復.** 上の順序欠陥が残した行は、生きている項目として検索に出続ける。通常の poll では到達できない — 差分検出の基準がすでに GitHub と一致しているため。`POST /admin/backfill-issue-state?repo=owner/repo`（installation guide 参照）が repository 単位でこれを揃える。ページングした `state=open` 一覧を正とし、そこに無い索引済み `open` 行を dense / sparse 両側で `closed` にする。再 embed は伴わない（dense 側は既存の値をそのまま再 upsert し、`state` だけ差し替える）。修復は一方向（`open` → `closed`）で、欠陥が生んだ方向に一致する。open 一覧が打ち切られる場合は何もせず中断する — 「一覧に無いこと」が close の根拠だから。
 
 ### 5. Vector Store (Dense)
 

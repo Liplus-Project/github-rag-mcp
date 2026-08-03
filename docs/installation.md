@@ -344,6 +344,47 @@ Operational notes:
 - the residue is closed, not growing — the legacy scheme stopped writing at the migration — so this endpoint is a one-off per repository, not a recurring job
 - verify by searching for a file that was double-indexed: the pre-migration copy (old content, dense-only) should stop appearing
 
+## 14. Close indexed rows that stayed `open` after the item was closed
+
+A row indexed while its issue or PR was open carries `state: "open"`. The state change is mirrored onto the index by the metadata-only path, and that path used to advance its own diff baseline before the mirror writes it guards — so a mirror write that failed was never retried, and the row kept answering searches as a live item (issue #209). The ordering is fixed at the source; this endpoint repairs the rows the old ordering left behind.
+
+Nothing is re-embedded: the true state comes from one `state=open` listing per repo, the sparse side is an `UPDATE`, and the dense side re-upserts the existing vector values with only `state` replaced. `/admin/reset-hashes` is the wrong tool here — it triggers a full re-embedding of the repository.
+
+Admin endpoint:
+
+```text
+POST /admin/backfill-issue-state?repo=owner/repo
+```
+
+Parameters:
+
+- `repo` — `owner/repo`
+- `dry_run` — `true` reports the counts and writes to neither D1 nor Vectorize
+- `limit` — rows examined per call, `1..1000` (default `200`)
+- `cursor` — issue number to resume after; pass back the `nextCursor` of the previous response
+
+Authentication:
+
+- send the same `GITHUB_TOKEN` value in the `GITHUB_TOKEN` header
+
+Response:
+
+```json
+{ "repo": "owner/repo", "dryRun": false, "openOnGitHub": 33, "cursor": 0, "limit": 200,
+  "scanned": 165, "stale": 132, "ftsUpdated": 132, "vectorsUpdated": 130,
+  "vectorsMissing": 2, "nextCursor": null, "done": true }
+```
+
+Operational notes:
+
+- call it repeatedly, feeding `nextCursor` back in, until `done` is `true`
+- safe to repeat: a row GitHub still lists as open is skipped without a write, so a re-run of a finished repair reports `stale: 0`
+- the direction is one-way (`open` → `closed`). That is the direction the defect produced and the one that harms retrieval — a closed decision resurfacing as a live one. It also keeps the scan proportional to the open set rather than to the whole index
+- the run aborts with an error rather than closing anything if the open-item listing would exceed 50 pages. Absence from that listing is what marks a row closed, so a partial listing must never be used
+- `vectorsMissing` counts stale rows with no vector to refresh. Those are the missing-index-entry surface (issue #210) and are out of scope here; their sparse half still exists and is still repaired
+- if the dense write fails, the whole call fails before D1 is touched, leaving the window unrepaired rather than half-repaired. Retry with the same `cursor`
+- verify with a `state: "closed"` search for an item you know was closed, or by counting `search_docs` rows: `SELECT COUNT(*) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request') AND state = 'open'` should match the repository's real open count
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

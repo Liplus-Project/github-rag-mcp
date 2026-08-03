@@ -197,9 +197,13 @@ Responsibilities:
 - upsert vectors with metadata into Vectorize
 - mirror the same content into the D1 FTS5 `search_docs` table for the sparse (BM25) side, choosing tokenizer_kind `nat` or `code` by surface type
 - keep retryable failures detectable on the next run
-- D1 FTS5 upsert failures do not invalidate a successful Vectorize upsert; the next reindex reconciles the sparse side
+- D1 FTS5 upsert failures do not invalidate a successful Vectorize upsert on the embed path; the stored bodyHash drives the next attempt and the next reindex reconciles the sparse side
+- on the metadata-only path (state / labels / milestone / assignees changed, body did not) a failed mirror write is **not** best-effort: the diff baseline is held so the next poll or webhook delivery retries. The baseline is the IssueStore record itself, so advancing it past a failed mirror makes the miss permanent — a state-only change never brings the body change the embed path waits for (issue #209)
+- the dense and sparse mirrors on that path are written independently: a row with no vector (issue #210) still gets its sparse state updated
 - for commit diffs: batch-embed a commit's file list in a single Workers AI call (`text: string[]`) and upsert the resulting N vectors in one `VECTORIZE.upsert` call
 - batch size is capped by `MAX_EMBEDDING_BATCH_SIZE` (default 20); commits exceeding it are split across multiple batch calls
+
+**Stale-state repair.** Rows left behind by the ordering defect above keep answering searches as live items, and no ordinary poll reaches them: their diff baseline already matches GitHub. `POST /admin/backfill-issue-state?repo=owner/repo` (see the installation guide) reconciles them per repository — one paginated `state=open` listing supplies the truth, indexed `open` rows absent from it are set to `closed` on both sides, and nothing is re-embedded (the dense side re-upserts the existing values with only `state` replaced). The repair is one-way (`open` → `closed`), which is the direction the defect produced; it aborts rather than act on a truncated open listing, since absence from that listing is what marks a row closed.
 
 ### 5. Vector Store (Dense)
 
