@@ -514,11 +514,15 @@ const innerHandler: ExportedHandler<Env> = {
     // POST /admin/backfill-issue-index?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N]
     // Fills the gap the poller's watermark left behind (issue #210). Walks the repo's
     // issue-number space, finds the numbers with no `search_docs` issue / PR row, and
-    // ingests them. Unlike `/admin/backfill-issue-state` this embeds, so the per-call
-    // budget is a Workers AI budget; unlike `/admin/reset-hashes` it re-embeds only the
+    // ingests them. Unlike `/admin/backfill-issue-state` this embeds, so every candidate
+    // carries the full ingest fan-out (~40 subrequests, measured — see
+    // `DEFAULT_INDEX_BACKFILL_LIMIT`); unlike `/admin/reset-hashes` it re-embeds only the
     // missing items rather than the whole repository.
     // `dry_run=true` measures the gap over the scan range without spending either budget.
-    // Call repeatedly, passing the returned `nextCursor` back, until `done` is true.
+    // Call repeatedly, passing the returned `nextCursor` back, until `done` is true. The
+    // cursor is held below the first candidate a call failed to ingest, so an unchanged
+    // `nextCursor` with `failed >= 1` means the sweep is blocked on that number (issue
+    // #216); pass `cursor = nextCursor + 1` to step over it.
     // Requires GITHUB_TOKEN header for authentication.
     if (request.method === "POST" && url.pathname === "/admin/backfill-issue-index") {
       const authHeader = request.headers.get("GITHUB_TOKEN");

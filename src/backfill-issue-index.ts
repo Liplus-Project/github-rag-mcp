@@ -19,22 +19,60 @@
  * cursor over the same set would reintroduce the ordering the defect exploited.
  *
  * Unlike `./backfill-issue-state.ts`, this repair does embed: a missing row has
- * no vector to re-upsert. The per-call budget is therefore a Workers AI budget
- * first, and the caller drives the sweep one batch at a time.
+ * no vector to re-upsert, so every candidate carries the full ingest fan-out and
+ * the caller drives the sweep one batch at a time. What that fan-out actually
+ * costs per candidate is measured at `DEFAULT_INDEX_BACKFILL_LIMIT` below.
  */
 
 import type { Env } from "./types.js";
 import { processAndUpsertIssue, type GitHubIssueData } from "./pipeline.js";
 
-/** Candidate numbers attempted per call, unless the caller lowers it. Each one
- *  costs a GitHub fetch plus (when present) an embed + Vectorize + D1 + store
- *  fan-out, ~5 of the invocation's 1000 subrequests. */
-export const DEFAULT_INDEX_BACKFILL_LIMIT = 25;
+/**
+ * Per-candidate subrequest cost, measured rather than estimated.
+ *
+ * Observed in production on 2026-08-03 while sweeping issue #210, over 4
+ * repositories and 48 calls:
+ *
+ *   - `limit=50` -> the *first* call of every repository fails outright with
+ *     `Too many subrequests by single Worker invocation`
+ *   - `limit=25` -> every one of the 48 calls reports `indexed=24 failed=1`.
+ *     Exactly one, every time, across repositories — the budget runs out on the
+ *     25th candidate, not on any property of the item
+ *   - `limit=15` -> `failed=0` on all 8 calls
+ *
+ * The 24 / 25 boundary is what the cost is read off. With a 1000-subrequest
+ * invocation budget, per-candidate cost `c`, and per-call fixed cost `O`
+ * (`fetchHighestItemNumber` plus the scan-chunk D1 queries):
+ *
+ *   24c + O <= 1000 < 25c + O   =>   c ≈ 40  (39.2 .. 41.7 for O in 0..20)
+ *
+ * ~40 subrequests per candidate, against ~6 logical binding calls per candidate
+ * in this module's code path (GitHub fetch 1 / store DO 2 / Workers AI 1 /
+ * Vectorize 1 / D1 1). One logical call therefore does not equal one
+ * subrequest here, and **which binding accounts for the difference is not
+ * identified** — do not infer a mechanism from these numbers, only a budget.
+ * `MAX_COMMENT_FETCHES_PER_REPO_PER_RUN` in `./poller.ts` carries the same
+ * shape of correction, from `~3-5` down to a measured value.
+ *
+ * These figures cannot be re-measured: the #210 sweep took all 6 indexed
+ * repositories to 100% coverage, so no candidates remain to consume budget.
+ * Deleting rows to manufacture candidates is not an option. Any later revision
+ * of these constants rests on the data above plus the unit tests, and the
+ * cursor invariant below is what keeps correctness independent of their
+ * accuracy.
+ */
 
-/** Hard ceiling on the per-call candidate budget. 100 candidates x ~5 subrequests
- *  ≈ 500, half the per-invocation budget, and 100 embeds is twice the cron's own
- *  per-run Workers AI allowance. */
-export const MAX_INDEX_BACKFILL_LIMIT = 100;
+/** Candidate numbers attempted per call, unless the caller overrides it.
+ *  15 is the largest value **measured** to complete with `failed=0`. */
+export const DEFAULT_INDEX_BACKFILL_LIMIT = 15;
+
+/** Hard ceiling on the per-call candidate budget. At c ≈ 40 the arithmetic
+ *  ceiling is 1000 / 40 ≈ 24, so 20 keeps ~15% headroom under it. 20 is
+ *  **arithmetic only — never measured**; 15 (the default above) is the measured
+ *  value. The previous ceiling of 100 was unreachable: any call near it failed
+ *  as a whole, which is the kind of limit that drops the next operator into the
+ *  same hole. */
+export const MAX_INDEX_BACKFILL_LIMIT = 20;
 
 /** Issue numbers covered by one indexed-set query. */
 const SCAN_CHUNK = 200;
@@ -71,9 +109,12 @@ export interface IssueIndexBackfillSummary {
   indexed: number;
   /** Candidates GitHub does not have (deleted or transferred numbers). */
   absent: number;
-  /** Candidates whose embed or upsert failed; retried by a later call. */
+  /** Candidates whose embed or upsert failed. The cursor is held below the first
+   *  of them, so the next call resumes on that exact number. */
   failed: number;
-  /** Pass back as `cursor` to continue; `null` once the sweep reached `maxNumber`. */
+  /** Pass back as `cursor` to continue; `null` once the sweep reached `maxNumber`
+   *  with every candidate ingested. Equal to the `cursor` that was passed in when
+   *  the call's first candidate failed — the sweep is held, not finished. */
   nextCursor: number | null;
   done: boolean;
 }
@@ -170,6 +211,26 @@ async function fetchItem(
  * and re-running a batch re-issues writes that are already correct. Call it
  * repeatedly with the returned `nextCursor` until `done`.
  *
+ * Cursor invariant, the same one the poller's watermark obeys (`nextIssueWatermark`
+ * in `./poller.ts`, issue #210): **the cursor never advances past the first
+ * candidate this call failed to ingest.** Candidates are walked in ascending
+ * number order, so holding at the first failure covers every later one. Without
+ * the hold, a candidate the subrequest budget cut off was overtaken by the cursor
+ * and only a second sweep at a lower `limit` picked it up (issue #216) — which is
+ * exactly what production needed on the #210 repair. With it, an over-generous
+ * `limit` costs a wasted call, not a missed item: correctness stops depending on
+ * how accurate `DEFAULT_INDEX_BACKFILL_LIMIT` is.
+ *
+ * A 404 (`absent`) does not hold the cursor. Those numbers are permanently gone
+ * from GitHub, so holding on one would stall the sweep forever rather than
+ * bounding a retry.
+ *
+ * The tradeoff is the poller's: a candidate that fails on every attempt stops the
+ * sweep. Here it is visible rather than silent — `nextCursor` comes back equal to
+ * the `cursor` that went in, with `failed >= 1` — and this endpoint is driven by a
+ * human or an AI, not by cron. Pass `cursor = nextCursor + 1` to step over the
+ * blocking number by hand.
+ *
  * The ingest is forced past the body-hash check. The hash answers "did the body
  * change", but every candidate here is known to be missing a retrieval surface,
  * which a matching hash would otherwise skip over permanently.
@@ -213,6 +274,8 @@ export async function backfillIssueIndex(
   let indexed = 0;
   let absent = 0;
   let failed = 0;
+  /** First candidate number this call did not get onto the retrieval surfaces. */
+  let retryBoundary: number | undefined;
 
   if (!dryRun) {
     const storeId = env.ISSUE_STORE.idFromName("global");
@@ -228,17 +291,32 @@ export async function backfillIssueIndex(
       const result = await processAndUpsertIssue(env, storeStub, repo, item, {
         force: true,
       });
-      if (result.embedded) indexed++;
-      else failed++;
+      if (result.embedded) {
+        indexed++;
+      } else {
+        failed++;
+        retryBoundary ??= number;
+      }
     }
   }
 
-  const done = scannedTo >= maxNumber;
+  // Held one below the first uningested candidate so the next call reopens on it.
+  // `retryBoundary - 1 >= cursor` always holds (every candidate is above `cursor`),
+  // so the cursor cannot regress; equality is the stall signal.
+  const nextCursor =
+    retryBoundary !== undefined
+      ? retryBoundary - 1
+      : scannedTo >= maxNumber
+        ? null
+        : scannedTo;
+  const done = nextCursor === null;
 
   console.log(
     `${repo} backfill-issue-index: max=${maxNumber} cursor=${cursor} ` +
       `scanned_to=${scannedTo} candidates=${candidates.length} attempted=${attempted} ` +
-      `indexed=${indexed} absent=${absent} failed=${failed}${dryRun ? " (dry run)" : ""}`,
+      `indexed=${indexed} absent=${absent} failed=${failed}` +
+      `${retryBoundary !== undefined ? ` (held before #${retryBoundary})` : ""}` +
+      `${dryRun ? " (dry run)" : ""}`,
   );
 
   return {
@@ -253,7 +331,7 @@ export async function backfillIssueIndex(
     indexed,
     absent,
     failed,
-    nextCursor: done ? null : scannedTo,
+    nextCursor,
     done,
   };
 }

@@ -401,7 +401,7 @@ POST /admin/backfill-issue-index?repo=owner/repo
 
 - `repo` — `owner/repo`
 - `dry_run` — `true` で走査範囲の欠落量だけを測り、GitHub からは何も取得しない
-- `limit` — 1 回の呼び出しで試す候補番号の数、`1..100`（既定 `25`）。dry run では無視される
+- `limit` — 1 回の呼び出しで試す候補番号の数、`1..20`（既定 `15`）。dry run では無視される
 - `cursor` — 再開位置の issue 番号。前回のレスポンスの `nextCursor` をそのまま渡す
 
 認証:
@@ -411,19 +411,21 @@ POST /admin/backfill-issue-index?repo=owner/repo
 レスポンス:
 
 ```json
-{ "repo": "owner/repo", "dryRun": false, "cursor": 0, "limit": 25, "maxNumber": 1690,
-  "scannedTo": 613, "candidates": 25, "attempted": 25, "indexed": 24, "absent": 1,
-  "failed": 0, "nextCursor": 613, "done": false }
+{ "repo": "owner/repo", "dryRun": false, "cursor": 0, "limit": 15, "maxNumber": 1690,
+  "scannedTo": 603, "candidates": 15, "attempted": 15, "indexed": 14, "absent": 1,
+  "failed": 0, "nextCursor": 603, "done": false }
 ```
 
 運用上の注意:
 
 - まず `dry_run=true` で規模を測る。embedding 予算を使わず、走査した範囲（1 回あたり最大 5000 番）の `candidates` を返す
-- `done` が `true` になるまで `nextCursor` を渡して繰り返し呼ぶ。既定の `limit` なら 900 件欠けている repository で 36 回
-- 上の 2 つの修復と違い、この endpoint は **embed する**。`limit` は subrequest 予算であると同時に Workers AI の予算でもあり、100 を超える指定は拒否される
+- `done` が `true` になるまで `nextCursor` を渡して繰り返し呼ぶ。既定の `limit` なら 900 件欠けている repository で 60 回
+- 上の 2 つの修復と違い、この endpoint は **embed する**。しかも 1 候補あたりの取り込み fan-out が高価で、実測で 1 invocation の 1000 subrequest のうち約 40 を消費する（issue #216）。既定値はその実測に合わせてある — `15` は本番で `failed: 0` を実測した最大値、`25` は毎回最後の 1 件を落とし、`50` は `Too many subrequests by single Worker invocation` で呼び出し全体が失敗した。`20` を超える指定は拒否される
+- `limit` は厳密でなくてよい。**取り込みそこねた最初の候補の 1 つ手前で cursor を止める**ので、次の呼び出しはその番号から再開する（追い越さない）。`limit` が大きすぎたときの代償は 1 回分の無駄な呼び出しであって、取りこぼしではない
 - 何度実行しても安全。`search_docs` に行がある番号は fetch すらしないので、完了済みの sweep を再実行すると `candidates: 0` が返る。途中で失敗した呼び出しは同じ `cursor` から再開する
-- `absent` は GitHub が 404 を返す番号の数（削除された issue、transfer で repository の外に出た番号）。これらは以後の sweep でも候補に残り続けるので、完了した repository でも `candidates` が小さな非ゼロを返すことがある
-- `failed` は embed が着地しなかった候補の数。現在の呼び出し内では再試行せず、同じ範囲を次に sweep したときに拾い直す
+- `absent` は GitHub が 404 を返す番号の数（削除された issue、transfer で repository の外に出た番号）。これらは以後の sweep でも候補に残り続けるので、完了した repository でも `candidates` が小さな非ゼロを返すことがある。これらで cursor は止めない — 誰が何回試しても取り込めない番号なので、そこで止めると retry の境界にならず sweep が永久に停止する
+- `failed` は embed が着地しなかった候補の数。cursor をその最初の 1 件の手前で止めているので、次の呼び出しがまずそれを再試行する
+- したがって、毎回必ず失敗する候補があると sweep は止まる。止まったことは応答に現れる — `nextCursor` が渡した `cursor` と同じ値で返り、`failed` が 1 以上になる。手動で越えるには `cursor = nextCursor + 1` を渡す（詰まっている番号は `nextCursor + 1`、run log にも `held before #N` として出る）
 - 取り込みは body-hash 判定を強制的に飛ばすので、vector はあるが FTS5 行が無い項目も修復される。次の poll を待つのでは代替できない理由がここ
 - 確認は distinct な番号を数える: `SELECT COUNT(DISTINCT number) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request')` が実際の issue + PR 件数に近づく
 
