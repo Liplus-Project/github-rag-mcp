@@ -3,8 +3,16 @@
  *
  * Owns the GitHub issue / PR data shape (`GitHubIssueData`) and the
  * `processAndUpsertIssue` flow: hash-based change detection, metadata-only
- * Vectorize refresh when only labels / state changed, and full embed + upsert
- * when the body changed. FTS5 mirror writes are best-effort.
+ * Vectorize + D1 refresh when only labels / state changed, and full embed +
+ * upsert when the body changed.
+ *
+ * Mirror-failure handling differs per path, because what makes a retry happen
+ * differs. On the embed path a failed FTS5 write is best-effort: the stored
+ * bodyHash is what drives the next attempt, and the next body change reconciles
+ * the sparse side. On the metadata-only path there is no next body change to
+ * wait for, so a failed mirror write holds the IssueStore baseline instead —
+ * that record is the diff basis, and advancing it would make the miss permanent
+ * (issue #209).
  */
 
 import type { Env, IssueRecord } from "../types.js";
@@ -69,7 +77,8 @@ export async function processAndUpsertIssue(
   }
 
   if (!needsEmbedding) {
-    // Hash matched — skip embedding but update IssueStore (metadata may have changed)
+    // Hash matched — skip embedding, but state / labels / milestone / assignees may
+    // still have changed and the retrieval surfaces have to follow.
     const labelNames = issue.labels.map((l) => l.name);
     const assigneeLogins = issue.assignees.map((a) => a.login);
     const milestoneTitle = issue.milestone?.title ?? "";
@@ -88,16 +97,8 @@ export async function processAndUpsertIssue(
       updatedAt: issue.updated_at,
     };
 
-    await storeStub.fetch(
-      new Request("http://store/upsert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(record),
-      }),
-    );
-
-    // Check if metadata changed — if so, update Vectorize metadata too
-    // (Vectorize state/labels/assignees must stay in sync with GitHub)
+    // Check if metadata changed — if so, the dense and sparse sides need updating
+    // (Vectorize / search_docs state, labels, assignees must stay in sync with GitHub).
     const sortedLabels = [...labelNames].sort();
     const metadataChanged = existing !== null && (
       existing.state !== issue.state ||
@@ -107,12 +108,21 @@ export async function processAndUpsertIssue(
       [...existing.assignees].sort().join(",") !== [...assigneeLogins].sort().join(",")
     );
 
-    if (metadataChanged) {
-      try {
-        // Retrieve existing vector values to re-upsert with updated metadata
-        const vid = await vectorId(repo, issue.number);
-        const vectors = await env.VECTORIZE.getByIds([vid]);
+    // The IssueStore record is the *baseline* `metadataChanged` is measured against, so
+    // it must not advance until the mirrors it guards have landed. Advancing it first
+    // made a failed mirror write permanent: the next poll compares GitHub against an
+    // already-updated baseline, sees no diff, and never retries. A body change would
+    // reconcile it, but a state-only change never brings one (issue #209).
+    let mirrorFailed = false;
 
+    if (metadataChanged) {
+      const vid = await vectorId(repo, issue.number);
+
+      // Dense side. A row with no vector is the #210 (missing index entry) surface,
+      // not a mirror failure — nothing here can rebuild it without embedding, so it
+      // must not hold the baseline hostage.
+      try {
+        const vectors = await env.VECTORIZE.getByIds([vid]);
         if (vectors.length > 0 && vectors[0].values) {
           const metadata: Record<string, string | number> = {
             repo,
@@ -138,43 +148,69 @@ export async function processAndUpsertIssue(
               metadata,
             },
           ]);
-
-          // Mirror the metadata change onto D1 FTS5 so sparse retrieval stays filterable.
-          // Content stays the same (no body change), but labels/state/milestone etc.
-          // on the sparse side must match the dense side for pre-filter consistency.
-          try {
-            await upsertFtsRow(env.DB_FTS, {
-              vectorId: vid,
-              repo,
-              type,
-              state: issue.state,
-              labels: sortedLabels.join(","),
-              milestone: milestoneTitle,
-              assignees: assigneeLogins.join(","),
-              updatedAt: issue.updated_at,
-              number: issue.number,
-              content: prepareEmbeddingInput(title, issue.body),
-            });
-          } catch (ftsErr) {
-            console.error(
-              `Failed to update FTS5 metadata for ${repo}#${issue.number}:`,
-              ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
-            );
-            // Non-fatal: sparse side will catch up on next body change.
-          }
-
-          return { embedded: false, skippedUnchanged: false, metadataUpdated: true, failed: false };
         }
       } catch (err) {
         console.error(
           `Failed to update Vectorize metadata for ${repo}#${issue.number}:`,
           err instanceof Error ? err.message : String(err),
         );
-        // IssueStore was already updated — Vectorize metadata will catch up on next body change
+        mirrorFailed = true;
+      }
+
+      // Sparse side. Deliberately outside the dense branch above: the two stores fail
+      // independently, and nesting this call inside "the vector exists" skipped the
+      // sparse state update for exactly the rows that were already missing a vector.
+      // Content stays the same (no body change); only the filterable columns move.
+      try {
+        await upsertFtsRow(env.DB_FTS, {
+          vectorId: vid,
+          repo,
+          type,
+          state: issue.state,
+          labels: sortedLabels.join(","),
+          milestone: milestoneTitle,
+          assignees: assigneeLogins.join(","),
+          updatedAt: issue.updated_at,
+          number: issue.number,
+          content: prepareEmbeddingInput(title, issue.body),
+        });
+      } catch (ftsErr) {
+        console.error(
+          `Failed to update FTS5 metadata for ${repo}#${issue.number}:`,
+          ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
+        );
+        mirrorFailed = true;
       }
     }
 
-    return { embedded: false, skippedUnchanged: true, metadataUpdated: false, failed: false };
+    if (mirrorFailed) {
+      // Baseline held on purpose: the stale IssueStore record is what makes the next
+      // poll / webhook delivery for this item detect the diff again and retry.
+      console.warn(
+        `Holding IssueStore baseline for ${repo}#${issue.number} so the metadata mirror is retried`,
+      );
+      return {
+        embedded: false,
+        skippedUnchanged: false,
+        metadataUpdated: false,
+        failed: true,
+      };
+    }
+
+    await storeStub.fetch(
+      new Request("http://store/upsert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(record),
+      }),
+    );
+
+    return {
+      embedded: false,
+      skippedUnchanged: !metadataChanged,
+      metadataUpdated: metadataChanged,
+      failed: false,
+    };
   }
 
   // Content changed — generate embedding

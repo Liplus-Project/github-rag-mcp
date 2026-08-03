@@ -18,6 +18,7 @@
  *   POST /admin/backfill-fts-segments[?repo=owner/repo][&cursor=N][&limit=N] -- Re-segment one batch of natural-language FTS rows (requires GITHUB_TOKEN header)
  *   POST /admin/backfill-wiki?repo=owner/repo[&limit=N][&cursor=SLUG] -- Walk one batch of a repo's wiki without waiting for the :45 cron (requires GITHUB_TOKEN header)
  *   POST /admin/purge-legacy-vectors?repo=owner/repo[&dry_run=true][&surface=doc][&limit=N][&cursor=N] -- Delete pre-migration doc vectors the reap cannot name (requires GITHUB_TOKEN header)
+ *   POST /admin/backfill-issue-state?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N] -- Close indexed issue/PR rows GitHub no longer lists as open (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
  *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
@@ -46,6 +47,11 @@ import {
   MAX_PURGE_LIMIT,
   purgeLegacyDocVectors,
 } from "./purge-legacy.js";
+import {
+  DEFAULT_ISSUE_STATE_LIMIT,
+  MAX_ISSUE_STATE_LIMIT,
+  backfillIssueState,
+} from "./backfill-issue-state.js";
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
@@ -432,6 +438,58 @@ const innerHandler: ExportedHandler<Env> = {
           cursor,
           paths,
         });
+        return new Response(JSON.stringify(summary), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
+
+    // -- Admin: close indexed issue / PR rows GitHub no longer lists as open --
+    // POST /admin/backfill-issue-state?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N]
+    // Repairs rows indexed while the item was open, whose state mirror never landed
+    // (issue #209). No embedding: the state comes from one `state=open` listing, the
+    // sparse side is an UPDATE, and the dense side re-upserts the existing values with
+    // only `state` replaced. `/admin/reset-hashes` cannot be used for this — it would
+    // trigger a full re-embedding of the repo.
+    // Call repeatedly, passing the returned `nextCursor` back, until `done` is true.
+    // Requires GITHUB_TOKEN header for authentication.
+    if (request.method === "POST" && url.pathname === "/admin/backfill-issue-state") {
+      const authHeader = request.headers.get("GITHUB_TOKEN");
+      if (!authHeader || authHeader !== env.GITHUB_TOKEN) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const repo = url.searchParams.get("repo");
+      if (!repo) {
+        return new Response("missing repo query parameter", { status: 400 });
+      }
+
+      const dryRun = url.searchParams.get("dry_run") === "true";
+
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? DEFAULT_ISSUE_STATE_LIMIT : Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ISSUE_STATE_LIMIT) {
+        return new Response(`limit must be an integer in 1..${MAX_ISSUE_STATE_LIMIT}`, {
+          status: 400,
+        });
+      }
+
+      const rawCursor = url.searchParams.get("cursor");
+      const cursor = rawCursor === null ? 0 : Number(rawCursor);
+      if (!Number.isInteger(cursor) || cursor < 0) {
+        return new Response("cursor must be a non-negative integer", { status: 400 });
+      }
+
+      try {
+        const summary = await backfillIssueState(repo, env, { dryRun, limit, cursor });
         return new Response(JSON.stringify(summary), {
           status: 200,
           headers: { "Content-Type": "application/json" },
