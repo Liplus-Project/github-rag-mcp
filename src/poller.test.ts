@@ -10,10 +10,12 @@ const {
   fetchCommitDetailMock,
   processAndUpsertCommitDiffMock,
   processAndUpsertIssueMock,
+  processAndUpsertReleaseMock,
 } = vi.hoisted(() => ({
   fetchCommitDetailMock: vi.fn(),
   processAndUpsertCommitDiffMock: vi.fn(),
   processAndUpsertIssueMock: vi.fn(),
+  processAndUpsertReleaseMock: vi.fn(),
 }));
 
 vi.mock("./pipeline.js", async (importOriginal) => {
@@ -23,12 +25,14 @@ vi.mock("./pipeline.js", async (importOriginal) => {
     fetchCommitDetail: fetchCommitDetailMock,
     processAndUpsertCommitDiff: processAndUpsertCommitDiffMock,
     processAndUpsertIssue: processAndUpsertIssueMock,
+    processAndUpsertRelease: processAndUpsertReleaseMock,
   };
 });
 
 const {
   pollDiffs,
   pollRepo,
+  pollReleases,
   nextForwardDiffWatermark,
   nextBackfillDiffWatermark,
   nextIssueWatermark,
@@ -51,11 +55,16 @@ const commit = (sha: string, date: string): FakeCommit => ({ sha, date });
  * `/watermark` GET + POST surface the diff poller uses, backed by a Map the
  * test can read and seed.
  */
-function makeStore(seed: Record<string, string> = {}) {
+function makeStore(
+  seed: Record<string, string> = {},
+  etagSeed: Record<string, string> = {},
+) {
   const watermarks = new Map<string, string>(Object.entries(seed));
-  const etags = new Map<string, string>();
+  const etags = new Map<string, string>(Object.entries(etagSeed));
   /** Records written through `/upsert` (the empty-hash retry markers). */
   const upserts: Array<{ number: number; bodyHash: string }> = [];
+  /** Records written through `/upsert-release` (same retry markers, release side). */
+  const releaseUpserts: Array<{ tagName: string; bodyHash: string }> = [];
   const stub = {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
@@ -83,10 +92,21 @@ function makeStore(seed: Record<string, string> = {}) {
         upserts.push({ number: body.number, bodyHash: body.bodyHash });
         return new Response("ok");
       }
+      if (request.method === "POST" && url.pathname === "/upsert-release") {
+        const body = (await request.json()) as { tagName: string; bodyHash: string };
+        releaseUpserts.push({ tagName: body.tagName, bodyHash: body.bodyHash });
+        return new Response("ok");
+      }
       return new Response("ok");
     },
   };
-  return { stub: stub as unknown as DurableObjectStub, watermarks, etags, upserts };
+  return {
+    stub: stub as unknown as DurableObjectStub,
+    watermarks,
+    etags,
+    upserts,
+    releaseUpserts,
+  };
 }
 
 /**
@@ -190,6 +210,54 @@ function stubIssueList(issues: ReturnType<typeof fakeIssue>[]) {
   return { sinceQueries };
 }
 
+/** One release as the GitHub list endpoint returns it (subset the poller reads). */
+function fakeRelease(tag: string) {
+  return {
+    tag_name: tag,
+    name: `Release ${tag}`,
+    body: "notes",
+    prerelease: false,
+    created_at: "2026-07-01T00:00:00.000Z",
+    published_at: "2026-07-01T00:00:00.000Z",
+    html_url: `https://github.com/${REPO}/releases/tag/${tag}`,
+  };
+}
+
+const RELEASE_ETAG = 'W/"releases-v2"';
+
+/**
+ * Stub the global fetch with a fake GitHub releases endpoint.
+ *
+ * The conditional-request contract is the load-bearing part: echoing back the
+ * ETag the poller stored answers 304, which is what turns "stored an ETag over
+ * unfinished work" into a stall rather than a wasted request.
+ */
+function stubReleaseList(releases: ReturnType<typeof fakeRelease>[]) {
+  const conditionalHits: string[] = [];
+
+  const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const sent = headers["If-None-Match"];
+    if (sent) conditionalHits.push(sent);
+    if (sent === RELEASE_ETAG) {
+      return new Response(null, { status: 304 });
+    }
+    return new Response(JSON.stringify(releases), {
+      status: 200,
+      headers: { "Content-Type": "application/json", etag: RELEASE_ETAG },
+    });
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+  return { conditionalHits };
+}
+
+/** Tags handed to the embed pipeline, i.e. the releases a run attempted. */
+const attemptedReleases = (): string[] =>
+  processAndUpsertReleaseMock.mock.calls.map((call) =>
+    String((call[3] as { tag_name: string }).tag_name),
+  );
+
 /** Issue numbers handed to the embed pipeline, i.e. the items a run attempted. */
 const attemptedIssues = (): number[] =>
   processAndUpsertIssueMock.mock.calls.map((call) => Number((call[3] as { number: number }).number));
@@ -204,8 +272,16 @@ beforeEach(() => {
   fetchCommitDetailMock.mockReset();
   processAndUpsertCommitDiffMock.mockReset();
   processAndUpsertIssueMock.mockReset();
+  processAndUpsertReleaseMock.mockReset();
   // Default: every issue embeds cleanly.
   processAndUpsertIssueMock.mockResolvedValue({
+    embedded: true,
+    skippedUnchanged: false,
+    metadataUpdated: false,
+    failed: false,
+  });
+  // Default: every release embeds cleanly.
+  processAndUpsertReleaseMock.mockResolvedValue({
     embedded: true,
     skippedUnchanged: false,
     metadataUpdated: false,
@@ -569,6 +645,102 @@ describe("poller: pollRepo watermark / retry boundary", () => {
     // Every item reached the pipeline across the three runs; none fell into the
     // gap between one run's budget and the next run's `since`.
     expect(seen.size).toBe(130);
+  });
+});
+
+describe("poller: pollReleases ETag hold", () => {
+  // Before issue #211 the ETag write looked at the upsert cap alone. An embed
+  // failure marks the release with an empty `bodyHash` for retry exactly the way
+  // the cap does, but the run still stored the fresh ETag — so the next cron was
+  // answered 304 and returned before it reached the marked release, which then
+  // waited for some *other* release to change.
+  const KEY = `releases:${REPO}`;
+  const PRIOR_ETAG = 'W/"releases-v1"';
+  const seeded = () =>
+    makeStore({ [KEY]: "2026-07-01T00:00:00.000Z" }, { [KEY]: PRIOR_ETAG });
+
+  it("holds the prior ETag when a release failed to embed", async () => {
+    const { stub, etags } = seeded();
+    stubReleaseList([fakeRelease("v1.0.0"), fakeRelease("v1.1.0")]);
+
+    processAndUpsertReleaseMock.mockImplementation(
+      async (_env: unknown, _stub: unknown, _repo: string, release: { tag_name: string }) =>
+        release.tag_name === "v1.1.0"
+          ? { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true }
+          : { embedded: true, skippedUnchanged: false, metadataUpdated: false, failed: false },
+    );
+
+    await pollReleases(REPO, env, stub);
+
+    expect(attemptedReleases()).toEqual(["v1.0.0", "v1.1.0"]);
+    expect(etags.get(KEY)).toBe(PRIOR_ETAG);
+  });
+
+  it("reprocesses the failed release on the next run, which is what the hold buys", async () => {
+    const { stub } = seeded();
+    stubReleaseList([fakeRelease("v1.0.0")]);
+    processAndUpsertReleaseMock.mockResolvedValue({
+      embedded: false,
+      skippedUnchanged: false,
+      metadataUpdated: false,
+      failed: true,
+    });
+
+    await pollReleases(REPO, env, stub);
+
+    // Next run: the held ETag does not match the current list (this run proved
+    // that by getting a 200 for it), so the list comes back 200 and the release
+    // is attempted again.
+    const { conditionalHits } = stubReleaseList([fakeRelease("v1.0.0")]);
+    processAndUpsertReleaseMock.mockClear();
+    processAndUpsertReleaseMock.mockResolvedValue({
+      embedded: true,
+      skippedUnchanged: false,
+      metadataUpdated: false,
+      failed: false,
+    });
+    await pollReleases(REPO, env, stub);
+
+    expect(conditionalHits).toEqual([PRIOR_ETAG]);
+    expect(attemptedReleases()).toEqual(["v1.0.0"]);
+  });
+
+  it("stores the fresh ETag when every release landed", async () => {
+    const { stub, etags } = seeded();
+    stubReleaseList([fakeRelease("v1.0.0")]);
+
+    await pollReleases(REPO, env, stub);
+
+    expect(etags.get(KEY)).toBe(RELEASE_ETAG);
+  });
+
+  it("still holds the ETag when the upsert cap deferred releases", async () => {
+    // The issue #149 guard, kept: 12 releases against a per-run upsert cap of 10.
+    const releases = Array.from({ length: 12 }, (_, i) => fakeRelease(`v1.0.${i}`));
+    const { stub, etags, releaseUpserts } = seeded();
+    stubReleaseList(releases);
+
+    await pollReleases(REPO, env, stub);
+
+    expect(attemptedReleases()).toHaveLength(10);
+    // The two over-cap releases are marked for retry, not embedded.
+    expect(releaseUpserts.map((r) => r.tagName)).toEqual(["v1.0.10", "v1.0.11"]);
+    expect(releaseUpserts.every((r) => r.bodyHash === "")).toBe(true);
+    expect(etags.get(KEY)).toBe(PRIOR_ETAG);
+  });
+
+  it("returns early on 304 without touching the pipeline", async () => {
+    // The stall this hold prevents: with the fresh ETag stored, this is the shape
+    // every subsequent run would take while a marked release sat unprocessed.
+    const { stub } = makeStore(
+      { [KEY]: "2026-07-01T00:00:00.000Z" },
+      { [KEY]: RELEASE_ETAG },
+    );
+    stubReleaseList([fakeRelease("v1.0.0")]);
+
+    await pollReleases(REPO, env, stub);
+
+    expect(attemptedReleases()).toEqual([]);
   });
 });
 
