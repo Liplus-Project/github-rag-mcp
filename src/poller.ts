@@ -51,8 +51,11 @@ const PER_PAGE = 100;
  *  therefore always fire first — so those loops carry no embedding guard of their
  *  own (issue #211). Raising either cap past this value means reinstating one;
  *  the note at each cap site says so. Comments and wiki have their own budgets
- *  (`MAX_COMMENTS_EMBEDDED_PER_REPO` / `MAX_WIKI_EMBEDDINGS_PER_RUN`). */
-const MAX_EMBEDDINGS_PER_RUN = 50;
+ *  (`MAX_COMMENTS_EMBEDDED_PER_REPO` / `MAX_WIKI_EMBEDDINGS_PER_RUN`).
+ *
+ *  Exported so the relation that keeps those two loops guard-free is asserted by
+ *  a test rather than only stated in comments (issue #211). */
+export const MAX_EMBEDDINGS_PER_RUN = 50;
 
 /** Maximum number of API pages to fetch per single cron run.
  *  Prevents Cloudflare Worker CPU time limit on large repos (e.g. 900+ issues initial sync).
@@ -114,8 +117,12 @@ const MAX_COMMENT_FETCHES_PER_REPO_PER_RUN = 10;
  *    - Cap = 10. Worst-case 5 × 10 × 5 = 250 subrequests for the docs surface
  *      across all repos, well under the per-surface envelope.
  *  Remaining changed docs are picked up on the next cron run (blob SHA stays
- *  unchanged in the store until the doc is successfully upserted). */
-const MAX_DOC_FETCHES_PER_REPO_PER_RUN = 10;
+ *  unchanged in the store until the doc is successfully upserted).
+ *
+ *  Must stay below `MAX_EMBEDDINGS_PER_RUN`: that relation is what makes the
+ *  docs loop's embed count bounded without a guard of its own (issue #211).
+ *  Asserted by a test; see the note at the cap site in `pollDocs`. */
+export const MAX_DOC_FETCHES_PER_REPO_PER_RUN = 10;
 
 /** Maximum docs reaped (Vectorize + FTS5 + store row) per repo per cron run.
  *  Mirrors `MAX_WIKI_DELETIONS_PER_REPO_PER_RUN`: each reap fans out to 3
@@ -152,8 +159,12 @@ const MAX_DOC_DELETIONS_PER_REPO_PER_RUN = 5;
  *      `MAX_EMBEDDINGS_PER_RUN=50` × ~5 ≈ 250, the LIGHT_CRON worst case stays
  *      around 750 subrequests, well under the 1000 ceiling.
  *  Remaining releases are stored with empty bodyHash so the next cron run
- *  retries them (existing pattern in `pollReleases`). */
-const MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN = 10;
+ *  retries them (existing pattern in `pollReleases`).
+ *
+ *  Must stay below `MAX_EMBEDDINGS_PER_RUN`: that relation is what makes the
+ *  releases loop's embed count bounded without a guard of its own (issue #211).
+ *  Asserted by a test; see the note at the cap site in `pollReleases`. */
+export const MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN = 10;
 
 /** Maximum number of commits fetched in the forward (webhook-redundancy) phase
  *  of the diff poller per repo per run.

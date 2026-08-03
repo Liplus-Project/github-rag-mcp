@@ -167,7 +167,7 @@ docs poller は `If-None-Match` 付きの条件付きリクエストで reposito
 
 **削除の枠.** 削除は 1 repo 1 run あたり `MAX_DOC_DELETIONS_PER_REPO_PER_RUN`（既定 5）で cap する。wiki の削除と同じ guard で、1 件あたり 3 subrequest かかるため、大量削除に対して上限なく回すと light cron の invocation 予算を単独で食い潰し、後ろに並ぶ repo を飢えさせうる — 1 つの PR が `.md` を 66 件削除すれば、その全件が 1 run に集中する。削除済み doc の store 行は消えるので残りの集合は縮む一方であり、drain は単調。したがってこの surface にはやり残しの経路が 3 本あり、**どれが効いても tree ETag は据え置く**（上記「ETag の据え置き」に従う）: fetch 枠は未処理の変更 doc を残し（issue #149）、削除枠は未削除の doc を残し（issue #203）、embed 失敗は store 行が古い `blobSha` を保持したままの doc を残す（issue #211）。
 
-docs / releases のどちらの loop も、自前の embedding cap を持たない。両者の fan-out cap（各 10）が `MAX_EMBEDDINGS_PER_RUN` = 50 より小さく、embed 件数を構造的に抑えているため、かつて置かれていた guard は到達不能だった。到達不能な分岐は「それも ETag の据え置きを負うべきか」を読み手が判断できない状態を残し、issue #211 の穴が欠陥ではなく曖昧さとして読めてしまう原因になっていた。現在は各 cap の位置にこの定数関係をコメントで明示しており、fan-out cap を 50 より上に引き上げる際に embedding guard の復活が必要だと分かる。
+docs / releases のどちらの loop も、自前の embedding cap を持たない。両者の fan-out cap（各 10）が `MAX_EMBEDDINGS_PER_RUN` = 50 より小さく、embed 件数を構造的に抑えているため、かつて置かれていた guard は到達不能だった。到達不能な分岐は「それも ETag の据え置きを負うべきか」を読み手が判断できない状態を残し、issue #211 の穴が欠陥ではなく曖昧さとして読めてしまう原因になっていた。**この定数関係はテストで検証している**——各 cap の位置のコメントに委ねてはいない。この repo の fan-out cap は実際に調整される（issue #134 は comment fetch cap を 30 から 10 に下げた）ので、50 より上に引き上げた時に、その面の embed 上限が黙って消えてしまうからである。assertion が落ちることは「新しい cap が誤り」という判定ではない。その loop に embedding guard を戻し、見送った項目が ETag を据え置けるよう、その loop の ETag 据え置き条件に組み込む必要がある、という意味である。
 
 wiki poller は `:45` cron 専属で、GitHub Wiki content の唯一の取り込み経路。Wiki は別 git repo (`{repo}.wiki.git`) に存在し、REST API も webhook event も持たないため、poller が repo ごとに 3 段の HTTP 呼び出しで処理する:
 

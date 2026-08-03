@@ -36,6 +36,9 @@ const {
   nextForwardDiffWatermark,
   nextBackfillDiffWatermark,
   nextIssueWatermark,
+  MAX_EMBEDDINGS_PER_RUN,
+  MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN,
+  MAX_DOC_FETCHES_PER_REPO_PER_RUN,
 } = await import("./poller.js");
 
 const REPO = "acme/widgets";
@@ -645,6 +648,27 @@ describe("poller: pollRepo watermark / retry boundary", () => {
     // Every item reached the pipeline across the three runs; none fell into the
     // gap between one run's budget and the next run's `since`.
     expect(seen.size).toBe(130);
+  });
+});
+
+describe("poller: the fan-out caps that stand in for an embedding guard", () => {
+  // `pollReleases` and `pollDocs` carry no embedding cap of their own. Issue #211
+  // removed the branches that used to hold one, because each was unreachable: the
+  // loop's embed count can never exceed its fan-out count, and the fan-out cap
+  // fires first at a value below MAX_EMBEDDINGS_PER_RUN. That relation between
+  // constants is the whole reason those loops are safe without a guard, and it is
+  // the kind of thing a later cap adjustment breaks silently — this repo has
+  // retuned fan-out caps more than once (issue #134 took the comment fetch cap
+  // from 30 to 10). So the relation is asserted here rather than left to the
+  // comments at the cap sites.
+  //
+  // If either assertion below fails, raising the cap was not by itself wrong —
+  // but the loop it belongs to now needs its embedding guard back, folded into
+  // that loop's ETag-hold condition (`leftWorkBehind` in `pollReleases`,
+  // `holdEtag` in `pollDocs`) so a deferred item still holds the ETag.
+  it("keeps both fan-out caps below the embedding budget", () => {
+    expect(MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN).toBeLessThan(MAX_EMBEDDINGS_PER_RUN);
+    expect(MAX_DOC_FETCHES_PER_REPO_PER_RUN).toBeLessThan(MAX_EMBEDDINGS_PER_RUN);
   });
 });
 
