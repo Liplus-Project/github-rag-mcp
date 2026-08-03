@@ -37,10 +37,14 @@ export const DEFAULT_ISSUE_STATE_LIMIT = 200;
 /** Hard ceiling on the per-call row budget a caller may request. */
 export const MAX_ISSUE_STATE_LIMIT = 1000;
 
-/** Vector IDs per `getByIds` / `upsert` call. Well inside the documented 1000-vector
- *  batch cap, and small enough that one batch's payload (values + metadata) stays
- *  modest for a 1024-dimension index. */
-const VECTOR_BATCH_SIZE = 50;
+/** Vector IDs per `getByIds` / `upsert` call.
+ *
+ *  Set by the *smaller* of the two caps this loop touches: `getByIds` rejects more
+ *  than 20 IDs per call (`VECTOR_GET_ERROR (code = 40007): too many ids in payload;
+ *  max id count is 20`), while the 1000-vector batch cap applies to `upsert`. One
+ *  constant serves both calls, so it has to satisfy the tighter one — a repo with
+ *  more than 20 stale rows failed on its first `getByIds` batch otherwise (#213). */
+const VECTOR_BATCH_SIZE = 20;
 
 /** Items per page of the GitHub open-item listing. */
 const OPEN_LIST_PER_PAGE = 100;
