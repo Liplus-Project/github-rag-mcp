@@ -6,9 +6,14 @@ import type { Env } from "./types.js";
 // upstream of all of that, so the two pipeline entry points are replaced with
 // controllable fakes and only the *commit list* call reaches the stubbed global
 // fetch. Everything else in `./pipeline.js` stays real.
-const { fetchCommitDetailMock, processAndUpsertCommitDiffMock } = vi.hoisted(() => ({
+const {
+  fetchCommitDetailMock,
+  processAndUpsertCommitDiffMock,
+  processAndUpsertIssueMock,
+} = vi.hoisted(() => ({
   fetchCommitDetailMock: vi.fn(),
   processAndUpsertCommitDiffMock: vi.fn(),
+  processAndUpsertIssueMock: vi.fn(),
 }));
 
 vi.mock("./pipeline.js", async (importOriginal) => {
@@ -17,13 +22,16 @@ vi.mock("./pipeline.js", async (importOriginal) => {
     ...actual,
     fetchCommitDetail: fetchCommitDetailMock,
     processAndUpsertCommitDiff: processAndUpsertCommitDiffMock,
+    processAndUpsertIssue: processAndUpsertIssueMock,
   };
 });
 
 const {
   pollDiffs,
+  pollRepo,
   nextForwardDiffWatermark,
   nextBackfillDiffWatermark,
+  nextIssueWatermark,
 } = await import("./poller.js");
 
 const REPO = "acme/widgets";
@@ -45,6 +53,9 @@ const commit = (sha: string, date: string): FakeCommit => ({ sha, date });
  */
 function makeStore(seed: Record<string, string> = {}) {
   const watermarks = new Map<string, string>(Object.entries(seed));
+  const etags = new Map<string, string>();
+  /** Records written through `/upsert` (the empty-hash retry markers). */
+  const upserts: Array<{ number: number; bodyHash: string }> = [];
   const stub = {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
@@ -52,17 +63,30 @@ function makeStore(seed: Record<string, string> = {}) {
         const key = url.searchParams.get("repo") ?? "";
         const value = watermarks.get(key);
         if (!value) return new Response("not found", { status: 404 });
-        return Response.json({ repo: key, lastPolledAt: value });
+        const etag = etags.get(key);
+        return Response.json({ repo: key, lastPolledAt: value, etag });
       }
       if (request.method === "POST" && url.pathname === "/watermark") {
-        const body = (await request.json()) as { repo: string; lastPolledAt: string };
+        const body = (await request.json()) as {
+          repo: string;
+          lastPolledAt: string;
+          etag?: string;
+        };
         watermarks.set(body.repo, body.lastPolledAt);
+        // The store column defaults to '' — an omitted ETag clears the stored one.
+        if (body.etag) etags.set(body.repo, body.etag);
+        else etags.delete(body.repo);
+        return new Response("ok");
+      }
+      if (request.method === "POST" && url.pathname === "/upsert") {
+        const body = (await request.json()) as { number: number; bodyHash: string };
+        upserts.push({ number: body.number, bodyHash: body.bodyHash });
         return new Response("ok");
       }
       return new Response("ok");
     },
   };
-  return { stub: stub as unknown as DurableObjectStub, watermarks };
+  return { stub: stub as unknown as DurableObjectStub, watermarks, etags, upserts };
 }
 
 /**
@@ -101,6 +125,75 @@ function stubCommitList(commits: FakeCommit[], opts: { fail?: boolean } = {}) {
   return { listQueries };
 }
 
+/** One issue as the GitHub list endpoint returns it (subset the poller reads). */
+function fakeIssue(number: number, updatedAt: string) {
+  return {
+    number,
+    title: `issue ${number}`,
+    body: "body",
+    state: "open" as const,
+    labels: [],
+    milestone: null,
+    assignees: [],
+    created_at: updatedAt,
+    updated_at: updatedAt,
+    html_url: `https://github.com/${REPO}/issues/${number}`,
+  };
+}
+
+/** `n` issues one minute apart, ascending — the order GitHub returns them in. */
+function issueSeries(n: number) {
+  return Array.from({ length: n }, (_, i) =>
+    fakeIssue(i + 1, new Date(Date.UTC(2026, 6, 1, 0, i)).toISOString()),
+  );
+}
+
+const ISSUE_ETAG = 'W/"issues-v1"';
+
+/**
+ * Stub the global fetch with a fake GitHub issue-list endpoint.
+ *
+ * Mirrors the contract `pollRepo` depends on: `sort=updated&direction=asc`,
+ * `since` filtering, `per_page` pagination, and a conditional request that
+ * answers 304 when the caller echoes the stored ETag back. The 304 is what makes
+ * an ETag stored over unfinished work fatal rather than merely wasteful.
+ */
+function stubIssueList(issues: ReturnType<typeof fakeIssue>[]) {
+  const sinceQueries: Array<string | undefined> = [];
+
+  const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    if (headers["If-None-Match"] === ISSUE_ETAG) {
+      return new Response(null, { status: 304 });
+    }
+
+    const since = url.searchParams.get("since") ?? undefined;
+    const perPage = Number(url.searchParams.get("per_page") ?? "100");
+    const page = Number(url.searchParams.get("page") ?? "1");
+    if (page === 1) sinceQueries.push(since);
+
+    // GitHub documents `since` as "updated after" — model the exclusive reading,
+    // so a watermark pinned exactly at an item's timestamp would lose it.
+    const selected = issues
+      .filter((i) => (since ? Date.parse(i.updated_at) > Date.parse(since) : true))
+      .sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at))
+      .slice((page - 1) * perPage, page * perPage);
+
+    return new Response(JSON.stringify(selected), {
+      status: 200,
+      headers: { "Content-Type": "application/json", etag: ISSUE_ETAG },
+    });
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+  return { sinceQueries };
+}
+
+/** Issue numbers handed to the embed pipeline, i.e. the items a run attempted. */
+const attemptedIssues = (): number[] =>
+  processAndUpsertIssueMock.mock.calls.map((call) => Number((call[3] as { number: number }).number));
+
 const env = { GITHUB_TOKEN: "test-token" } as unknown as Env;
 
 /** SHAs handed to the detail fetch, i.e. the commits a run actually attempted. */
@@ -110,6 +203,14 @@ const attemptedShas = (): string[] =>
 beforeEach(() => {
   fetchCommitDetailMock.mockReset();
   processAndUpsertCommitDiffMock.mockReset();
+  processAndUpsertIssueMock.mockReset();
+  // Default: every issue embeds cleanly.
+  processAndUpsertIssueMock.mockResolvedValue({
+    embedded: true,
+    skippedUnchanged: false,
+    metadataUpdated: false,
+    failed: false,
+  });
   // Default: every commit ingests cleanly.
   fetchCommitDetailMock.mockImplementation(async (_repo: string, sha: string) => ({
     sha,
@@ -332,6 +433,142 @@ describe("poller: pollDiffs forward watermark / retry boundary", () => {
     expect(Date.parse(watermarks.get(FORWARD_KEY)!)).toBeGreaterThanOrEqual(
       Date.parse(wm),
     );
+  });
+});
+
+describe("poller: nextIssueWatermark", () => {
+  const since = "2026-07-01T00:00:00.000Z";
+  const candidate = "2026-07-01T12:00:00.000Z";
+
+  it("takes the fetch bound when every item was ingested", () => {
+    expect(nextIssueWatermark(since, candidate, undefined)).toBe(candidate);
+  });
+
+  it("pins just before the first uningested item", () => {
+    expect(
+      nextIssueWatermark(since, candidate, "2026-07-01T02:00:00.000Z"),
+    ).toBe("2026-07-01T01:59:59.000Z");
+  });
+
+  it("pins on an initial sync, where there is no watermark yet", () => {
+    expect(
+      nextIssueWatermark(undefined, candidate, "2026-07-01T02:00:00.000Z"),
+    ).toBe("2026-07-01T01:59:59.000Z");
+  });
+
+  it("never regresses below the watermark it started from", () => {
+    expect(nextIssueWatermark(since, candidate, since)).toBe(since);
+  });
+
+  it("holds the watermark when the boundary item carries no usable timestamp", () => {
+    expect(nextIssueWatermark(since, candidate, "not-a-date")).toBe(since);
+    expect(nextIssueWatermark(undefined, candidate, "not-a-date")).toBeUndefined();
+  });
+});
+
+describe("poller: pollRepo watermark / retry boundary", () => {
+  it("keeps items the embedding budget deferred inside the next run's window", async () => {
+    // 60 items against a per-run embedding budget of 50.
+    const issues = issueSeries(60);
+    const { stub, watermarks, upserts } = makeStore();
+    stubIssueList(issues);
+
+    await pollRepo(REPO, env, stub);
+
+    // The budget stops at 50; the rest are marked for retry, not embedded.
+    expect(attemptedIssues()).toEqual(issues.slice(0, 50).map((i) => i.number));
+    expect(upserts.map((u) => u.number)).toEqual(
+      issues.slice(50).map((i) => i.number),
+    );
+    expect(upserts.every((u) => u.bodyHash === "")).toBe(true);
+
+    // Watermark parked before item 51 rather than at the poll start time.
+    const wm = watermarks.get(REPO)!;
+    expect(Date.parse(wm)).toBeLessThan(Date.parse(issues[50].updated_at));
+    expect(Date.parse(wm)).toBeGreaterThanOrEqual(Date.parse(issues[49].updated_at));
+
+    // Next run: the deferred items are back in the window. Before issue #210 the
+    // watermark had already moved past them and they were never fetched again.
+    processAndUpsertIssueMock.mockClear();
+    await pollRepo(REPO, env, stub);
+
+    expect(attemptedIssues()).toEqual(issues.slice(50).map((i) => i.number));
+  });
+
+  it("withholds the ETag while work is left behind, so the retry is not answered 304", async () => {
+    const issues = issueSeries(60);
+    const { stub, etags } = makeStore();
+    stubIssueList(issues);
+
+    await pollRepo(REPO, env, stub);
+
+    expect(etags.get(REPO)).toBeUndefined();
+  });
+
+  it("advances to the poll start time and stores the ETag once everything landed", async () => {
+    const issues = issueSeries(3);
+    const { stub, watermarks, etags } = makeStore();
+    stubIssueList(issues);
+
+    await pollRepo(REPO, env, stub);
+
+    expect(attemptedIssues()).toEqual([1, 2, 3]);
+    expect(Date.parse(watermarks.get(REPO)!)).toBeGreaterThan(
+      Date.parse(issues[2].updated_at),
+    );
+    expect(etags.get(REPO)).toBe(ISSUE_ETAG);
+  });
+
+  it("pins the watermark before an item whose embed failed", async () => {
+    const issues = issueSeries(3);
+    const { stub, watermarks } = makeStore();
+    stubIssueList(issues);
+
+    processAndUpsertIssueMock.mockImplementation(
+      async (
+        _env: unknown,
+        _stub: unknown,
+        _repo: string,
+        issue: { number: number },
+      ) =>
+        issue.number === 2
+          ? { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true }
+          : { embedded: true, skippedUnchanged: false, metadataUpdated: false, failed: false },
+    );
+
+    await pollRepo(REPO, env, stub);
+
+    const wm = watermarks.get(REPO)!;
+    expect(Date.parse(wm)).toBeLessThan(Date.parse(issues[1].updated_at));
+
+    // Item 2 is back in the next window rather than stranded behind the watermark.
+    processAndUpsertIssueMock.mockClear();
+    processAndUpsertIssueMock.mockResolvedValue({
+      embedded: true,
+      skippedUnchanged: false,
+      metadataUpdated: false,
+      failed: false,
+    });
+    await pollRepo(REPO, env, stub);
+
+    expect(attemptedIssues()).toContain(2);
+  });
+
+  it("drains a backlog larger than the budget across runs without skipping", async () => {
+    const issues = issueSeries(130);
+    const { stub } = makeStore();
+    stubIssueList(issues);
+
+    const seen = new Set<number>();
+    for (let run = 0; run < 3; run++) {
+      processAndUpsertIssueMock.mockClear();
+      await pollRepo(REPO, env, stub);
+      for (const n of attemptedIssues()) seen.add(n);
+    }
+
+    // Every item reached the pipeline across the three runs; none fell into the
+    // gap between one run's budget and the next run's `since`.
+    expect(seen.size).toBe(130);
   });
 });
 
