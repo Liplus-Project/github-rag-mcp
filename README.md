@@ -72,6 +72,10 @@ See:
 - [docs/installation.md](docs/installation.md)
 - [docs/installation.ja.md](docs/installation.ja.md)
 
+## Versioning
+
+Published versions come from the GitHub Release tag. The `version` fields committed in this repository are placeholders that CD rewrites from the tag at publish time, so they are expected to differ from the published version — see [Versioning and published artifacts](docs/installation.md#versioning-and-published-artifacts).
+
 ## Requirements
 
 See:

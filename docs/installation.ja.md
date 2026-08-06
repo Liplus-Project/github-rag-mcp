@@ -429,6 +429,28 @@ POST /admin/backfill-issue-index?repo=owner/repo
 - 取り込みは body-hash 判定を強制的に飛ばすので、vector はあるが FTS5 行が無い項目も修復される。次の poll を待つのでは代替できない理由がここ
 - 確認は distinct な番号を数える: `SELECT COUNT(DISTINCT number) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request')` が実際の issue + PR 件数に近づく
 
+## Versioning and published artifacts
+
+公開される成果物の版数は **GitHub Release の tag** から来る。リポジトリにコミットされている `version` フィールドはどれもソースではない。
+
+`.github/workflows/cd.yml` は `release: published` を契機に走り、pack / publish の前に tag から版数を振り直す。
+
+- npm — `mcp-server/` で `npm version "${TAG_NAME#v}" --no-git-tag-version --allow-same-version`
+- `.mcpb` bundle — `mcp-server/` で `jq --arg v "${TAG_NAME#v}" '.version = $v' manifest.json`
+
+したがって作業ツリー上の `version` 値は公開成果物に一切届かない。
+
+| 場所 | 役割 |
+|---|---|
+| `package.json`（root） | worker の build 用のみ。`private: true` で公開されない |
+| `mcp-server/package.json` | placeholder。公開時に tag から上書きされる |
+| `mcp-server/manifest.json` | placeholder。公開時に tag から上書きされる |
+| `mcp-server/server.json` | npm tarball に同梱される MCP registry metadata。release workflow は読みも書き換えもしない |
+
+これらの値が公開版数より遅れているのは設計どおりの状態であって、不整合ではない。手で合わせる対象でもない — 次のリリースがどのみち自身の tag から上書きするので、手編集は「このファイルが権威である」という誤った印象を残すだけになる。
+
+実際に公開されている版数を見るには、release tag（`gh release list`）か registry（`npm view github-rag-mcp version`）を参照する。
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`

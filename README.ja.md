@@ -72,6 +72,10 @@ GitHub webhooks + GitHub API
 - [docs/installation.md](docs/installation.md)
 - [docs/installation.ja.md](docs/installation.ja.md)
 
+## Versioning
+
+公開される版数は GitHub Release の tag から来ます。リポジトリにコミットされている `version` フィールドは placeholder で、公開時に CD が tag から書き換えるため、公開版数と一致していないのが正常です。詳細は [Versioning and published artifacts](docs/installation.ja.md#versioning-and-published-artifacts) を参照してください。
+
 ## Requirements
 
 次を参照してください。
