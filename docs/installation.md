@@ -429,6 +429,28 @@ Operational notes:
 - the ingest is forced past the body-hash check, so an item whose vector exists but whose FTS5 row is missing is repaired too. This is why the endpoint is not equivalent to waiting for the next poll
 - verify by counting distinct numbers: `SELECT COUNT(DISTINCT number) FROM search_docs WHERE repo = ? AND type IN ('issue','pull_request')` should approach the repository's real issue + PR count
 
+## Versioning and published artifacts
+
+The version of every published artifact comes from the **GitHub Release tag**. No `version` field committed in this repository is the source.
+
+`.github/workflows/cd.yml` runs on `release: published` and rewrites the version from the tag before it packs or publishes:
+
+- npm — `npm version "${TAG_NAME#v}" --no-git-tag-version --allow-same-version` in `mcp-server/`
+- `.mcpb` bundle — `jq --arg v "${TAG_NAME#v}" '.version = $v' manifest.json` in `mcp-server/`
+
+So the `version` values sitting in the working tree never reach a published artifact:
+
+| Location | Role |
+|---|---|
+| `package.json` (root) | worker build only, `private: true`, never published |
+| `mcp-server/package.json` | placeholder, overwritten from the tag at publish time |
+| `mcp-server/manifest.json` | placeholder, overwritten from the tag at publish time |
+| `mcp-server/server.json` | MCP registry metadata carried in the npm tarball; the release workflow neither reads nor rewrites it |
+
+These values are expected to lag behind the published version. That divergence is the designed state, not a defect, and it is not something to repair by hand: the next release overwrites them from its own tag regardless, so a manual edit only leaves the impression that the file is authoritative.
+
+To read the version that is actually published, look at the release tag (`gh release list`) or the registry (`npm view github-rag-mcp version`).
+
 ## Troubleshooting
 
 ### `GITHUB_TOKEN not configured`
