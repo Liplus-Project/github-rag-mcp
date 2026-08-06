@@ -185,7 +185,20 @@ export class RagMcpAgent extends DurableObject<Env> {
 }
 
 export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
-  // @ts-expect-error -- McpServer version mismatch between top-level SDK and agents' bundled copy (same issue as webhook-mcp; wrangler resolves at bundle time)
+  // `agents` used to bundle its own older @modelcontextprotocol/sdk copy, so the
+  // McpServer type here and the one McpAgent expects came from two different
+  // installs and needed a @ts-expect-error. agents@0.19.0 made the SDK a plain
+  // dependency pinned to exactly 1.29.0, and the committed lockfile holds our own
+  // `^1.0.0` at that same 1.29.0, so both sides share one copy today and this
+  // assignment typechecks (issue #225).
+  //
+  // That agreement rests on the lockfile alone, not on the ranges. SDK 1.30.0 is
+  // already published, so `^1.0.0` re-resolves to it as soon as the lock is
+  // regenerated or `npm update` runs; npm then nests 1.29.0 under agents/ again
+  // and this line fails with TS2416 (the two McpServer copies have separate
+  // declarations of the private `_serverInfo`). Confirmed by resolving from
+  // package.json alone. Fix by realigning the versions, not by re-adding a
+  // suppression.
   server = new McpServer({
     name: "github-rag-mcp",
     version: "0.1.0",
