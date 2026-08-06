@@ -45,9 +45,10 @@ export interface OAuthEnv {
 }
 
 /**
- * Props consumed by RagMcpAgentV2 on the /mcp route, after the inner handler
- * rewrites ctx.props from GitHubUserProps. Distinct from GitHubUserProps so
- * the MCP agent does not see GitHub refresh tokens it has no use for.
+ * Props consumed by the MCP tool handlers on the /mcp route, after the inner
+ * handler rewrites ctx.props from GitHubUserProps. Distinct from
+ * GitHubUserProps so the MCP surface does not see GitHub refresh tokens it has
+ * no use for.
  */
 export interface McpProps {
   githubUserId: number;
@@ -66,7 +67,7 @@ export function readGitHubProps(ctx: ExecutionContext): GitHubUserProps | undefi
 }
 
 /**
- * Replace ctx.props with the McpProps shape RagMcpAgentV2 expects.
+ * Replace ctx.props with the McpProps shape the MCP handler republishes.
  * Mirrors readGitHubProps on the write side.
  */
 export function writeMcpProps(ctx: ExecutionContext, props: McpProps): void {

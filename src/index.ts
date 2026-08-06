@@ -7,7 +7,7 @@
  *   /oauth/token     -- Token issuance and refresh
  *
  * Routes (OAuth-protected API, validated by OAuthProvider):
- *   POST /mcp  -- MCP server (Streamable HTTP MCP protocol)
+ *   POST /mcp  -- MCP server (protocol revision 2026-07-28, stateless)
  *
  * Routes (defaultHandler, no OAuth token required):
  *   POST /webhooks/github -- GitHub webhook receiver (IP allowlist + signature verification)
@@ -22,8 +22,9 @@
  *   POST /admin/backfill-issue-index?repo=owner/repo[&dry_run=true][&limit=N][&cursor=N] -- Index the issue/PR numbers missing from search_docs (requires GITHUB_TOKEN header)
  *
  * Durable Objects:
- *   RagMcpAgentV2  -- MCP server (tools: search, get_issue_context, list_recent_activity)
  *   IssueStore   -- Issue/PR/wiki state store (SQLite-backed)
+ *   RagMcpAgent / RagMcpAgentV2 -- retired MCP-serving classes, exported only
+ *                to satisfy the past-migration constraint (see retired-do.ts)
  *
  * Cron Trigger:
  *   Hourly (fallback) -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
@@ -40,7 +41,8 @@ import {
 } from "./oauth.js";
 import { handleScheduled, pollWiki } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
-import { RagMcpAgentV2 } from "./mcp.js";
+import { createMcpHandler, type StatelessMcpHandler } from "agents/mcp/server";
+import { createRagMcpServer } from "./mcp.js";
 import { indexWikiEdges } from "./graph.js";
 import { backfillNatSegments } from "./fts.js";
 import {
@@ -62,15 +64,41 @@ import {
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
 
-// Durable Object: MCP server — legacy stub (retained for migration compatibility only).
-export { RagMcpAgent } from "./mcp.js";
+// Durable Objects: retired MCP-serving stubs, retained for migration
+// compatibility only (see the module comment in retired-do.ts).
+export { RagMcpAgent, RagMcpAgentV2 } from "./retired-do.js";
 
-// Durable Object: MCP server (tools: search, get_issue_context, list_recent_activity)
-export { RagMcpAgentV2 } from "./mcp.js";
+/**
+ * MCP handler for the 2026-07-28 stateless core (issue #224).
+ *
+ * `legacy: "reject"` is the single-lane decision made literal: 2025-era
+ * traffic (`initialize` + `mcp-session-id`) is answered with the
+ * unsupported-protocol-version error naming the one revision this endpoint
+ * serves, rather than being routed to a compatibility lane. There is no
+ * fallback path to go stale.
+ *
+ * The handler is memoized per `env` rather than built at module scope, because
+ * the server factory needs the bindings and `env` only exists inside `fetch`.
+ * A Worker isolate sees one `env`, so this resolves to a single handler in
+ * practice; the WeakMap states that rather than assuming it.
+ *
+ * Per-request user identity does NOT come through here. The handler reads
+ * `ctx.props` (rewritten below) and republishes it per request, which
+ * `mcp.ts` reads back via `getMcpAuthContext()`.
+ */
+const mcpHandlers = new WeakMap<Env, StatelessMcpHandler>();
 
-// McpAgent.serve() returns a fetch handler for MCP protocol.
-// It reads ctx.props (set by OAuthProvider) and passes them to the DO.
-const mcpHandler = RagMcpAgentV2.serve("/mcp");
+function getMcpHandler(env: Env): StatelessMcpHandler {
+  let handler = mcpHandlers.get(env);
+  if (!handler) {
+    handler = createMcpHandler(() => createRagMcpServer(env), {
+      route: "/mcp",
+      legacy: "reject",
+    });
+    mcpHandlers.set(env, handler);
+  }
+  return handler;
+}
 
 /**
  * Inner handler -- processes requests after OAuthProvider routing.
@@ -574,15 +602,17 @@ const innerHandler: ExportedHandler<Env> = {
         return new Response("Unauthorized", { status: 401 });
       }
 
-      // Rewrite ctx.props to McpProps shape expected by RagMcpAgentV2.
-      // Pass the GitHub access token so the agent can make API calls.
+      // Rewrite ctx.props to the McpProps shape the tool handlers expect.
+      // Pass the GitHub access token so they can make API calls.
       writeMcpProps(ctx, {
         githubUserId: props.githubUserId,
         githubLogin: props.githubLogin,
         accessToken: props.githubAccessToken,
       });
 
-      return mcpHandler.fetch(request, env, ctx);
+      // Callable form (not `.fetch`): only this one reads `ctx.props` and
+      // republishes it as the per-request auth context.
+      return getMcpHandler(env)(request, env, ctx);
     }
 
     // -- OAuth authorize (redirect to GitHub) --
