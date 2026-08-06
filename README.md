@@ -11,6 +11,16 @@ It is the search-oriented counterpart to [github-webhook-mcp](https://github.com
 - push-based awareness of what just happened
 - hybrid retrieval (dense + sparse) of the state that matters for the next step
 
+## Breaking change: MCP protocol revision 2026-07-28
+
+From this release the Worker serves **MCP protocol revision 2026-07-28 only**. It keeps no compatibility lane for the previous revision.
+
+- **Bridge versions older than this release stop working.** They open a session with `initialize`, which the Worker no longer answers. The failure is quiet: the bridge does not crash, it returns the protocol error as tool output text.
+- **Restart Claude Desktop to pick up the new bridge.** The bridge is launched with `npx`, and `@latest` is resolved at process start — an already-running Claude Desktop keeps the copy it started with, however new the published version is. Quit it fully and reopen.
+- **Pinning the bridge version leaves you stuck.** If your MCP client config pins a version older than this release, restarting does not help; remove the pin (or move it forward) first.
+
+The Worker and the bridge ship together, so a bridge from this release or later needs no configuration change.
+
 ## Memory Model
 
 The project treats GitHub as a visible state store for AI work.

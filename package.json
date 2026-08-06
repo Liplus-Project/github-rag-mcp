@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.3.1",
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "agents": "^0.19.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "^0.20.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {
@@ -23,7 +23,10 @@
     "wrangler": "^4.0.0"
   },
   "comments": {
-    "overrides": "Pin @cloudflare/workers-types across the tree to the version the worker code is written against; the vitest-pool-workers toolchain otherwise pulls a newer one whose stricter AI binding types break src/rerank.ts (types-only; runtime unaffected)."
+    "overrides": "Pin @cloudflare/workers-types across the tree to the version the worker code is written against; the vitest-pool-workers toolchain otherwise pulls a newer one whose stricter AI binding types break src/rerank.ts (types-only; runtime unaffected).",
+    "@modelcontextprotocol/server": "Exact, not a range: agents@0.20.x declares this package as a non-optional peer at exactly 2.0.0, so a caret here would let npm resolve a newer copy, nest 2.0.0 under agents/, and reproduce the two-copies type mismatch #227 was opened about. Exact makes the coupling loud — an agents bump that moves the peer fails at install time instead of at tsc.",
+    "@modelcontextprotocol/sdk": "Deliberately absent. The worker no longer imports SDK v1 anywhere after the 2026-07-28 flip (#224); agents still needs it as a required peer, so npm installs it, but this package declares no range of its own to drift against agents' exact pin. The bridge keeps its own SDK v1 dependency for the Claude Desktop face (mcp-server/package.json).",
+    "@modelcontextprotocol/client": "Deliberately absent for the same reason: only the bridge speaks client-side, and it declares its own copy. agents' required peer covers the install here."
   },
   "overrides": {
     "@cloudflare/workers-types": "$@cloudflare/workers-types"

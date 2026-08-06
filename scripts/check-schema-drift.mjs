@@ -2,7 +2,7 @@
 // Guards against drift between the Worker `search` tool param schema and the
 // client proxy's static mirror of it.
 //
-//   source of truth : src/mcp.ts             (zod object passed to this.server.tool("search", ...))
+//   source of truth : src/mcp.ts             (inputSchema passed to server.registerTool("search", ...))
 //   mirror          : mcp-server/server/tools.js  (TOOLS[0].inputSchema.properties)
 //
 // Why this exists (gh#157 / gh#159): the proxy answers tools/list from a
@@ -62,7 +62,8 @@ function paramBlocks(schema, headerRe) {
   return blocks;
 }
 
-// Worker: zod object is the 3rd arg of this.server.tool("search", "<desc>", { ... }, handler).
+// Worker: the zod object is `inputSchema` inside the config arg of
+// server.registerTool("search", { description, inputSchema }, handler).
 // Top-level param keys are 8-space-indented `<name>: z`. Bounded from the tool
 // name to the `async ({` handler so other zod objects in the file are excluded.
 // Enum values come from the `.enum([...])` call inside each param's block.

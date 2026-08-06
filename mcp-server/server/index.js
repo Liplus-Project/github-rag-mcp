@@ -3,12 +3,25 @@
  * GitHub RAG MCP — Cloudflare Worker bridge
  *
  * Thin stdio MCP server that proxies tool calls to a remote
- * Cloudflare Worker + Durable Object backend via Streamable HTTP.
- * Authenticates via OAuth 2.1 with PKCE (localhost callback).
+ * Cloudflare Worker backend. Authenticates via OAuth 2.1 with PKCE
+ * (localhost callback).
  *
  * Tools are proxied to the Worker's MCP endpoint:
  *   search — unified hybrid search / time-ordered activity scan /
  *                   inline doc content fetch via Vectorize + Workers AI
+ *
+ * The bridge has two independent protocol faces (issue #224):
+ *
+ *   Claude Desktop -> bridge : SDK v1 stdio server, 2025-era. Unchanged.
+ *   bridge -> Worker         : SDK v2 client pinned to protocol revision
+ *                              2026-07-28. Stateless — no `initialize`
+ *                              handshake and no `mcp-session-id`; every
+ *                              request carries the per-request `_meta`
+ *                              envelope the revision requires.
+ *
+ * The Worker's revision is a private contract between the two artifacts of
+ * this repository, so the Desktop face is not bound by it. Moving the Desktop
+ * face to SDK v2 is issue #228.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -24,6 +37,7 @@ import { join } from "node:path";
 import { exec } from "node:child_process";
 import { createRequire } from "node:module";
 import { supportsRedirectUris } from "./oauth-client-registration.js";
+import { createRemoteClient } from "./remote-client.js";
 import { TOOLS } from "./tools.js";
 
 const require = createRequire(import.meta.url);
@@ -328,87 +342,35 @@ async function getAccessToken() {
   return _cachedTokens.access_token;
 }
 
-/** Build common headers with OAuth Bearer auth */
-async function authHeaders(extra) {
-  const h = { ...extra };
-  const token = await getAccessToken();
-  if (token) h["Authorization"] = `Bearer ${token}`;
-  return h;
-}
+// ── Remote MCP Client (lazy, reused) ─────────────────────────────────────────
+// Construction and caching live in ./remote-client.js so they can be tested
+// without importing this module (which connects the stdio transport on import).
 
-// ── Remote MCP Session (lazy, reused) ────────────────────────────────────────
-
-let _sessionId = null;
-
-async function getSessionId() {
-  if (_sessionId) return _sessionId;
-
-  const res = await fetch(`${WORKER_URL}/mcp`, {
-    method: "POST",
-    headers: await authHeaders({
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-    }),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "github-rag-mcp-bridge", version: PACKAGE_VERSION },
-      },
-      id: "init",
-    }),
-  });
-
-  _sessionId = res.headers.get("mcp-session-id") || "";
-  return _sessionId;
-}
+const remote = createRemoteClient({
+  workerUrl: WORKER_URL,
+  clientVersion: PACKAGE_VERSION,
+  // The OAuth flow above stays the source of tokens; this only hands the
+  // current one over, and clears the cache when the Worker says it is stale so
+  // the next `token()` re-mints.
+  authProvider: {
+    token: () => getAccessToken(),
+    onUnauthorized: async () => {
+      _cachedTokens = null;
+      await getAccessToken();
+    },
+  },
+});
 
 async function callRemoteTool(name, args) {
-  const sessionId = await getSessionId();
+  // Resolve credentials first so an interactive-auth requirement surfaces as
+  // OAuthPendingError from here, where the caller already handles it, rather
+  // than from inside the transport wrapped as a network failure.
+  await getAccessToken();
 
-  const res = await fetch(`${WORKER_URL}/mcp`, {
-    method: "POST",
-    headers: await authHeaders({
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-      "mcp-session-id": sessionId,
-    }),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: { name, arguments: args },
-      id: crypto.randomUUID(),
-    }),
-  });
-
-  // 401 = token expired or revoked, re-authenticate and retry
-  if (res.status === 401) {
-    _cachedTokens = null;
-    _sessionId = null;
-    return callRemoteTool(name, args);
-  }
-
-  const text = await res.text();
-
-  // Streamable HTTP may return SSE format
-  const dataLine = text.split("\n").find((l) => l.startsWith("data: "));
-  const json = dataLine ? JSON.parse(dataLine.slice(6)) : JSON.parse(text);
-
-  if (json.error) {
-    // Session expired — retry once with a fresh session
-    if (json.error.code === -32600 || json.error.code === -32001) {
-      _sessionId = null;
-      return callRemoteTool(name, args);
-    }
-    return { content: [{ type: "text", text: JSON.stringify(json.error) }] };
-  }
-
-  return json.result;
+  return await remote.callTool(name, args);
 }
 
-// ── MCP Server Setup ─────────────────────────────────────────────────────────
+// ── MCP Server Setup (Claude Desktop face — SDK v1, unchanged) ───────────────
 
 const server = new Server(
   { name: "github-rag-mcp", version: PACKAGE_VERSION },

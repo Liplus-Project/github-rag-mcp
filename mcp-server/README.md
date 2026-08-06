@@ -4,10 +4,20 @@ Stdio MCP proxy that bridges local MCP clients (Claude Desktop, Claude Code, etc
 
 This package is the **client-side proxy only**. The actual indexing pipeline (Vectorize + D1 FTS5 + Workers AI BGE-M3 + cross-encoder rerank) runs on the Worker. See the [main repository](https://github.com/Liplus-Project/github-rag-mcp) for architecture and self-hosting instructions.
 
+## Breaking change: MCP protocol revision 2026-07-28
+
+From this release the Worker serves **MCP protocol revision 2026-07-28 only**, with no compatibility lane for the previous revision.
+
+- **Proxy versions older than this release stop working.** They open a session with `initialize`, which the Worker no longer answers. The failure is quiet: the proxy does not crash, it returns the protocol error as tool output text.
+- **Restart Claude Desktop to pick up the new proxy.** `npx` resolves `@latest` at process start, so an already-running Claude Desktop keeps the copy it launched with however new the published version is. Quit it fully and reopen.
+- **Pinning the proxy version leaves you stuck.** If your MCP client config pins a version older than this release, restarting does not help; remove the pin (or move it forward) first.
+
+Nothing else changes for you: the proxy still speaks the same MCP dialect to Claude Desktop, and the same `search` tool with the same parameters.
+
 ## What this proxy does
 
-- Speaks stdio MCP locally to your client.
-- Forwards `tools/call` to the Worker's Streamable HTTP MCP endpoint (`/mcp`).
+- Speaks stdio MCP locally to your client (SDK v1, unchanged by the revision above).
+- Forwards `tools/call` to the Worker's `/mcp` endpoint over MCP protocol revision 2026-07-28. That side is stateless: no `initialize` handshake and no session id — each call carries the revision's per-request envelope.
 - Handles OAuth 2.1 with PKCE against the Worker (browser-based localhost callback).
 - Caches access and refresh tokens under `~/.github-rag-mcp/` (mode `0600`).
 
@@ -123,6 +133,7 @@ The browser callback never leaves your machine; the authorization code is delive
   URI set does not cover the callback port selected for this authorization.
 - **`OAuth callback timed out after 5 minutes`.** Re-invoke any tool to restart the flow.
 - **`Failed to reach worker`.** Check that `RAG_WORKER_URL` is correct and reachable from your machine.
+- **`Unsupported protocol version`, or a tool that answers with a protocol error instead of results.** The proxy predates the 2026-07-28 flip. Quit Claude Desktop fully and reopen so `npx` fetches the current version; if your config pins a version, move the pin forward first.
 - **Stale credentials.** Remove `~/.github-rag-mcp/oauth-tokens.json` (and optionally `oauth-client.json`) and retry.
 
 ## Links

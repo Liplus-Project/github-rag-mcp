@@ -95,6 +95,45 @@ The check compares two axes: param names and, for enum params, their values —
 a name-only comparison let the proxy `type` enum omit `wiki_doc` while the Worker
 accepted it, so clients rejected the value before any request was sent (gh#181).
 
+#### Protocol revision: 2026-07-28, single lane
+
+The Worker serves MCP protocol revision **2026-07-28 only**. There is no
+compatibility lane for the 2025 era: a request without the revision's
+per-request `_meta` envelope — including a 2025 `initialize` handshake — is
+answered with the unsupported-protocol-version error naming the one revision
+the endpoint serves. The SDK offers a stateless fallback for the older era;
+it is deliberately not enabled (gh#224).
+
+The reason is not that a fallback would be technically wrong, but that an
+unmaintained one becomes dead code. Its removal condition is observable (no
+traffic reaches the old lane) yet nobody goes and observes it. The breakage is
+absorbed on a different channel instead: a minor release plus a README notice.
+
+Consequences of statelessness:
+
+- No session. Each request is served by a server instance built for it alone,
+  so nothing is resolved from a session ID and `mcp-session-id` is not issued.
+- User identity comes from the OAuth props of the request being served, read
+  through the handler's per-request auth context rather than from an instance
+  field.
+- The Durable Objects that once served MCP (`RagMcpAgent`, `RagMcpAgentV2`) are
+  out of the serving path. Their classes remain exported as retired stubs
+  because Cloudflare requires every class named in a past migration to exist in
+  the script; removing them needs a `deleted_classes` migration. `IssueStore`,
+  which holds real data, is untouched.
+
+The revision is a private contract between this repository's two artifacts. The
+npx bridge (`mcp-server/`) is the only way to reach the Worker — `server.json`
+declares stdio transport alone — so no third-party client negotiates with it,
+and the bridge pins the revision instead of probing for it. The bridge's own
+face toward Claude Desktop stays on SDK v1 / the 2025 era; that side is a
+separate migration (gh#228).
+
+Because the Worker is one shared deployment and each bridge is per user, the
+flip is asymmetric: the Worker moves at once, while a bridge follows only when
+its host process restarts. A user pinned to an older bridge version does not
+recover by restarting. That cohort is explicitly cut off.
+
 ### 2. Webhook Receiver
 
 The webhook receiver ingests GitHub events in near real time.
