@@ -3,6 +3,7 @@ import { env, applyD1Migrations } from "cloudflare:test";
 import {
   upsertFtsRow,
   queryFts,
+  repoHasIndexedRows,
   deleteFtsRow,
   backfillNatSegments,
   tokenizerKindForType,
@@ -586,6 +587,42 @@ describe("fts D1: structured filters", () => {
     // No type filter = both surfaces, exactly as before the filter value existed.
     const unfiltered = await queryFts(env.DB_FTS, "marker", 10, { repo });
     expect(unfiltered.map((h) => h.vectorId).sort()).toEqual(["d:wt-doc", "w:wt-wiki"]);
+  });
+});
+
+// Issue #219: an unmatched `repo` filter and a genuine zero-hit search produce
+// the same empty candidate set, so the response cannot be told apart by the
+// caller. `repoHasIndexedRows` is the probe that separates them — it is what
+// makes `filters_unmatched` in the search response answerable.
+describe("fts D1: repoHasIndexedRows (filters_unmatched probe)", () => {
+  it("separates an unmatched repo filter from a genuine zero-hit search", async () => {
+    const repo = "t/repo-probe";
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: "i:repo-probe", type: "issue", repo, content: "indexed probe subject" }),
+    );
+
+    // Both queries return zero hits — indistinguishable on the hit set alone.
+    const wrongSlug = await queryFts(env.DB_FTS, "indexed", 10, { repo: "repo-probe" });
+    const noSuchTerm = await queryFts(env.DB_FTS, "unrelatedtermnowhere", 10, { repo });
+    expect(wrongSlug).toEqual([]);
+    expect(noSuchTerm).toEqual([]);
+
+    // The probe is what tells them apart: the bare name selects no population,
+    // the full slug selects one that simply held no match for the query.
+    expect(await repoHasIndexedRows(env.DB_FTS, "repo-probe")).toBe(false);
+    expect(await repoHasIndexedRows(env.DB_FTS, repo)).toBe(true);
+  });
+
+  it("matches the full slug exactly (no prefix or suffix match)", async () => {
+    const repo = "t/repo-exact";
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({ vectorId: "i:repo-exact", type: "issue", repo, content: "exact match subject" }),
+    );
+    expect(await repoHasIndexedRows(env.DB_FTS, "t/repo-exac")).toBe(false);
+    expect(await repoHasIndexedRows(env.DB_FTS, "t/repo-exact-extra")).toBe(false);
+    expect(await repoHasIndexedRows(env.DB_FTS, "t/repo-exact")).toBe(true);
   });
 });
 

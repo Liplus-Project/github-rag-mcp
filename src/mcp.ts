@@ -25,6 +25,7 @@ import type {
 import type { GitHubUserProps } from "./oauth.js";
 import {
   queryFts,
+  detectUnmatchedFilters,
   toRankMap,
   reciprocalRankFusion,
   type FtsHit,
@@ -219,7 +220,10 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         "optionally narrow via since / until to list recent activity across every type.\n" +
         "  3. Doc content fetch: pass include_content: true to inline the raw file content of top doc and wiki_doc results " +
         "(docs via GitHub Contents API, wiki_docs via raw.githubusercontent.com/wiki; capped at the first few rows of each).\n" +
-        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across all modes. " +
+        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across all modes; " +
+        "repo takes the full slug (owner/repo) and matches exactly, so a bare repository name selects nothing. " +
+        "In search mode the response carries filters_unmatched: any filter listed there matched no row in the " +
+        "index at all, which separates a mis-specified filter from a genuine zero-hit result. " +
         "Use type: \"doc\" for repository docs (files in /docs/ etc.) and type: \"wiki_doc\" for GitHub Wiki pages — " +
         "both surfaces co-exist and a same-name page in both is returned as two separate hits. " +
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files " +
@@ -241,7 +245,11 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
         repo: z
           .string()
           .optional()
-          .describe("Filter by repository (owner/repo)"),
+          .describe(
+            "Filter by repository — full slug (owner/repo), exact match. " +
+              "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
+              "search mode flags that case as \"repo\" in the response's filters_unmatched.",
+          ),
         state: z
           .enum(["open", "closed", "all"])
           .optional()
@@ -536,6 +544,23 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
             isError: true,
           };
         }
+
+        // ── Filter-match observability (issue #219) ──────────────
+        // `repo` filters on both sides by exact match on the full slug —
+        // Vectorize metadata `$eq` on the dense side, `d.repo = ?` on the sparse
+        // side — so a bare repository name empties BOTH candidate sets at once.
+        // The combined count is therefore the right probe condition; the check
+        // itself (and why it never asserts on a failed probe) lives in
+        // `detectUnmatchedFilters`.
+        //
+        // Deliberately observability only: the short slug is NOT resolved to a
+        // full one. Doing that needs an ambiguity design for a prefix matching
+        // several repositories, which is a heavier change (issue #219 non-scope).
+        const filtersUnmatched = await detectUnmatchedFilters(
+          this.env.DB_FTS,
+          { repo },
+          denseResult.hits.length + sparseHits.length,
+        );
 
         // ── Fusion: build rank maps and combine via RRF ──────────
         // Both hit arrays are already ordered best-first by their respective ranker.
@@ -1099,6 +1124,14 @@ export class RagMcpAgentV2 extends McpAgent<Env, unknown, McpProps> {
                   sort: effectiveSort,
                   dense_candidates: denseResult.hits.length,
                   sparse_candidates: sparseHits.length,
+                  // Filters that matched no row in the index at all (issue #219).
+                  // Always present; `[]` means every applied filter matched
+                  // something, so `count: 0` is a genuine zero-hit result. A
+                  // listed filter means the population it selects is empty —
+                  // the value is wrong (for `repo`, typically a bare repository
+                  // name where the full `owner/repo` slug is required), not the
+                  // query. Only checked when the candidate set is empty.
+                  filters_unmatched: filtersUnmatched,
                   // rerank metadata:
                   //   - rerank_requested: caller-facing flag (default true)
                   //   - rerank_applied: whether the cross-encoder actually

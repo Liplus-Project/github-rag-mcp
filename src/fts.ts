@@ -249,6 +249,69 @@ export async function deleteFtsRow(
     .run();
 }
 
+/**
+ * True when at least one indexed row carries this exact `repo` value.
+ *
+ * Existence probe behind the `filters_unmatched` observability field (issue #219).
+ * The `repo` filter is an exact match on the full slug (`owner/repo`) — a bare
+ * repository name matches no row, and the resulting empty candidate set is shaped
+ * exactly like a genuine zero-hit search. The caller runs this probe only on that
+ * ambiguous shape, so the extra D1 read never sits on the hot path.
+ *
+ * `LIMIT 1` on the indexed `repo` column, no FTS5 involvement: the query stops at
+ * the first matching row instead of counting the population.
+ */
+export async function repoHasIndexedRows(
+  db: D1Database,
+  repo: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT 1 AS present FROM search_docs WHERE repo = ? LIMIT 1`)
+    .bind(repo)
+    .first<{ present: number }>();
+  return row != null;
+}
+
+/**
+ * Names of the applied filters whose selected population is empty (issue #219).
+ *
+ * Answers the question the candidate count cannot: "did the search find nothing,
+ * or did the filter select nothing?" Both produce `count: 0`, and a caller doing
+ * multi-step agentic search reads a zero as a normal intermediate result
+ * ("nothing down this angle") and moves on — so a mis-specified filter is
+ * consumed as a false negative instead of being noticed.
+ *
+ * Rules the shape of the check:
+ *   - probe only when `candidateCount === 0`. A non-empty candidate set proves
+ *     every applied filter matched, so the extra D1 read stays off the hot path.
+ *   - a probe failure is not a finding. An unreachable D1 yields an empty list
+ *     (the safer direction: never assert a mismatch that was not observed).
+ *
+ * `repo` is the only filter probed. It is the one where a plausible-looking wrong
+ * value exists — the bare repository name against the required `owner/repo` slug.
+ * `state` / `type` are enum-constrained, and `milestone` / `assignee` do not have
+ * a comparable near-miss form.
+ */
+export async function detectUnmatchedFilters(
+  db: D1Database,
+  filters: { repo?: string },
+  candidateCount: number,
+): Promise<string[]> {
+  const unmatched: string[] = [];
+  if (candidateCount > 0) return unmatched;
+  if (filters.repo) {
+    try {
+      if (!(await repoHasIndexedRows(db, filters.repo))) unmatched.push("repo");
+    } catch (err) {
+      console.error(
+        "detectUnmatchedFilters: repo probe failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  return unmatched;
+}
+
 /** Hit returned by FTS5 BM25 query. `score` is the raw bm25() value (lower = better). */
 export interface FtsHit {
   vectorId: string;

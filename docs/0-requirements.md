@@ -473,7 +473,13 @@ Returns:
 - ranked matches with repository, type, state, labels, milestone, assignees, URL, and RRF fused `score`
 - additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`, `rerank_score` (null when rerank disabled or when graceful fallback engaged)
 - `same_entity` on results that absorbed other rows of the same entity (see Entity Aggregation); `top_k` counts entities, not rows
-- top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`
+- top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`, `filters_unmatched`
+
+**Unmatched filters (`filters_unmatched`).** `repo` takes the full slug (`owner/repo`) and matches exactly — on the dense side as a Vectorize metadata `$eq`, on the sparse side as `d.repo = ?`. A bare repository name therefore matches no row, and the response that comes back is shaped exactly like a genuine zero-hit search. `filters_unmatched` separates the two: it is always present in search mode, `[]` means every applied filter selected a non-empty population (so `count: 0` really is "no hits"), and a listed name means that filter's population is empty — the value is wrong, not the query.
+
+The distinction is worth a field because agentic multi-step search inverts the cost of a silent zero. In a single search a zero is a dead end the caller inspects; in a search loop it is a normal intermediate result ("nothing down this angle") that the caller consumes and moves past, so the mis-specified filter never surfaces and one query out of the budget is spent on a false negative.
+
+The check is an existence probe (`SELECT 1 FROM search_docs WHERE repo = ? LIMIT 1`) run only when the candidate set is empty — a non-empty candidate set already proves the filter matched, so the extra read stays off the hot path. A failed probe reports nothing rather than asserting a mismatch it did not observe. Only `repo` is probed: it is the filter with a plausible-looking wrong value. Resolving a short name to a full slug is deliberately out of scope — that needs an ambiguity design for a name matching several repositories.
 
 **Scan mode (empty query).** Vectorize / FTS5 / reranker are skipped and the result set is aggregated from the structured store's recency endpoints. `since` / `until` are pushed down to the store, so a window returns rows whenever it holds rows, however far back it sits. `since` defaults to 7 days before `until` (before now when `until` is omitted), so an `until`-only query does not degenerate into an empty window above its own ceiling.
 
