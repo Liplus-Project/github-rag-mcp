@@ -4,6 +4,7 @@ import {
   reciprocalRankFusion,
   escapeFtsQuery,
   tokenizerKindForType,
+  detectUnmatchedFilters,
 } from "./fts.js";
 
 describe("fts: tokenizerKindForType", () => {
@@ -112,5 +113,65 @@ describe("fts: reciprocalRankFusion", () => {
   it("returns empty for no rankers / empty rankers", () => {
     expect(reciprocalRankFusion({ rankers: new Map() })).toEqual([]);
     expect(reciprocalRankFusion({ rankers: new Map([["dense", new Map()]]) })).toEqual([]);
+  });
+});
+
+// Issue #219. Two searches that both return zero results are indistinguishable
+// to the caller: one found nothing, the other filtered on a repo slug that
+// selects no rows at all. `detectUnmatchedFilters` is what makes the responses
+// differ, so the test pins the decision, not the SQL (the SQL is exercised
+// against a real D1 in fts.workers.test.ts).
+describe("fts: detectUnmatchedFilters (#219)", () => {
+  /** Minimal D1 stand-in: records probes, answers from a fixed repo set. */
+  function fakeDb(indexedRepos: string[], opts: { throws?: boolean } = {}) {
+    const probes: string[] = [];
+    const db = {
+      probes,
+      prepare() {
+        return {
+          bind(repo: string) {
+            probes.push(repo);
+            return {
+              first: async () => {
+                if (opts.throws) throw new Error("D1_ERROR: unreachable");
+                return indexedRepos.includes(repo) ? { present: 1 } : null;
+              },
+            };
+          },
+        };
+      },
+    };
+    return db as typeof db & D1Database;
+  }
+
+  it("flags repo when the filter value selects no indexed row", async () => {
+    const db = fakeDb(["Liplus-Project/liplus-language"]);
+    // Bare repository name — the exact-match filter yields an empty population.
+    expect(await detectUnmatchedFilters(db, { repo: "liplus-language" }, 0)).toEqual(["repo"]);
+    expect(db.probes).toEqual(["liplus-language"]);
+  });
+
+  it("stays empty for a genuine zero-hit search on a repo that exists", async () => {
+    const db = fakeDb(["Liplus-Project/liplus-language"]);
+    expect(
+      await detectUnmatchedFilters(db, { repo: "Liplus-Project/liplus-language" }, 0),
+    ).toEqual([]);
+  });
+
+  it("does not probe when candidates exist (the filter provably matched)", async () => {
+    const db = fakeDb([]);
+    expect(await detectUnmatchedFilters(db, { repo: "anything" }, 7)).toEqual([]);
+    expect(db.probes).toEqual([]);
+  });
+
+  it("does not probe when no repo filter was applied", async () => {
+    const db = fakeDb([]);
+    expect(await detectUnmatchedFilters(db, {}, 0)).toEqual([]);
+    expect(db.probes).toEqual([]);
+  });
+
+  it("reports nothing when the probe itself fails (never assert an unobserved mismatch)", async () => {
+    const db = fakeDb([], { throws: true });
+    expect(await detectUnmatchedFilters(db, { repo: "owner/repo" }, 0)).toEqual([]);
   });
 });

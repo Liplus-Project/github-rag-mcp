@@ -24,7 +24,10 @@ export const TOOLS = [
       "optionally narrow via since / until; " +
       "(3) doc content fetch — include_content: true inlines raw content on top doc and wiki_doc results. " +
       "Structured filters (repo, state, labels, milestone, assignee, type) apply across all modes; " +
-      "type: \"wiki_doc\" narrows to GitHub Wiki pages only. " +
+      "type: \"wiki_doc\" narrows to GitHub Wiki pages only; repo takes the full slug (owner/repo) and matches " +
+      "exactly, so a bare repository name selects nothing. In search mode the response carries " +
+      "filters_unmatched: any filter listed there matched no row in the index at all, which separates a " +
+      "mis-specified filter from a genuine zero-hit result. " +
       "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
       "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
       "and a result that absorbed others carries same_entity { count, others[] } with links to them.",
@@ -39,7 +42,10 @@ export const TOOLS = [
         },
         repo: {
           type: "string",
-          description: "Filter by repository (owner/repo)",
+          description:
+            "Filter by repository — full slug (owner/repo), exact match. " +
+            "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
+            "search mode flags that case as \"repo\" in the response's filters_unmatched.",
         },
         state: {
           type: "string",

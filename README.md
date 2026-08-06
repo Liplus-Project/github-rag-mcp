@@ -95,6 +95,8 @@ Three modes are selected by the combination of `query` and `sort`:
 
 Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode.
 
+Search mode reports filters that matched nothing at all in `filters_unmatched` (always present, `[]` when every filter matched something). `repo` is an exact match on the full `owner/repo` slug, so a bare repository name selects an empty population and returns a response shaped exactly like a genuine zero-hit search — this field is what separates the two. It matters most in multi-step agentic search, where a zero reads as a normal intermediate result and the mis-specified filter would otherwise never surface.
+
 Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter than 10 characters (trimmed) are filtered out at ingest time so noise such as `LGTM`, `+1`, or CI chatter does not dilute the retrieval surface.
 
 #### Parameters
@@ -102,7 +104,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | Name | Type | Description |
 |------|------|-------------|
 | `query` | string (optional) | Natural-language query. Omit or empty = scan mode. |
-| `repo` | string | Filter by repository (`owner/repo`). |
+| `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search mode reports that as `"repo"` in the response's `filters_unmatched`. |
 | `state` | `"open"` \| `"closed"` \| `"all"` | Filter by state (default `all`). |
 | `labels` | string[] | Filter by label names (AND). |
 | `milestone` | string | Filter by milestone title. |

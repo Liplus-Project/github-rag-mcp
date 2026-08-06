@@ -47,3 +47,15 @@ test("tool and type descriptions document the wiki surface", () => {
   assert.match(search.description, /wiki/i);
   assert.match(typeParam.description, /wiki_doc/);
 });
+
+// gh#219: the proxy schema is the description a client actually reads, so the
+// exact-match requirement on `repo` has to be stated here — a bare repository
+// name silently selects nothing, and the caller has no way to see that from the
+// zero-result response alone.
+test("repo description states the full-slug exact match and the unmatched-filter signal", () => {
+  const repoParam = search?.inputSchema?.properties?.repo;
+  assert.ok(repoParam, "repo param is present in the mirrored schema");
+  assert.match(repoParam.description, /owner\/repo/);
+  assert.match(repoParam.description, /exact match/i);
+  assert.match(repoParam.description, /filters_unmatched/);
+});

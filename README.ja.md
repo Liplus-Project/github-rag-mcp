@@ -95,6 +95,8 @@ GitHub の issue / pull request / release / documentation / **GitHub Wiki page**
 
 structured filter (`repo` / `state` / `labels` / `milestone` / `assignee` / `type`) はすべてのモードで有効です。
 
+search モードは「1件もマッチしなかったフィルタ」を `filters_unmatched` に載せます (常に存在し、すべて成立していれば `[]`)。`repo` はフルスラッグ `owner/repo` の完全一致なので、短いリポジトリ名を渡すと母集合が空になり、本当にヒットゼロだった場合と同じ形のレスポンスが返ります。このフィールドがその2つを区別します。効くのは多段のエージェンティック検索で、ゼロが正常な中間結果として読まれてしまい、フィルタ不成立が表に出ないまま終わる場面です。
+
 bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の body は ingest 時点で除外されます。`LGTM` / `+1` / CI ノイズなどは retrieval 面に残りません。
 
 #### パラメータ
@@ -102,7 +104,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | 名前 | 型 | 説明 |
 |------|----|------|
 | `query` | string (省略可) | 自然言語クエリ。省略または空文字で scan モード。 |
-| `repo` | string | repository (`owner/repo`) で絞り込み。 |
+| `repo` | string | repository で絞り込み。フルスラッグ (`owner/repo`) の完全一致。短いリポジトリ名は1件もマッチせず、search モードはそれをレスポンスの `filters_unmatched` に `"repo"` として報告します。 |
 | `state` | `"open"` / `"closed"` / `"all"` | state で絞り込み (既定 `all`)。 |
 | `labels` | string[] | label 名で AND 絞り込み。 |
 | `milestone` | string | milestone title で絞り込み。 |

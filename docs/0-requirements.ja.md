@@ -471,7 +471,13 @@ Returns:
 - repository、type、state、labels、milestone、assignees、URL、RRF fused score を含む ranked match
 - 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`、`rerank_score`（rerank 無効時または fallback 時は null）
 - 同一実体の他の行を吸収した結果には `same_entity`（Entity Aggregation 参照）。`top_k` は行数ではなく実体数で数える
-- top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`
+- top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`、`filters_unmatched`
+
+**フィルタ不成立（`filters_unmatched`）.** `repo` はフルスラッグ（`owner/repo`）の完全一致である——dense 側は Vectorize metadata の `$eq`、sparse 側は `d.repo = ?`。短いリポジトリ名を渡すと1行にもマッチせず、返るレスポンスは「本当にヒットが無かった」場合と同じ形になる。`filters_unmatched` がこの2つを分ける: search mode では常に存在し、`[]` は適用した全フィルタが空でない母集合を選べたこと（つまり `count: 0` は真にヒットゼロ）を意味し、名前が載っていればそのフィルタの母集合が空、すなわち誤っているのはクエリではなくフィルタの値である。
+
+区別にフィールドを割く理由は、エージェンティックな多段検索が silent zero のコストを反転させるからである。単発検索ならゼロは呼び出し側が見に行く行き止まりだが、検索ループの中では「この角度には何も無かった」という正常な中間結果として消費されて次へ回る。フィルタ不成立が表に出ないまま、クエリ予算を1回分、偽陰性に使って終わる。
+
+判定は存在確認クエリ（`SELECT 1 FROM search_docs WHERE repo = ? LIMIT 1`）で、候補集合が空のときだけ走る——候補が1件でもあればフィルタが成立した証拠なので、追加の読みが hot path に乗ることはない。プローブ自体が失敗した場合は「観測していない不成立」を主張せず、何も報告しない。プローブ対象は `repo` のみ: もっともらしく見える誤値（フルスラッグに対する短いリポジトリ名）が存在するのはこのフィルタだからである。短い名前からフルスラッグへの自動解決は意図的に非スコープ——複数リポジトリにマッチする名前の曖昧解決を設計する必要がある。
 
 **scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` は store 側へ push down されるので、窓に行があれば、その窓がどれだけ古くても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。
 
