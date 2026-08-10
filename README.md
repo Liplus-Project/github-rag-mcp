@@ -131,7 +131,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `since` | ISO 8601 string | Keep only results with `updated_at >= since`. In scan mode, defaults to 7 days before `until` (before now when `until` is omitted). |
 | `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
 | `include_content` | boolean | Inline raw content on top doc results (default `false`). |
-| `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages are appended tagged `graph_hop` / `graph_from`. Default `false` = byte-identical to standard hybrid retrieval (no graph read). |
+| `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages come back in a separate `graph_results` array tagged `graph_hop` / `graph_from` — see Retrieval axes below. Default `false` = byte-identical to standard hybrid retrieval (no graph read). |
 | `graph_hops` | number | Graph traversal depth for `graph_expand` (1 or 2, default 1). Ignored when `graph_expand` is `false`. |
 
 #### `type` values
@@ -154,6 +154,19 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 One thing is indexed as several rows: a file is a `doc` row plus one `diff` row per commit that touched it, an issue or PR is its own row plus its comments and reviews. Those rows are collapsed into one result before the response is trimmed, so `top_k` returns that many distinct entities. Rows are grouped by what they point at, not by the work that produced them — different files touched by one commit stay separate results, and so do an issue and the PR that closes it.
 
 The representative is the highest-ranked row of the group, so a query about when something changed still returns the relevant old commit diff rather than the current version. A result that absorbed other rows carries a `same_entity` field (`count` including itself, plus `others[]` with the type, URL, timestamp and score of each collapsed row) so nothing is lost. See [docs/0-requirements.md](docs/0-requirements.md) for the full rule.
+
+#### Retrieval axes
+
+Search mode reports two axes separately and never fuses them into one ranking.
+
+| Axis | Field | Ordering | Score |
+|------|-------|----------|-------|
+| Keyword | `results` (counted by `count`) | ranker order (RRF / rerank / time sort) | `score`, `dense_score`, `sparse_score`, `rerank_score` |
+| Relationship | `graph_results` (counted by `graph_neighbors`) | `graph_hop` ascending | none — the graph carries no relevance value |
+
+`graph_results` is present only when `graph_expand: true`; the default response does not carry the field at all. Its items hold identity plus `graph_hop` (distance from the seed) and `graph_from` (which seed reached them), and deliberately carry no score field: the mention graph has no weights, so absence of a score is not a score of zero. Graph-derived candidates used to arrive as `score: 0` rows inside `results`, indistinguishable from candidates the rankers scored at zero.
+
+Triage for the consumer: appearing on **both** axes is the strongest signal — two independent paths agreed. Keyword axis only = the words matched. Relationship axis only = the vocabulary did not match, but the entry is structurally adjacent to what did.
 
 #### Examples
 

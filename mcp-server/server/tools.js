@@ -30,7 +30,14 @@ export const TOOLS = [
       "mis-specified filter from a genuine zero-hit result. " +
       "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
       "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
-      "and a result that absorbed others carries same_entity { count, others[] } with links to them.",
+      "and a result that absorbed others carries same_entity { count, others[] } with links to them. " +
+      "Two retrieval axes are reported separately, never fused into one ranking. results is the keyword axis " +
+      "(dense + sparse, scored and ranked; count counts these). graph_results is the relationship axis, " +
+      "present only with graph_expand: true — candidates reached through the Decision-Structure mention graph, " +
+      "ordered by graph_hop ascending and carrying no score (the graph has no relevance value to report; " +
+      "absence of a score is not a score of zero). Triage: appearing on BOTH axes is the strongest signal — " +
+      "two independent paths agreed. Keyword axis only = the words matched. Relationship axis only = the " +
+      "vocabulary did not match but the entry is structurally adjacent to what did.",
     inputSchema: {
       type: "object",
       properties: {
@@ -143,8 +150,10 @@ export const TOOLS = [
           description:
             "Opt-in GraphRAG expansion (search mode only). When true, after fusion the top " +
             "results seed a traversal of the Decision-Structure mention graph (D1 doc_edges); " +
-            "related wiki pages are appended as extra results marked with graph_hop / graph_from. " +
-            "Default false = byte-identical to standard hybrid retrieval (no graph read).",
+            "related wiki pages are returned in a separate graph_results array marked with " +
+            "graph_hop / graph_from — never mixed into results, and carrying no score. " +
+            "Default false = byte-identical to standard hybrid retrieval (no graph read, " +
+            "no graph_results field).",
         },
         graph_hops: {
           type: "number",

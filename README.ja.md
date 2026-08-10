@@ -131,7 +131,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。scan モードの既定は `until` の 7 日前 (`until` 省略時は現在の 7 日前)。 |
 | `until` | ISO 8601 文字列 | `updated_at < until` の結果だけを残します。 |
 | `include_content` | boolean | 上位 doc 結果に本文を inline する (既定 `false`)。 |
-| `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで末尾に追加。既定 `false` は標準ハイブリッド検索とバイト単位で同一（グラフ未参照）。 |
+| `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで別配列 `graph_results` として返す（下記「検索の 2 軸」参照）。既定 `false` は標準ハイブリッド検索とバイト単位で同一（グラフ未参照）。 |
 | `graph_hops` | number | `graph_expand` のグラフ探索深度（1 または 2、既定 1）。`graph_expand` が `false` のときは無視。 |
 
 #### `type` 値
@@ -154,6 +154,19 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 1 つの実体は複数行として索引されます。ファイルは `doc` 行 + それを触った commit の数だけの `diff` 行、issue / PR は本体 + そのコメントやレビュー、という形です。応答を `top_k` 件に切り詰める前にこれらを 1 件へ畳むので、`top_k` はそのまま独立した実体の数になります。畳む基準は「その行が何を指しているか」であって「どの作業がその行を生んだか」ではありません。同一 commit が触った別々のファイルは別々の結果として残り、issue とそれを閉じる PR も別々に残ります。
 
 代表になるのはその group で最上位に来た行です。したがって「いつ変わったか」を問う検索では、現在の版ではなく該当する古い commit diff が返ります。他の行を吸収した結果には `same_entity` フィールドが付き（`count` は自身を含む件数、`others[]` は畳んだ各行の type / URL / 時刻 / score）、畳んだ分は捨てられません。完全な規則は [docs/0-requirements.ja.md](docs/0-requirements.ja.md) を参照してください。
+
+#### 検索の 2 軸
+
+search モードは 2 つの軸を分けて返します。単一順位への融合は行いません。
+
+| 軸 | フィールド | 軸内順序 | スコア |
+|----|-----------|---------|-------|
+| キーワード | `results`（件数は `count`） | ランカー順（RRF / rerank / 時刻ソート） | `score` / `dense_score` / `sparse_score` / `rerank_score` |
+| 関係性 | `graph_results`（件数は `graph_neighbors`） | `graph_hop` 昇順 | 無し（グラフは関連度の値を持たない） |
+
+`graph_results` は `graph_expand: true` のときだけ現れ、既定の応答にはフィールド自体がありません。各要素は識別情報に加えて `graph_hop`（seed からの距離）と `graph_from`（どの seed から辿り着いたか）を持ち、スコア系フィールドは意図的に持ちません。mention グラフにエッジ重みが無いため、スコアが無いことは 0 点ではないからです。以前は関係性由来の候補が `score: 0` の行として `results` に混ざっており、ランカーが 0 と評価した候補と区別できませんでした。
+
+消費側の triage 指針は、**両軸に出現＝独立した二経路の一致で最優先**、キーワードのみ＝語の一致、関係性のみ＝語彙は一致しないが構造的に近い、です。
 
 #### 使用例
 
