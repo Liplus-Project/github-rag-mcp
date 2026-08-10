@@ -37,7 +37,7 @@ import {
   type FtsFilter,
 } from "./fts.js";
 import { rerankCandidates, rerankWasApplied, RERANK_MAX_CANDIDATES } from "./rerank.js";
-import { queryNeighbors, getDocsByVectorIds } from "./graph.js";
+import { queryNeighbors, getDocsByVectorIds, type GraphNeighbor } from "./graph.js";
 import { runScan, type ScanRow } from "./scan.js";
 import { entityKey, groupByEntity } from "./aggregate.js";
 
@@ -193,6 +193,76 @@ function buildResultUrl(r: ResolvedRow): string {
 }
 
 /**
+ * One relationship-axis candidate (issue #234).
+ *
+ * A separate type from `ResultItem` on purpose. The graph axis carries no
+ * relevance score — `doc_edges` has no weight and traversal orders by hop
+ * only — so the score fields are ABSENT here rather than zero-filled. A
+ * `score: 0` row placed in `results` was indistinguishable from a candidate
+ * the rankers scored at zero; the axis split is what removes that ambiguity.
+ *
+ * Fields the keyword axis fills but this one cannot are dropped for the same
+ * reason (`labels` / `assignees` were always empty arrays, `score` /
+ * `dense_score` / `sparse_score` / `dense_rank` / `sparse_rank` /
+ * `rerank_score` always null or zero). What remains is identity, origin
+ * (`graph_from`), and intra-axis distance (`graph_hop`).
+ */
+export type GraphItem = {
+  number: number;
+  title: string;
+  type: string;
+  url: string;
+  updated_at: string;
+  repo: string;
+  wiki_path?: string;
+  doc_path?: string;
+  content?: string;
+  graph_hop: number;
+  graph_from: string;
+};
+
+/**
+ * Assemble one relationship-axis item from a traversal neighbor and its
+ * enriched `search_docs` row.
+ *
+ * `fromSlug` is the human-readable form of `neighbor.fromVectorId` (the seed
+ * this candidate was reached from) resolved by the caller, which is the side
+ * holding the fused payload map.
+ */
+export function buildGraphItem(
+  neighbor: GraphNeighbor,
+  row: Record<string, unknown>,
+  fromSlug: string,
+  includeContent: boolean,
+): GraphItem {
+  const repo = String(row.repo ?? "");
+  const type = String(row.type ?? "");
+  const path = String(row.doc_path ?? "");
+  const url =
+    type === "wiki_doc" && repo && path
+      ? `https://github.com/${repo}/wiki/${path}`
+      : type === "doc" && repo && path
+        ? `https://github.com/${repo}/blob/HEAD/${path}`
+        : "";
+  const item: GraphItem = {
+    number: Number(row.number ?? 0),
+    title: path || neighbor.vectorId,
+    type,
+    url,
+    updated_at: String(row.updated_at ?? ""),
+    repo,
+    graph_hop: neighbor.hop,
+    graph_from: fromSlug,
+  };
+  if (type === "wiki_doc") item.wiki_path = path;
+  if (type === "doc") item.doc_path = path;
+  if (includeContent && typeof row.content === "string") {
+    item.content = row.content;
+  }
+  return item;
+}
+
+/**
  * Build the MCP server for one request.
  *
  * Called by `createMcpHandler` once per HTTP request. `env` is captured from
@@ -233,7 +303,14 @@ export function createRagMcpServer(env: Env): McpServer {
         "(Master's feedback, AI responses, self-review now/later/accepted classifications).\n" +
         "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
         "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
-        "and a result that absorbed others carries same_entity { count, others[] } with links to them.",
+        "and a result that absorbed others carries same_entity { count, others[] } with links to them.\n" +
+        "Two retrieval axes are reported separately, never fused into one ranking. results is the keyword axis " +
+        "(dense + sparse, scored and ranked; count counts these). graph_results is the relationship axis, " +
+        "present only with graph_expand: true — candidates reached through the Decision-Structure mention graph, " +
+        "ordered by graph_hop ascending and carrying no score (the graph has no relevance value to report; " +
+        "absence of a score is not a score of zero). Triage: appearing on BOTH axes is the strongest signal — " +
+        "two independent paths agreed. Keyword axis only = the words matched. Relationship axis only = the " +
+        "vocabulary did not match but the entry is structurally adjacent to what did.",
       inputSchema: z.object({
         query: z
           .string()
@@ -361,8 +438,10 @@ export function createRagMcpServer(env: Env): McpServer {
           .describe(
             "Opt-in GraphRAG expansion (search mode only). When true, after fusion the top " +
               "results seed a traversal of the Decision-Structure mention graph (D1 doc_edges); " +
-              "related wiki pages are appended as extra results marked with graph_hop / graph_from. " +
-              "Default false = byte-identical to standard hybrid retrieval (no graph read).",
+              "related wiki pages are returned in a separate graph_results array marked with " +
+              "graph_hop / graph_from — never mixed into results, and carrying no score. " +
+              "Default false = byte-identical to standard hybrid retrieval (no graph read, " +
+              "no graph_results field).",
           ),
         graph_hops: z
           .number()
@@ -864,8 +943,6 @@ export function createRagMcpServer(env: Env): McpServer {
         review_id?: number;
         line?: number;
         content?: string;
-        graph_hop?: number;
-        graph_from?: string;
         /**
          * Present only when this item is the representative of an entity that
          * had other rows in the candidate pool (issue #189). `count` includes
@@ -1042,10 +1119,12 @@ export function createRagMcpServer(env: Env): McpServer {
 
       // ── Optional graph expansion (opt-in; default off leaves everything
       // above byte-identical). Seeds from the final result set, traverses the
-      // Decision-Structure mention graph, and appends related wiki pages as
-      // extra results marked with graph_hop / graph_from. Best-effort: any
-      // failure returns the organic results unchanged.
-      let graphNeighborsAdded = 0;
+      // Decision-Structure mention graph, and returns related wiki pages as a
+      // SEPARATE axis (issue #234) — never mixed into `results`. Best-effort:
+      // any failure returns the keyword axis unchanged with an empty graph
+      // axis. `queryNeighbors` already orders by hop ascending and the skip
+      // below only removes rows, so the axis stays hop-ordered.
+      const graphItems: GraphItem[] = [];
       if (graphExpand && filtered.length > 0) {
         try {
           const seedIds = filtered.map((f) => f.vectorId);
@@ -1068,42 +1147,9 @@ export function createRagMcpServer(env: Env): McpServer {
             for (const n of fresh) {
               const row = enrich.get(n.vectorId);
               if (!row) continue; // dangling edge (target not indexed) — skip
-              const nRepo = String(row.repo ?? "");
-              const nType = String(row.type ?? "");
-              const nPath = String(row.doc_path ?? "");
-              const url =
-                nType === "wiki_doc" && nRepo && nPath
-                  ? `https://github.com/${nRepo}/wiki/${nPath}`
-                  : nType === "doc" && nRepo && nPath
-                    ? `https://github.com/${nRepo}/blob/HEAD/${nPath}`
-                    : "";
-              const item: ResultItem = {
-                number: Number(row.number ?? 0),
-                title: nPath || n.vectorId,
-                state: String(row.state ?? ""),
-                type: nType,
-                labels: [],
-                milestone: String(row.milestone ?? ""),
-                assignees: [],
-                score: 0,
-                dense_score: null,
-                sparse_score: null,
-                dense_rank: null,
-                sparse_rank: null,
-                rerank_score: null,
-                url,
-                updated_at: String(row.updated_at ?? ""),
-                repo: nRepo,
-                graph_hop: n.hop,
-                graph_from: slugOf(n.fromVectorId),
-              };
-              if (nType === "wiki_doc") item.wiki_path = nPath;
-              if (nType === "doc") item.doc_path = nPath;
-              if (includeContent && typeof row.content === "string") {
-                item.content = row.content;
-              }
-              items.push(item);
-              graphNeighborsAdded++;
+              graphItems.push(
+                buildGraphItem(n, row, slugOf(n.fromVectorId), includeContent),
+              );
             }
           }
         } catch (graphErr) {
@@ -1120,6 +1166,9 @@ export function createRagMcpServer(env: Env): McpServer {
             type: "text" as const,
             text: JSON.stringify(
               {
+                // Keyword-axis count only (issue #234). Relationship-axis
+                // rows are counted by `graph_neighbors` and returned in
+                // `graph_results`.
                 count: items.length,
                 mode: "search",
                 fusion: fusionMode,
@@ -1148,8 +1197,14 @@ export function createRagMcpServer(env: Env): McpServer {
                 since: since ?? null,
                 until: until ?? null,
                 graph_expanded: graphExpand,
-                graph_neighbors: graphNeighborsAdded,
+                graph_neighbors: graphItems.length,
                 results: items,
+                // Relationship axis (issue #234). Present only when
+                // `graph_expand: true`, so the default response stays
+                // byte-identical to the pre-#234 shape. Ordered by
+                // `graph_hop` ascending; carries no ranker score because the
+                // axis has none to report.
+                ...(graphExpand ? { graph_results: graphItems } : {}),
               },
               null,
               2,

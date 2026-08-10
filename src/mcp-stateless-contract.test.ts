@@ -17,7 +17,8 @@
 import { describe, it, expect } from "vitest";
 import { createMcpHandler } from "agents/mcp/server";
 import { createRemoteClient } from "../mcp-server/server/remote-client.js";
-import { createRagMcpServer } from "./mcp.js";
+import { createRagMcpServer, buildGraphItem } from "./mcp.js";
+import type { GraphNeighbor } from "./graph.js";
 import type { Env } from "./types.js";
 
 const ENDPOINT = "https://github-rag-mcp.liplus.workers.dev";
@@ -144,6 +145,34 @@ describe("worker <-> bridge stateless contract", () => {
     await remote.reset();
   });
 
+  // gh#234: the two axes are only usable if the caller is told they exist.
+  // The description is the one place that reaches every client, so the axis
+  // split and its triage rule are asserted on the served text.
+  it("publishes the keyword / relationship axis split with its triage rule", async () => {
+    const remote = createRemoteClient({
+      workerUrl: ENDPOINT,
+      clientVersion: "0.0.0-test",
+      fetch: fetchInto(workerHandler()),
+    });
+
+    const client = await remote.getClient();
+    const [search] = (await client.listTools()).tools;
+    const description = search.description as string;
+
+    expect(description).toContain("graph_results");
+    expect(description).toMatch(/never fused/i);
+    expect(description).toMatch(/graph_hop ascending/);
+    expect(description).toMatch(/BOTH axes/);
+
+    const graphExpand = (
+      search.inputSchema as { properties?: Record<string, { description?: string }> }
+    ).properties?.["graph_expand"];
+    expect(graphExpand?.description).toContain("graph_results");
+    expect(graphExpand?.description).toMatch(/never mixed into results/);
+
+    await remote.reset();
+  });
+
   it("rejects the pre-flip bridge instead of serving it a compatibility lane", async () => {
     const handler = workerHandler();
     const into = fetchInto(handler);
@@ -176,5 +205,81 @@ describe("worker <-> bridge stateless contract", () => {
     expect(body.error.code).toBe(-32022);
     // The endpoint names the one revision it serves — a single lane, stated.
     expect(body.error.data?.supported).toEqual(["2026-07-28"]);
+  });
+});
+
+/**
+ * Relationship-axis response contract (issue #234).
+ *
+ * The graph axis used to enter `results` as a `score: 0` row, which a consumer
+ * could not tell apart from a candidate the rankers scored at zero. The axis is
+ * separate now, and the item shape is what enforces it: no score field exists to
+ * be misread. `buildGraphItem` is the single site those items are built at, so
+ * asserting it needs no Worker bindings.
+ */
+describe("relationship axis item shape", () => {
+  const neighbor: GraphNeighbor = {
+    vectorId: "wiki:Liplus-Project/liplus:subtractive-structural-beauty",
+    hop: 2,
+    fromVectorId: "wiki:Liplus-Project/liplus:decision-structure",
+  };
+  const row = {
+    repo: "Liplus-Project/liplus",
+    type: "wiki_doc",
+    doc_path: "subtractive-structural-beauty",
+    number: 0,
+    state: "",
+    milestone: "",
+    updated_at: "2026-08-01T00:00:00Z",
+    content: "body text",
+  };
+
+  it("carries no ranker score of any kind", () => {
+    const item = buildGraphItem(neighbor, row, "decision-structure", false);
+    for (const key of [
+      "score",
+      "dense_score",
+      "sparse_score",
+      "dense_rank",
+      "sparse_rank",
+      "rerank_score",
+    ]) {
+      expect(item).not.toHaveProperty(key);
+    }
+  });
+
+  it("keeps origin and hop distance as the axis's own ordering context", () => {
+    const item = buildGraphItem(neighbor, row, "decision-structure", false);
+    expect(item.graph_hop).toBe(2);
+    expect(item.graph_from).toBe("decision-structure");
+  });
+
+  it("resolves the wiki surface: url, path field, title", () => {
+    const item = buildGraphItem(neighbor, row, "decision-structure", false);
+    expect(item.type).toBe("wiki_doc");
+    expect(item.url).toBe(
+      "https://github.com/Liplus-Project/liplus/wiki/subtractive-structural-beauty",
+    );
+    expect(item.wiki_path).toBe("subtractive-structural-beauty");
+    expect(item.doc_path).toBeUndefined();
+    expect(item.title).toBe("subtractive-structural-beauty");
+    expect(item.repo).toBe("Liplus-Project/liplus");
+    expect(item.updated_at).toBe("2026-08-01T00:00:00Z");
+  });
+
+  it("inlines content only when the caller asked for it", () => {
+    expect(buildGraphItem(neighbor, row, "x", false).content).toBeUndefined();
+    expect(buildGraphItem(neighbor, row, "x", true).content).toBe("body text");
+  });
+
+  it("falls back to the vector id as title when the row carries no path", () => {
+    const item = buildGraphItem(
+      neighbor,
+      { repo: "owner/repo", type: "wiki_doc" },
+      "seed",
+      false,
+    );
+    expect(item.title).toBe(neighbor.vectorId);
+    expect(item.url).toBe("");
   });
 });
