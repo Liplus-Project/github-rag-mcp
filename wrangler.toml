@@ -68,7 +68,7 @@ crons = ["0 * * * *", "15 * * * *", "30 * * * *", "45 * * * *"]
 
 # Environment variables
 [vars]
-POLL_REPOS = "Liplus-Project/github-webhook-mcp,Liplus-Project/github-rag-mcp,Liplus-Project/liplus-desktop,Liplus-Project/liplus-language,Liplus-Project/dipper_ai"
+POLL_REPOS = "Liplus-Project/github-webhook-mcp,Liplus-Project/github-rag-mcp,Liplus-Project/liplus-desktop,Liplus-Project/liplus-language,Liplus-Project/dipper_ai,Liplus-Project/neuron-graph-rag"
 
 [observability]
 enabled = false
