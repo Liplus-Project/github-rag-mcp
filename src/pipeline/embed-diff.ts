@@ -12,7 +12,7 @@ import { upsertFtsRow } from "../fts.js";
 import { prepareDiffEmbeddingInput } from "./hash.js";
 import {
   generateEmbeddingBatch,
-  MAX_EMBEDDING_BATCH_SIZE,
+  planEmbeddingBatches,
 } from "./embedding.js";
 import { diffVectorId } from "./vector-id.js";
 
@@ -104,7 +104,8 @@ function normaliseFileStatus(status: string): DiffFileStatus {
  * Flow:
  *   1. Filter `files[]` to those with a textual `patch` (binary / oversized files are skipped).
  *   2. Build embedding inputs = commit message + file path + patch, truncated.
- *   3. Batch-embed inputs via Workers AI (chunked by MAX_EMBEDDING_BATCH_SIZE).
+ *   3. Batch-embed inputs via Workers AI (chunked by `planEmbeddingBatches`, which
+ *      splits on an estimated token budget rather than a file count).
  *   4. Upsert all vectors into Vectorize in the same chunks.
  *   5. Record DiffRecord rows into the Durable Object store for each indexed file.
  *
@@ -150,21 +151,26 @@ export async function processAndUpsertCommitDiff(
   let failed = 0;
   let batches = 0;
 
-  // Chunk to respect Workers AI / Vectorize batch limits.
-  for (let offset = 0; offset < indexable.length; offset += MAX_EMBEDDING_BATCH_SIZE) {
-    const chunk = indexable.slice(offset, offset + MAX_EMBEDDING_BATCH_SIZE);
-    batches++;
+  const allInputs = indexable.map((f) =>
+    prepareDiffEmbeddingInput(commitMessage, f.filename, f.patch),
+  );
 
-    const inputs = chunk.map((f) =>
-      prepareDiffEmbeddingInput(commitMessage, f.filename, f.patch),
-    );
+  // Chunk on the estimated token total of the inputs, not on how many files the
+  // commit touched. A file count bounds a call only if every patch is assumed to
+  // be small, and a commit that breaks that assumption used to fail the whole
+  // chunk — which the poller reads as an uningested commit and holds the diff
+  // watermark on, so the surface stalls there rather than skipping past it (#236).
+  for (const { start, end } of planEmbeddingBatches(allInputs)) {
+    const chunk = indexable.slice(start, end);
+    const inputs = allInputs.slice(start, end);
+    batches++;
 
     let embeddings: number[][];
     try {
       embeddings = await generateEmbeddingBatch(env.AI, inputs);
     } catch (err) {
       console.error(
-        `Failed to batch-embed diffs for ${repo}@${commitSha} chunk offset ${offset}:`,
+        `Failed to batch-embed diffs for ${repo}@${commitSha} chunk offset ${start}:`,
         err instanceof Error ? err.message : String(err),
       );
       failed += chunk.length;
@@ -212,7 +218,7 @@ export async function processAndUpsertCommitDiff(
       await env.VECTORIZE.upsert(vectors);
     } catch (err) {
       console.error(
-        `Failed to upsert diff vectors for ${repo}@${commitSha} chunk offset ${offset}:`,
+        `Failed to upsert diff vectors for ${repo}@${commitSha} chunk offset ${start}:`,
         err instanceof Error ? err.message : String(err),
       );
       failed += chunk.length;
