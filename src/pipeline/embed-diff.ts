@@ -126,7 +126,7 @@ function normaliseFileStatus(status: string): DiffFileStatus {
  *      take at most `options.maxFiles` of what remains.
  *   3. Build embedding inputs = commit message + file path + patch, truncated.
  *   4. Batch-embed inputs via Workers AI (chunked by `planEmbeddingBatches`, which
- *      splits on an estimated token budget rather than a file count).
+ *      splits on a character budget rather than a file count).
  *   5. Upsert all vectors into Vectorize in the same chunks.
  *   6. Record DiffRecord rows into the Durable Object store for each indexed file.
  *
@@ -196,11 +196,13 @@ export async function processAndUpsertCommitDiff(
     prepareDiffEmbeddingInput(commitMessage, f.filename, f.patch),
   );
 
-  // Chunk on the estimated token total of the inputs, not on how many files the
-  // commit touched. A file count bounds a call only if every patch is assumed to
-  // be small, and a commit that breaks that assumption used to fail the whole
-  // chunk — which the poller reads as an uningested commit and holds the diff
-  // watermark on, so the surface stalls there rather than skipping past it (#236).
+  // Chunk on the character total of the inputs, not on how many files the commit
+  // touched. A file count bounds a call only if every patch is assumed to be
+  // small, and a commit that breaks that assumption used to fail the whole chunk —
+  // which the poller reads as an uningested commit and holds the diff watermark on,
+  // so the surface stalls there rather than skipping past it (#236). Characters
+  // rather than estimated tokens because the estimate ran 2.1x low on diff patches
+  // and let the same two commits over the ceiling three cron cycles running (#241).
   for (const { start, end } of planEmbeddingBatches(allInputs)) {
     const chunk = indexable.slice(start, end);
     const inputs = allInputs.slice(start, end);

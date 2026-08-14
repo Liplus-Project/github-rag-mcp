@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../types.js";
 import { processAndUpsertCommitDiff, type GitHubCommitDetail } from "./embed-diff.js";
-import { estimateEmbeddingTokens, MAX_EMBEDDING_BATCH_TOKENS } from "./embedding.js";
+import {
+  MAX_EMBEDDING_BATCH_CHARS,
+  SPECIAL_TOKENS_PER_INPUT,
+  WORKERS_AI_BATCH_CONTEXT_LIMIT,
+} from "./embedding.js";
 import { diffVectorId } from "./vector-id.js";
 
 const REPO = "acme/widgets";
@@ -66,7 +70,19 @@ function mkStore() {
   } as unknown as DurableObjectStub;
 }
 
-describe("embed-diff: the batch axis is the token budget, not the file count", () => {
+/** A patch of the shape the ceiling rejected: dense punctuation, short identifiers,
+ *  a `+` on every line — where bge-m3 splits far finer than an ASCII prose ratio. */
+function mkDiffPatch(chars: number): string {
+  const line = "+  const value = obj?.[key] ?? { a: 1, b: [2, 3] };\n";
+  return line.repeat(Math.ceil(chars / line.length)).slice(0, chars);
+}
+
+/** What the planner charges one Workers AI call. Upper-bounds its token count. */
+function callCharge(texts: string[]): number {
+  return texts.reduce((sum, text) => sum + text.length + SPECIAL_TOKENS_PER_INPUT, 0);
+}
+
+describe("embed-diff: the batch axis is the character budget, not the file count", () => {
   it("still sends an ordinary commit as one call", async () => {
     // 30 files well past the retired count cap of 20, each a small patch.
     const { env, aiCalls } = mkEnv();
@@ -104,14 +120,46 @@ describe("embed-diff: the batch axis is the token budget, not the file count", (
     // Every call carrying more than one input stays inside the budget.
     for (const call of aiCalls) {
       if (call.length > 1) {
-        const total = call.reduce((sum, text) => sum + estimateEmbeddingTokens(text), 0);
-        expect(total).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_TOKENS);
+        expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_CHARS);
       }
     }
 
     // No file is dropped or duplicated on the way through the split.
     expect(aiCalls.flat()).toHaveLength(20);
     expect(new Set(upsertedIds.flat()).size).toBe(20);
+  });
+
+  it("splits the 18-file commit shape that an estimated budget let through", async () => {
+    // The payload that kept failing after #237 shipped: 18 files of ordinary diff
+    // patch, no single one of them oversized. bge-m3 tokenizes a patch at roughly
+    // 1.4 characters per token — `+`/`-` prefixes, indentation, punctuation and
+    // short identifiers all split small — so the retired estimator's ASCII ratio of
+    // 3 came in about 2.1x under the truth, judged the whole commit to fit one
+    // 30000-token batch, and handed the endpoint 60678 tokens against a ceiling of
+    // 60000. The chunk failed whole, and the diff watermark held on the commit.
+    const { env, aiCalls, upsertedIds } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 18 }, () => mkDiffPatch(4700)));
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
+
+    const allInputs = aiCalls.flat();
+    // The fixture is only a regression test while it stays in the failing zone: over
+    // the ceiling as one call, yet inside the budget the estimator would have
+    // computed for it (85202 characters of ASCII read as ~28400 tokens at 3 each,
+    // under the 30000 that #237 set). Both halves are asserted so a later edit to
+    // the patch size cannot quietly move the fixture out of the shape it reproduces.
+    expect(callCharge(allInputs)).toBeGreaterThan(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+    expect(Math.ceil(callCharge(allInputs) / 3)).toBeLessThanOrEqual(30000);
+
+    expect(aiCalls.length).toBeGreaterThan(1);
+    for (const call of aiCalls) {
+      expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_CHARS);
+    }
+
+    // Splitting is only the fix if every file still lands.
+    expect(result.embedded).toBe(18);
+    expect(result.failed).toBe(0);
+    expect(new Set(upsertedIds.flat()).size).toBe(18);
   });
 
   it("keeps each embed call paired with its own slice of files", async () => {
