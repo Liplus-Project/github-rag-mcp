@@ -201,8 +201,9 @@ export async function processAndUpsertCommitDiff(
   // small, and a commit that breaks that assumption used to fail the whole chunk —
   // which the poller reads as an uningested commit and holds the diff watermark on,
   // so the surface stalls there rather than skipping past it (#236). Characters
-  // rather than estimated tokens because the estimate ran 2.1x low on diff patches
-  // and let the same two commits over the ceiling three cron cycles running (#241).
+  // rather than estimated tokens because the estimate ran about 2.1x low on diff
+  // patches, so the same two commits reported the same over-ceiling token counts
+  // before and after the estimated budget shipped — it never bound them (#241).
   for (const { start, end } of planEmbeddingBatches(allInputs)) {
     const chunk = indexable.slice(start, end);
     const inputs = allInputs.slice(start, end);
