@@ -95,19 +95,20 @@ GitHub webhooks + GitHub API
 
 ## MCP Tools
 
-この MCP サーバーが公開するツールは 1 つに統合されています。意味検索、時系列 activity scan、doc 本文取得のいずれも `search` のパラメータ経由で扱えます。以前の build で分かれていた `get_issue_context` / `get_doc_content` / `list_recent_activity` は削除され、用途は下記パラメータに吸収されました。
+この MCP サーバーが公開するツールは 1 つに統合されています。意味検索、時系列 activity scan、doc 本文取得、`vector_id` 指定の保存済み本文取得のいずれも `search` のパラメータ経由で扱えます。以前の build で分かれていた `get_issue_context` / `get_doc_content` / `list_recent_activity` は削除され、用途は下記パラメータに吸収されました。
 
 ### `search`
 
 GitHub の issue / pull request / release / documentation / **GitHub Wiki page** / commit diff / comment 系 (issue と PR の top-level comment、PR review 本文、PR インラインレビューコメント) を対象にした統合検索ツールです。
 
-`query` と `sort` の組み合わせで、以下の 3 モードを切り替えます。
+パラメータ集合から、以下の 4 モードが導かれます。
 
 1. **ハイブリッド意味検索 (既定)** — dense BGE-M3 (Vectorize) + sparse BM25 (D1 FTS5) を Reciprocal Rank Fusion (RRF, k=60) で合成し、`@cf/baai/bge-reranker-base` cross-encoder で rerank。自然言語 `query` を渡します。
 2. **時系列 activity scan** — `query` を省略または空にし、`sort` を `"updated_desc"` / `"created_desc"` に設定します。`since` / `until` を併用して窓を絞れます。従来の `list_recent_activity` を置き換えます。`[since, until)` の窓は索引側で適用されるので、窓に行があればどれだけ古い窓でも返ります。窓が 1 ページに収まらないときは応答に `truncated: true` が付き、「該当なし」と「読み切れていない」を区別できます。返った最古の行の時刻を次の `until` にして遡ってください。
 3. **doc 本文取得** — `include_content: true` を指定すると、`type="doc"` 結果の本文が GitHub contents API 経由で取得され、該当行の `content` フィールドに inline されます。API fan-out を抑えるため先頭の数件に絞られます。従来の `get_doc_content` を置き換えます。
+4. **保存済み本文の取得** — `vector_ids`（先行する結果が持つ `vector_id`）を渡します。索引済みの全 type がその行の本文を返します——doc だけでなく issue / PR / comment / review / release / diff も対象です。`search` であたりを付けたあと本文を読むための `gh` / grep の一往復が不要になります。D1 から返すので GitHub API は呼びません。返る文字列が何であって何でないかは下記「保存済み本文の取得」を参照してください。
 
-structured filter (`repo` / `state` / `labels` / `milestone` / `assignee` / `type`) はすべてのモードで有効です。
+structured filter (`repo` / `state` / `labels` / `milestone` / `assignee` / `type`) は、保存済み本文の取得を除くすべてのモードで有効です。保存済み本文の取得では行をサーバが選ぶのではなく呼び出し側が名指しするため、filter は適用しません。
 
 search モードは「1件もマッチしなかったフィルタ」を `filters_unmatched` に載せます (常に存在し、すべて成立していれば `[]`)。`repo` はフルスラッグ `owner/repo` の完全一致なので、短いリポジトリ名を渡すと母集合が空になり、本当にヒットゼロだった場合と同じ形のレスポンスが返ります。このフィールドがその2つを区別します。効くのは多段のエージェンティック検索で、ゼロが正常な中間結果として読まれてしまい、フィルタ不成立が表に出ないまま終わる場面です。
 
@@ -131,6 +132,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。scan モードの既定は `until` の 7 日前 (`until` 省略時は現在の 7 日前)。 |
 | `until` | ISO 8601 文字列 | `updated_at < until` の結果だけを残します。 |
 | `include_content` | boolean | 上位 doc 結果に本文を inline する (既定 `false`)。 |
+| `vector_ids` | string[] | 保存済み本文の取得。読み出す行の `vector_id`、1 回あたり最大 50 件。他モードより優先され、指定時は `query` / `sort` と全 filter が無視されます。下記「保存済み本文の取得」参照。 |
 | `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで別配列 `graph_results` として返す（下記「検索の 2 軸」参照）。既定 `false` は標準ハイブリッド検索とバイト単位で同一（グラフ未参照）。 |
 | `graph_hops` | number | `graph_expand` のグラフ探索深度（1 または 2、既定 1）。`graph_expand` が `false` のときは無視。 |
 
@@ -154,6 +156,51 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 1 つの実体は複数行として索引されます。ファイルは `doc` 行 + それを触った commit の数だけの `diff` 行、issue / PR は本体 + そのコメントやレビュー、という形です。応答を `top_k` 件に切り詰める前にこれらを 1 件へ畳むので、`top_k` はそのまま独立した実体の数になります。畳む基準は「その行が何を指しているか」であって「どの作業がその行を生んだか」ではありません。同一 commit が触った別々のファイルは別々の結果として残り、issue とそれを閉じる PR も別々に残ります。
 
 代表になるのはその group で最上位に来た行です。したがって「いつ変わったか」を問う検索では、現在の版ではなく該当する古い commit diff が返ります。他の行を吸収した結果には `same_entity` フィールドが付き（`count` は自身を含む件数、`others[]` は畳んだ各行の type / URL / 時刻 / score）、畳んだ分は捨てられません。完全な規則は [docs/0-requirements.ja.md](docs/0-requirements.ja.md) を参照してください。
+
+#### 保存済み本文の取得
+
+すべての result 行——および `same_entity.others` の各要素——は `vector_id` を持ちます。この id を `vector_ids` として渡し返すと、索引がその行について保持している本文が返ります。
+
+返るのは索引が持つ**本文の複製**であって、生きているソースそのものではありません。実体は embedding input であり、取り込み時に 8000 文字で truncate されています。inline された文字列自体はどちらであるかを示さないため、応答が示します——top-level に `content_source: "index"` と `content_max_chars`、各行に `content_chars` と `content_truncated`。`content_truncated: true` の行は断片です。末尾が必要なら GitHub から読み直してください。
+
+未知・失効した id は `not_found` に載り、残りの行はそのまま返ります。この部分成功は意図的なものです。`vector_id` は「その結果集合の中で行に到達するための取っ手」であって**永続識別子ではありません**。採番は既に一度移行しているので、保存して後で使うのではなく、そのつど新しい結果から取ってください。
+
+`include_content` とは別軸であり、そちらの挙動は変わりません。doc は完全なファイルが必要なので GitHub からファイル全体を読み直しており、API fan-out を抑えるため件数上限があります。本モードは D1 を読み、上限は渡された id の数です。
+
+id が載るのは search モードの結果だけです。scan モードの行は structured store 由来なので持ちません。id は不透明（`{type 接頭辞}:{base64url sha256}`）です。結果からコピーしてください。手で組み立てないでください。
+
+```json
+{
+  "vector_ids": [
+    "i:d0qhtOi9Lxc4yuMbgbDD1BvcpptqrMWpphGMGw4t79I",
+    "ic:kPjVFYzpd5y9Y2RWQ1KstYDZYsSDzmxhqQphaHKHHRU"
+  ]
+}
+```
+
+```json
+{
+  "count": 2,
+  "mode": "fetch",
+  "requested": 2,
+  "content_source": "index",
+  "content_max_chars": 8000,
+  "not_found": [],
+  "results": [
+    {
+      "vector_id": "i:d0qhtOi9Lxc4yuMbgbDD1BvcpptqrMWpphGMGw4t79I",
+      "repo": "Liplus-Project/github-rag-mcp",
+      "type": "issue",
+      "state": "open",
+      "number": 239,
+      "updated_at": "2026-08-14T00:00:00Z",
+      "content": "feat(mcp): add vector_ids to search ...",
+      "content_chars": 4213,
+      "content_truncated": false
+    }
+  ]
+}
+```
 
 #### 検索の 2 軸
 

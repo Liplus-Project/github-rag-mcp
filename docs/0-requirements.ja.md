@@ -507,10 +507,12 @@ Parameters:
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
 - `since` / `until` optional — 半開区間 `[since, until)` の時間窓
+- `vector_ids` optional — 保存済み本文の取得。下記参照
 
 Returns:
 
 - repository、type、state、labels、milestone、assignees、URL、RRF fused score を含む ranked match
+- 全 result（および `same_entity.others` の各要素）に `vector_id` — その行の索引キーであり、`vector_ids` が取る取っ手
 - 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`、`rerank_score`（rerank 無効時または fallback 時は null）
 - 同一実体の他の行を吸収した結果には `same_entity`（Entity Aggregation 参照）。`top_k` は行数ではなく実体数で数える
 - top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`、`filters_unmatched`
@@ -524,6 +526,18 @@ Returns:
 **scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` は store 側へ push down されるので、窓に行があれば、その窓がどれだけ古くても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。
 
 scan mode は top-level に `truncated` を追加する。窓が応答に載せた以上の行を持つとき true になる（endpoint が cap 一杯まで返した、または merge 後の件数が `top_k` を超えた）。これが「該当なし」と「読み切れていない」を呼び出し側に区別させる: 返った最古の行の時刻を次の `until` にして遡ればよい。両者を区別できない欠損調査ツールは、存在しない欠損を報告し実在する取り込みを見落とす——#178 の再検証で 1 日に 2 度踏んだ誤りがこれである。
+
+**保存済み本文の取得（`vector_ids`）.** 先行する結果が持つ `vector_id` を渡すと、索引がその行について既に保持している本文を返す。対象は索引済みの全 type——`issue` / `pull_request` / `issue_comment` / `pr_review` / `pr_review_comment` / `release` / `diff` / `doc` / `wiki_doc`。従来は `doc` と `wiki_doc` にしか本文を返す経路が無く、`search` であたりを付けたあと本文を読むには `gh` や grep での一往復が必要だった。本文は D1 から読む。GitHub API を新たに叩かず、subrequest も増えない。
+
+これは tool ではなく mode である。#104 / #105 で 4 tool が `search` 1 本へ統合されており、本文取得の専用 tool は削除された `get_doc_content` を別名で復活させることに等しい。統合時の設計意図が「mode はパラメータ集合で表現する」であったため、本 mode もその作法に乗る。優先順位は `vector_ids` → `query` 空 → hybrid search。fetch mode では metadata filter は適用しない——行はサーバが選ぶのではなく呼び出し側が名指しするからである。
+
+返るのは索引が持つ本文の複製——embedding input であり、取り込み時に 8000 文字で truncate されている——であって、生きているソースそのものではない。inline された文字列自体はどちらであるかを示さないので、形が示す: 応答は `content_source: "index"` と `content_max_chars` を持ち、各行は `content_chars` と `content_truncated` を持つ。このフラグは取り込み時に記録した値ではなく長さから導いているため、本文の自然長がちょうど上限だった行も truncate 済みとして報告される。この向きの誤りは不要な読み直し 1 回で済むが、逆向きの誤りは断片を完全な本文として通してしまう。
+
+id が載るのは search mode の結果だけである——scan mode は structured store を読んでおり、その行は索引キーを持たない。未知・失効した id は `not_found` に載せ、残りの行はそのまま返す。部分成功は利便ではなく契約である。`vector_id` は「その結果集合の中で行に到達するための取っ手」であって永続識別子ではない——採番は既に一度移行している（`src/pipeline/legacy-vector-id.ts`）ため、古い id を再送した呼び出し側にも生きている行は返さなければならない。
+
+`include_content` は別軸であり、既存挙動は変更しない。doc は完全なファイルが必要なので GitHub contents API（および `raw.githubusercontent.com/wiki`）からファイル全体を読み直しており、5 件上限はその API fan-out を抑えるためにある。fetch mode は D1 を読み、上限は呼び出し側が挙げた id の数（1 回あたり最大 50、`top_k` の上限に合わせた）である。同じ「content」でも取得元も上限の根拠も異なる。1 つのフラグに両方を載せることは、1 つの保証で 2 つの挙動を覆うことになる。
+
+非スコープ: 保存されている文字列が embedding input そのものであるため、8000 文字の上限が embedding と保存の双方を兼ねている状態にある。FTS 側に truncate しない本文を持たせるのが根本の形だが、既存行の再 index が必要になる。fetch mode は「既に持っているものを返す」に限定する。
 
 ### `get_issue_context`
 

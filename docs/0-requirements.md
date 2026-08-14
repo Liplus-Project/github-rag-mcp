@@ -513,10 +513,12 @@ Parameters:
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
 - `since` / `until` optional — half-open time window `[since, until)`
+- `vector_ids` optional — stored-content fetch; see below
 
 Returns:
 
 - ranked matches with repository, type, state, labels, milestone, assignees, URL, and RRF fused `score`
+- `vector_id` on every result (and on every `same_entity.others` entry) — the row's index key and the handle `vector_ids` takes
 - additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`, `rerank_score` (null when rerank disabled or when graceful fallback engaged)
 - `same_entity` on results that absorbed other rows of the same entity (see Entity Aggregation); `top_k` counts entities, not rows
 - top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`, `filters_unmatched`
@@ -530,6 +532,18 @@ The check is an existence probe (`SELECT 1 FROM search_docs WHERE repo = ? LIMIT
 **Scan mode (empty query).** Vectorize / FTS5 / reranker are skipped and the result set is aggregated from the structured store's recency endpoints. `since` / `until` are pushed down to the store, so a window returns rows whenever it holds rows, however far back it sits. `since` defaults to 7 days before `until` (before now when `until` is omitted), so an `until`-only query does not degenerate into an empty window above its own ceiling.
 
 Scan mode adds one top-level field, `truncated`, which is true when the window holds more rows than the response carries — either an endpoint filled its row cap, or the merged set was longer than `top_k`. This is what tells a caller that zero results means "no such rows" rather than "the read stopped short": walk backwards by re-issuing the scan with `until` set to the oldest row returned. A gap-hunting tool that cannot separate those two answers reports absent rows that exist and misses rows that do not, which is how #178 was mis-diagnosed twice in one day.
+
+**Stored-content fetch (`vector_ids`).** Pass the `vector_id` values carried by earlier results and the tool returns the body text the index already holds for those exact rows. Every indexed type is covered — `issue`, `pull_request`, `issue_comment`, `pr_review`, `pr_review_comment`, `release`, `diff`, `doc`, `wiki_doc` — where before only `doc` and `wiki_doc` had any path to a body at all, so locating something with `search` and then reading it cost a second round trip through `gh` or grep. The text is read from D1; no GitHub API call is made, and the subrequest budget is untouched.
+
+This is a mode, not a tool. Four tools were consolidated into `search` in #104 / #105, and a dedicated body-fetch tool would be the removed `get_doc_content` returning under a new name; the consolidation's own design intent was that modes are expressed by the parameter set, so this one is too. Precedence is `vector_ids` → empty `query` → hybrid search. Metadata filters do not apply in fetch mode: the rows are named by the caller, not selected by the server.
+
+What comes back is the index's copy of the body — the embedding input, truncated by the ingest pipeline at 8000 characters — and not the live source. Inlined text carries no mark of which it is, so the shape states it: the response carries `content_source: "index"` and `content_max_chars`, and each row carries `content_chars` plus `content_truncated`. The flag is read off the length rather than recorded at ingest, so a body whose natural length is exactly the ceiling reports as truncated; that error direction costs one needless re-read, while the other direction would pass a prefix off as a whole document.
+
+Ids are carried by search-mode results only — scan mode reads the structured store, whose rows have no index key. Unknown or stale ids are listed in `not_found` and the remaining rows still return. Partial success is the contract rather than a convenience, because `vector_id` is explicitly a handle for reaching a row in the result set it arrived in — not a durable identifier. The id scheme has been migrated once already (`src/pipeline/legacy-vector-id.ts`), so a caller replaying an old id must still get the rows that are live.
+
+`include_content` is a separate axis and stays unchanged: it re-reads whole files from the GitHub contents API (and `raw.githubusercontent.com/wiki`) because a doc needs its full text, and its 5-row cap exists to bound that API fan-out. Fetch mode reads D1 and is bounded by the ids the caller listed (max 50 per call, mirroring the `top_k` ceiling). Same word, different source and different bound — one flag over both would be one guarantee over two behaviors.
+
+Out of scope: the stored text is the embedding input, so one 8000-character limit currently serves both embedding and retention. Giving the FTS side an untruncated body is the root-level shape, but it requires re-indexing existing rows. Fetch mode returns what the index already holds.
 
 ### `get_issue_context`
 

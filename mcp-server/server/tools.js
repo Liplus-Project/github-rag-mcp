@@ -17,13 +17,16 @@ export const TOOLS = [
     description:
       "Unified search across GitHub issues, PRs, releases, repository documentation, " +
       "GitHub Wiki pages, commit diffs, issue/PR top-level comments, PR reviews, and " +
-      "PR inline review comments. Three modes: " +
+      "PR inline review comments. Four modes, all derived from the parameter set: " +
       "(1) hybrid semantic search — dense BGE-M3 + sparse BM25 over D1 FTS5 fused via RRF, then re-scored " +
       "by @cf/baai/bge-reranker-base (toggle with rerank: false); " +
       "(2) time-ordered activity scan — omit or empty query with sort=\"updated_desc\" / \"created_desc\", " +
       "optionally narrow via since / until; " +
-      "(3) doc content fetch — include_content: true inlines raw content on top doc and wiki_doc results. " +
-      "Structured filters (repo, state, labels, milestone, assignee, type) apply across all modes; " +
+      "(3) doc content fetch — include_content: true inlines raw content on top doc and wiki_doc results; " +
+      "(4) stored-content fetch — vector_ids reads back the body text the index holds for the named rows, " +
+      "for every type and with no GitHub API call, truncated at the 8000-character ingest ceiling. " +
+      "Structured filters (repo, state, labels, milestone, assignee, type) apply across modes 1-3 " +
+      "(mode 4 names its rows, so nothing is filtered there); " +
       "type: \"wiki_doc\" narrows to GitHub Wiki pages only; repo takes the full slug (owner/repo) and matches " +
       "exactly, so a bare repository name selects nothing. In search mode the response carries " +
       "filters_unmatched: any filter listed there matched no row in the index at all, which separates a " +
@@ -31,6 +34,9 @@ export const TOOLS = [
       "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
       "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
       "and a result that absorbed others carries same_entity { count, others[] } with links to them. " +
+      "Every result row — and every same_entity.others entry — carries vector_id, the handle mode 4 takes. " +
+      "It is a handle for reaching a row you just found, not a durable identifier: the id scheme has been " +
+      "migrated before and may be again, so do not store one for later use. " +
       "Two retrieval axes are reported separately, never fused into one ranking. results is the keyword axis " +
       "(dense + sparse, scored and ranked; count counts these). graph_results is the relationship axis, " +
       "present only with graph_expand: true — candidates reached through the Decision-Structure mention graph, " +
@@ -144,6 +150,25 @@ export const TOOLS = [
             "contents API, wiki pages via raw.githubusercontent.com/wiki) on those rows. Capped at " +
             "the first few rows of each surface to bound API fan-out. Other rows are unaffected. " +
             "Default: false.",
+        },
+        vector_ids: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 50,
+          description:
+            "Stored-content fetch. Pass the vector_id values carried by earlier search-mode results " +
+            "(scan-mode rows come from the structured store and carry none) to read back the " +
+            "body text the index holds for those exact rows, for every type — issue, pull_request, " +
+            "issue_comment, pr_review, pr_review_comment, release, diff, doc, wiki_doc. " +
+            "Served from D1: no GitHub API call is made. Takes precedence over the other modes — query, sort, " +
+            "and every metadata filter are ignored when this is present, because the rows are named rather " +
+            "than selected. " +
+            "The text is the INDEXED copy of the body (the embedding input), truncated at 8000 characters — " +
+            "not the live source. Each row carries content_truncated so a prefix is never mistaken for a whole " +
+            "body, and the response carries content_source: \"index\". Unknown or stale ids are listed in " +
+            "not_found and the remaining rows still return. Max 50 ids per call. " +
+            "Treat vector_id as a handle for a row you just found, not a durable identifier: the id scheme has " +
+            "been migrated before and may be again, so do not store one for later use.",
         },
         graph_expand: {
           type: "boolean",
