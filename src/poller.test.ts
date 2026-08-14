@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Env } from "./types.js";
+import {
+  MAX_EMBEDDING_BATCH_BYTES,
+  MAX_EMBEDDING_INPUT_CHARS,
+  TOKEN_OVERHEAD_PER_INPUT,
+} from "./pipeline/embedding.js";
 
 // `pollDiffs` fans out to the commit-diff pipeline (GitHub detail fetch + Workers
 // AI embed + Vectorize + D1 + Store DO). The watermark contract under test is
@@ -546,6 +551,24 @@ describe("poller: diffFileBudgetPerPhase", () => {
     for (const repoCount of [1, 2, 3, 5, 6, 8, 10, 12, 14]) {
       expect(worstCaseSubrequests(repoCount)).toBeLessThanOrEqual(1000);
     }
+  });
+
+  it("charges a file no less than the batch axis costs it", () => {
+    // The 3 above is not a free parameter: 2 of it is fixed per file (the D1 FTS
+    // mirror write and the store row) and the third is a batch's 2 subrequests
+    // amortised over the files it holds. Moving the batch budget moves that floor —
+    // it was 7 files under a character budget and is 2 under a byte budget (#244),
+    // since truncation caps an input at MAX_EMBEDDING_INPUT_CHARS characters and a
+    // UTF-16 code unit is at most 3 UTF-8 bytes. At 2 the sum is exactly 3, so this
+    // holds without slack and a further tightening of the batch axis fails here
+    // rather than silently overrunning the invocation budget.
+    const maxBytesPerInput = MAX_EMBEDDING_INPUT_CHARS * 3;
+    const minFilesPerBatch = Math.floor(
+      MAX_EMBEDDING_BATCH_BYTES / (maxBytesPerInput + TOKEN_OVERHEAD_PER_INPUT),
+    );
+
+    expect(minFilesPerBatch).toBeGreaterThanOrEqual(1);
+    expect(2 + 2 / minFilesPerBatch).toBeLessThanOrEqual(3);
   });
 
   it("shrinks the per-phase budget as repos are appended", () => {

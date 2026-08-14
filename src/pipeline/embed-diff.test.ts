@@ -2,9 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../types.js";
 import { processAndUpsertCommitDiff, type GitHubCommitDetail } from "./embed-diff.js";
 import {
-  MAX_EMBEDDING_BATCH_CHARS,
-  SPECIAL_TOKENS_PER_INPUT,
+  MAX_EMBEDDING_BATCH_BYTES,
+  TOKEN_OVERHEAD_PER_INPUT,
   WORKERS_AI_BATCH_CONTEXT_LIMIT,
+  utf8ByteLength,
 } from "./embedding.js";
 import { diffVectorId } from "./vector-id.js";
 
@@ -79,10 +80,19 @@ function mkDiffPatch(chars: number): string {
 
 /** What the planner charges one Workers AI call. Upper-bounds its token count. */
 function callCharge(texts: string[]): number {
-  return texts.reduce((sum, text) => sum + text.length + SPECIAL_TOKENS_PER_INPUT, 0);
+  return texts.reduce(
+    (sum, text) => sum + utf8ByteLength(text) + TOKEN_OVERHEAD_PER_INPUT,
+    0,
+  );
 }
 
-describe("embed-diff: the batch axis is the character budget, not the file count", () => {
+/** What the retired character budget charged the same call (#242). Kept in the
+ *  tests only, to hold the regression fixtures inside the shape it passed. */
+function retiredCharCharge(texts: string[]): number {
+  return texts.reduce((sum, text) => sum + text.length + 2, 0);
+}
+
+describe("embed-diff: the batch axis is the UTF-8 byte budget, not the file count", () => {
   it("still sends an ordinary commit as one call", async () => {
     // 30 files well past the retired count cap of 20, each a small patch.
     const { env, aiCalls } = mkEnv();
@@ -120,7 +130,7 @@ describe("embed-diff: the batch axis is the character budget, not the file count
     // Every call carrying more than one input stays inside the budget.
     for (const call of aiCalls) {
       if (call.length > 1) {
-        expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_CHARS);
+        expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_BYTES);
       }
     }
 
@@ -156,13 +166,43 @@ describe("embed-diff: the batch axis is the character budget, not the file count
 
     expect(aiCalls.length).toBeGreaterThan(1);
     for (const call of aiCalls) {
-      expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_CHARS);
+      expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_BYTES);
     }
 
     // Splitting is only the fix if every file still lands.
     expect(result.embedded).toBe(18);
     expect(result.failed).toBe(0);
     expect(new Set(upsertedIds.flat()).size).toBe(18);
+  });
+
+  it("splits the 16-file Japanese commit that a character budget let through", async () => {
+    // The payload that kept failing after #242 shipped: 16 files of Japanese-heavy
+    // patch, charged at most 60000 characters and sent as one call, answered with
+    // `Max context reached 68736 tokens but model supports only 60000` — 1.146 tokens
+    // per character. Byte fallback is what breaks the character premise: a character
+    // the vocabulary lacks is decomposed into its UTF-8 bytes, so one 3-byte
+    // character can cost 3 tokens where the budget charged it 1.
+    const { env, aiCalls, upsertedIds } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 16 }, () => "あ".repeat(3700)));
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
+
+    const allInputs = aiCalls.flat();
+    // The fixture reproduces the shape only while it stays in the failing zone: one
+    // call under the retired character budget, over the ceiling in what it actually
+    // costs. Both halves are asserted, so a later edit to the patch size cannot
+    // quietly move it out of the shape it reproduces.
+    expect(retiredCharCharge(allInputs)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+    expect(callCharge(allInputs)).toBeGreaterThan(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+
+    expect(aiCalls.length).toBeGreaterThan(1);
+    for (const call of aiCalls) {
+      expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_BYTES);
+    }
+
+    expect(result.embedded).toBe(16);
+    expect(result.failed).toBe(0);
+    expect(new Set(upsertedIds.flat()).size).toBe(16);
   });
 
   it("keeps each embed call paired with its own slice of files", async () => {

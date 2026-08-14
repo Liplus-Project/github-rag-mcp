@@ -206,13 +206,17 @@ const DIFF_SUBREQUEST_BUDGET_PER_RUN = 900;
  *
  *  Two are fixed and per-file: the D1 FTS mirror write and the Store DO row.
  *  The third is the amortised batch cost — a batch spends 2 (the Workers AI call
- *  and its `VECTORIZE.upsert`) and holds at least 7 files, because
- *  `MAX_EMBEDDING_INPUT_CHARS` caps one input at 8000 characters and
- *  `MAX_EMBEDDING_BATCH_CHARS` gives a batch 60000, whatever the payload is made
- *  of. That puts the true figure at 2.29 and under; 3 is it rounded to the safe
- *  side. The floor was 3 while the batch axis was an estimated token budget
- *  (#237); moving that axis to characters (#241) raised the floor and left this
- *  constant on the safe side of its own derivation, so it is unchanged. */
+ *  and its `VECTORIZE.upsert`) and holds at least 2 files, because
+ *  `MAX_EMBEDDING_INPUT_CHARS` caps one input at 8000 characters, which is at most
+ *  24000 UTF-8 bytes, against the 60000 bytes `MAX_EMBEDDING_BATCH_BYTES` gives a
+ *  batch. Two files per batch puts the amortised share at exactly 1, so the worst
+ *  case is exactly 3 — no longer rounded up from 2.29 but met on the nose.
+ *
+ *  That floor moved with the batch axis: 7 files while the budget was counted in
+ *  characters (#241), 2 now that it is counted in UTF-8 bytes (#244), because a
+ *  Japanese character is charged 3 bytes where it used to be charged 1. The
+ *  constant is unchanged and the derivation still holds, but it holds without slack
+ *  — a further tightening of the batch axis lands here rather than being absorbed. */
 const DIFF_SUBREQUESTS_PER_FILE = 3;
 
 /** Per-phase subrequests that are not per-file: up to 5 commit detail fetches,
