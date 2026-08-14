@@ -145,9 +145,12 @@ describe("embed-diff: the batch axis is the character budget, not the file count
     const allInputs = aiCalls.flat();
     // The fixture is only a regression test while it stays in the failing zone: over
     // the ceiling as one call, yet inside the budget the estimator would have
-    // computed for it (85202 characters of ASCII read as ~28400 tokens at 3 each,
-    // under the 30000 that #237 set). Both halves are asserted so a later edit to
-    // the patch size cannot quietly move the fixture out of the shape it reproduces.
+    // computed for it — roughly 85200 ASCII characters, which its ratio of 3 read as
+    // about 28400 tokens against the 30000 that #237 set. The second assertion
+    // divides the charge rather than the bare character sum, which overstates the
+    // estimator's figure by the special tokens and so errs toward failing. Both
+    // halves are asserted, so a later edit to the patch size cannot quietly move the
+    // fixture out of the shape it reproduces.
     expect(callCharge(allInputs)).toBeGreaterThan(WORKERS_AI_BATCH_CONTEXT_LIMIT);
     expect(Math.ceil(callCharge(allInputs) / 3)).toBeLessThanOrEqual(30000);
 
