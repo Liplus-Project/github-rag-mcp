@@ -42,7 +42,7 @@
   "tools": [
     {
       "name": "search",
-      "description": "Unified search across GitHub issues, PRs, releases, docs, GitHub Wiki pages, commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments. Three modes selected via query/sort axes: (1) hybrid semantic search (dense BGE-M3 + sparse BM25 fused via RRF + cross-encoder rerank), (2) time-ordered activity scan (empty query + sort), (3) doc/wiki content fetch (include_content=true inlines raw markup for top doc and wiki_doc results). Structured filters: repo, state, labels, milestone, assignee, type (issue / pull_request / release / doc / wiki_doc / diff / issue_comment / pr_review / pr_review_comment)."
+      "description": "Unified search across GitHub issues, PRs, releases, docs, GitHub Wiki pages, commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments. Four modes derived from the parameter set: (1) hybrid semantic search (dense BGE-M3 + sparse BM25 fused via RRF + cross-encoder rerank), (2) time-ordered activity scan (empty query + sort), (3) doc/wiki content fetch (include_content=true inlines raw markup for top doc and wiki_doc results), (4) stored-content fetch (vector_ids returns the body text the index holds for the named rows, any type, no GitHub API call, truncated at the 8000-character ingest ceiling). Structured filters: repo, state, labels, milestone, assignee, type (issue / pull_request / release / doc / wiki_doc / diff / issue_comment / pr_review / pr_review_comment)."
     }
   ],
   "compatibility": {

@@ -3,8 +3,22 @@
  *
  * Tools:
  *   search — hybrid search + time-ordered activity scan + inline doc
- *                    content fetch. Single entry point for GitHub issue / PR /
- *                    release / doc / commit-diff retrieval.
+ *                    content fetch + stored-content fetch by vector_id. Single
+ *                    entry point for GitHub issue / PR / release / doc /
+ *                    commit-diff retrieval.
+ *
+ * Modes are derived from the parameter set, never selected by a mode enum, and
+ * no mode gets a tool of its own (issues #104 / #105 consolidated four tools
+ * into this one; a body-fetch tool would be the removed `get_doc_content`
+ * returning under a new name). Precedence, top to bottom:
+ *
+ *   vector_ids present -> fetch mode (stored content for the named rows)
+ *   query empty        -> scan mode  (time-ordered metadata)
+ *   otherwise          -> search mode (hybrid retrieval)
+ *
+ * `include_content` is orthogonal to all three: it inlines doc / wiki_doc files
+ * read from GitHub, which is a different source and a different bound from
+ * fetch mode's D1 read (see `fetch.ts`).
  *
  * Protocol revision 2026-07-28 (stateless core, issue #224). The server is
  * built fresh per HTTP request by `createMcpHandler` in `index.ts` — there is
@@ -39,6 +53,11 @@ import {
 import { rerankCandidates, rerankWasApplied, RERANK_MAX_CANDIDATES } from "./rerank.js";
 import { queryNeighbors, getDocsByVectorIds, type GraphNeighbor } from "./graph.js";
 import { runScan, type ScanRow } from "./scan.js";
+import {
+  fetchStoredContent,
+  FETCH_CONTENT_MAX_CHARS,
+  FETCH_MAX_VECTOR_IDS,
+} from "./fetch.js";
 import { entityKey, groupByEntity } from "./aggregate.js";
 
 const GITHUB_API = "https://api.github.com";
@@ -283,7 +302,7 @@ export function createRagMcpServer(env: Env): McpServer {
       description:
         "Unified search across GitHub issues, PRs, releases, repository documentation, GitHub Wiki pages, " +
         "commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments. " +
-        "Three modes via the query / sort axes:\n" +
+        "Four modes, all derived from the parameter set:\n" +
         "  1. Hybrid semantic search (default): dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, " +
         "fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with a cross-encoder " +
         "(@cf/baai/bge-reranker-base; set rerank: false to skip).\n" +
@@ -291,7 +310,13 @@ export function createRagMcpServer(env: Env): McpServer {
         "optionally narrow via since / until to list recent activity across every type.\n" +
         "  3. Doc content fetch: pass include_content: true to inline the raw file content of top doc and wiki_doc results " +
         "(docs via GitHub Contents API, wiki_docs via raw.githubusercontent.com/wiki; capped at the first few rows of each).\n" +
-        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across all modes; " +
+        "  4. Stored-content fetch: pass vector_ids (the vector_id values carried by earlier results) to read back the " +
+        "body text the index holds for those exact rows — the way to read an issue / PR / comment / review / release / " +
+        "diff body without a second round trip to GitHub. Served from D1, so it makes no GitHub API call; what it " +
+        "returns is the indexed copy of the body, truncated at " +
+        `${FETCH_CONTENT_MAX_CHARS} characters, not the live source.\n` +
+        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across modes 1-3 " +
+        "(mode 4 names its rows, so nothing is filtered there); " +
         "repo takes the full slug (owner/repo) and matches exactly, so a bare repository name selects nothing. " +
         "In search mode the response carries filters_unmatched: any filter listed there matched no row in the " +
         "index at all, which separates a mis-specified filter from a genuine zero-hit result. " +
@@ -304,6 +329,9 @@ export function createRagMcpServer(env: Env): McpServer {
         "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
         "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
         "and a result that absorbed others carries same_entity { count, others[] } with links to them.\n" +
+        "Every result row — and every same_entity.others entry — carries vector_id, the handle mode 4 takes. " +
+        "It is a handle for reaching a row you just found, not a durable identifier: the id scheme has been " +
+        "migrated before and may be again, so do not store one for later use.\n" +
         "Two retrieval axes are reported separately, never fused into one ranking. results is the keyword axis " +
         "(dense + sparse, scored and ranked; count counts these). graph_results is the relationship axis, " +
         "present only with graph_expand: true — candidates reached through the Decision-Structure mention graph, " +
@@ -431,6 +459,26 @@ export function createRagMcpServer(env: Env): McpServer {
               `${INCLUDE_CONTENT_MAX_DOCS} doc rows in the result set to bound API fan-out. ` +
               "Non-doc rows are unaffected.",
           ),
+        vector_ids: z
+          .array(z.string())
+          .max(FETCH_MAX_VECTOR_IDS)
+          .optional()
+          .describe(
+            "Stored-content fetch. Pass the vector_id values carried by earlier search-mode results " +
+              "(scan-mode rows come from the structured store and carry none) to read back the " +
+              "body text the index holds for those exact rows, for every type — issue, pull_request, " +
+              "issue_comment, pr_review, pr_review_comment, release, diff, doc, wiki_doc. " +
+              "Served from D1: no GitHub API call is made. Takes precedence over the other modes — query, " +
+              "sort, and every metadata filter are ignored when this is present, because the rows are named " +
+              "rather than selected. " +
+              "The text is the INDEXED copy of the body (the embedding input), truncated at " +
+              `${FETCH_CONTENT_MAX_CHARS} characters — not the live source. Each row carries content_truncated ` +
+              "so a prefix is never mistaken for a whole body, and the response carries content_source: \"index\". " +
+              "Unknown or stale ids are listed in not_found and the remaining rows still return. " +
+              `Max ${FETCH_MAX_VECTOR_IDS} ids per call. ` +
+              "Treat vector_id as a handle for a row you just found, not a durable identifier: the id scheme " +
+              "has been migrated before and may be again, so do not store one for later use.",
+          ),
         graph_expand: z
           .boolean()
           .optional()
@@ -469,9 +517,43 @@ export function createRagMcpServer(env: Env): McpServer {
       since,
       until,
       include_content,
+      vector_ids,
       graph_expand,
       graph_hops,
     }) => {
+      // ── Fetch mode (vector_ids): stored content for named rows ───
+      // First branch on purpose: a fetch call carries no query, so leaving it
+      // below the empty-query test would route it into scan mode. The rows are
+      // named, not selected, which is why no filter applies here.
+      const fetchIds = vector_ids ?? [];
+      if (fetchIds.length > 0) {
+        try {
+          const payload = await fetchStoredContent(env.DB_FTS, fetchIds);
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+            ],
+          };
+        } catch (err) {
+          // Reported as an error rather than as an all-missing response: an
+          // empty `results` with every id in `not_found` would assert the rows
+          // do not exist, which a failed read gives no ground to claim.
+          console.error(
+            "search: stored-content fetch failed:",
+            err instanceof Error ? err.message : String(err),
+          );
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Failed to read stored content from the index",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
       const requestedTopK = top_k ?? 10;
       const fusionMode = fusion ?? "rrf";
       const rerankEnabled = rerank ?? true;
@@ -913,6 +995,14 @@ export function createRagMcpServer(env: Env): McpServer {
 
       // ── Format results ───────────────────────────────────────
       type ResultItem = {
+        /**
+         * The row's index key, and the handle `vector_ids` takes to read this
+         * row's stored body back (fetch mode). Deliberately NOT promised as a
+         * durable identifier: this repository has already migrated its id
+         * scheme once (`pipeline/legacy-vector-id.ts`), so the field is a
+         * handle for the result set it arrived in, not a citation to store.
+         */
+        vector_id: string;
         number: number;
         title: string;
         state: string;
@@ -952,6 +1042,13 @@ export function createRagMcpServer(env: Env): McpServer {
         same_entity?: {
           count: number;
           others: Array<{
+            /**
+             * Carried for the same reason as on the representative: aggregation
+             * is what puts a comment / review / older diff *here* instead of in
+             * `results`, so without it the rows whose bodies fetch mode exists
+             * to return would be the only ones it could not reach.
+             */
+            vector_id: string;
             type: string;
             url: string;
             updated_at: string;
@@ -975,6 +1072,7 @@ export function createRagMcpServer(env: Env): McpServer {
                 others: folded.map((o) => {
                   const or = resolveRow(payload.get(o.vectorId));
                   return {
+                    vector_id: o.vectorId,
                     type: or.type,
                     url: buildResultUrl(or),
                     updated_at: or.updatedAt,
@@ -986,6 +1084,7 @@ export function createRagMcpServer(env: Env): McpServer {
             : undefined;
 
         return {
+          vector_id: f.vectorId,
           number: r.number,
           title: "", // Enriched below
           state: r.state,

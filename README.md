@@ -95,19 +95,20 @@ See:
 
 ## MCP Tools
 
-This MCP server exposes a single consolidated tool. All retrieval modes — semantic search, time-ordered activity scan, and inline doc content fetch — are reached through `search` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
+This MCP server exposes a single consolidated tool. All retrieval modes — semantic search, time-ordered activity scan, inline doc content fetch, and stored-content fetch by `vector_id` — are reached through `search` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
 
 ### `search`
 
 Unified search across GitHub issues, pull requests, releases, repository documentation, GitHub Wiki pages, commit diffs, and comment / review surfaces (top-level comments on issues and PRs, PR review bodies, and PR inline review comments).
 
-Three modes are selected by the combination of `query` and `sort`:
+Four modes are selected by the parameter set:
 
 1. **Hybrid semantic search (default)** — dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, fused via Reciprocal Rank Fusion (RRF, k=60), then re-scored with the `@cf/baai/bge-reranker-base` cross-encoder. Pass a natural-language `query`.
 2. **Time-ordered activity scan** — omit or leave `query` empty and set `sort` to `"updated_desc"` or `"created_desc"`. Optionally narrow with `since` / `until` to list recent activity across every type. This subsumes the previous `list_recent_activity` tool. The `[since, until)` window is applied inside the index, so any window holding rows returns rows however far back it sits; the response carries `truncated: true` when the window holds more than one page, which is what separates "no such rows" from "the read stopped short". Walk backwards by re-issuing the scan with `until` set to the oldest row returned.
 3. **Doc / wiki content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API; for `type: "wiki_doc"` rows, the raw markup is fetched from `raw.githubusercontent.com/wiki/`. Both are inlined as a `content` field. Capped at the first few rows of each type to bound API fan-out. This subsumes the previous `get_doc_content` tool.
+4. **Stored-content fetch** — pass `vector_ids` (the `vector_id` values carried by earlier results). Every indexed type returns the body text the index already holds for that exact row — issues, PRs, comments, reviews, releases and diffs included, not just docs — so locating something with `search` and then reading it no longer costs a round trip through `gh` or grep. Served from D1: no GitHub API call is made. See [Stored-content fetch](#stored-content-fetch) below for what the returned text is and is not.
 
-Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode.
+Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode except stored-content fetch, where the rows are named rather than selected.
 
 Search mode reports filters that matched nothing at all in `filters_unmatched` (always present, `[]` when every filter matched something). `repo` is an exact match on the full `owner/repo` slug, so a bare repository name selects an empty population and returns a response shaped exactly like a genuine zero-hit search — this field is what separates the two. It matters most in multi-step agentic search, where a zero reads as a normal intermediate result and the mis-specified filter would otherwise never surface.
 
@@ -131,6 +132,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `since` | ISO 8601 string | Keep only results with `updated_at >= since`. In scan mode, defaults to 7 days before `until` (before now when `until` is omitted). |
 | `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
 | `include_content` | boolean | Inline raw content on top doc results (default `false`). |
+| `vector_ids` | string[] | Stored-content fetch. The `vector_id` values of the rows to read back, max 50 per call. Takes precedence over the other modes: `query`, `sort` and every filter are ignored when present. See [Stored-content fetch](#stored-content-fetch). |
 | `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages come back in a separate `graph_results` array tagged `graph_hop` / `graph_from` — see Retrieval axes below. Default `false` = byte-identical to standard hybrid retrieval (no graph read). |
 | `graph_hops` | number | Graph traversal depth for `graph_expand` (1 or 2, default 1). Ignored when `graph_expand` is `false`. |
 
@@ -154,6 +156,51 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 One thing is indexed as several rows: a file is a `doc` row plus one `diff` row per commit that touched it, an issue or PR is its own row plus its comments and reviews. Those rows are collapsed into one result before the response is trimmed, so `top_k` returns that many distinct entities. Rows are grouped by what they point at, not by the work that produced them — different files touched by one commit stay separate results, and so do an issue and the PR that closes it.
 
 The representative is the highest-ranked row of the group, so a query about when something changed still returns the relevant old commit diff rather than the current version. A result that absorbed other rows carries a `same_entity` field (`count` including itself, plus `others[]` with the type, URL, timestamp and score of each collapsed row) so nothing is lost. See [docs/0-requirements.md](docs/0-requirements.md) for the full rule.
+
+#### Stored-content fetch
+
+Every result row — and every `same_entity.others` entry — carries a `vector_id`. Passing those ids back as `vector_ids` returns the body text the index holds for exactly those rows.
+
+What comes back is the **index's copy** of the body, not the live source: it is the embedding input, truncated by the ingest pipeline at 8000 characters. Inlined text carries no mark of which it is, so the response says so — `content_source: "index"` and `content_max_chars` at the top level, `content_chars` and `content_truncated` on each row. A row flagged `content_truncated: true` is a prefix; read the rest from GitHub if the tail matters.
+
+Unknown or stale ids come back in `not_found` and the remaining rows still return. That partial success is deliberate: `vector_id` is a handle for reaching a row in the result set it arrived in, **not a durable identifier**. The id scheme has been migrated once already, so do not store one for later use — take it from a fresh result.
+
+This is a different axis from `include_content`, which is unchanged: that flag re-reads whole files from GitHub because a doc needs its full text, and it is capped to bound API fan-out. Fetch mode reads D1 and is bounded by the ids you listed.
+
+Ids come from search-mode results only; scan-mode rows are read from the structured store and carry none. They are opaque (`{type prefix}:{base64url sha256}`) — copy them from a result, never build one by hand:
+
+```json
+{
+  "vector_ids": [
+    "i:d0qhtOi9Lxc4yuMbgbDD1BvcpptqrMWpphGMGw4t79I",
+    "ic:kPjVFYzpd5y9Y2RWQ1KstYDZYsSDzmxhqQphaHKHHRU"
+  ]
+}
+```
+
+```json
+{
+  "count": 2,
+  "mode": "fetch",
+  "requested": 2,
+  "content_source": "index",
+  "content_max_chars": 8000,
+  "not_found": [],
+  "results": [
+    {
+      "vector_id": "i:d0qhtOi9Lxc4yuMbgbDD1BvcpptqrMWpphGMGw4t79I",
+      "repo": "Liplus-Project/github-rag-mcp",
+      "type": "issue",
+      "state": "open",
+      "number": 239,
+      "updated_at": "2026-08-14T00:00:00Z",
+      "content": "feat(mcp): add vector_ids to search ...",
+      "content_chars": 4213,
+      "content_truncated": false
+    }
+  ]
+}
+```
 
 #### Retrieval axes
 

@@ -52,6 +52,25 @@ test("tool and type descriptions document the wiki surface", () => {
 // exact-match requirement on `repo` has to be stated here — a bare repository
 // name silently selects nothing, and the caller has no way to see that from the
 // zero-result response alone.
+// gh#239: fetch mode returns the index's copy of a body — the embedding input,
+// truncated at the ingest ceiling. A caller reading this schema is the one that
+// decides whether to trust the text as whole, so the provenance, the ceiling,
+// the per-row flag and the partial-success field all have to be stated here.
+test("vector_ids description states provenance, ceiling, and partial success", () => {
+  const param = search?.inputSchema?.properties?.vector_ids;
+  assert.ok(param, "vector_ids param is present in the mirrored schema");
+  assert.equal(param.type, "array");
+  assert.equal(param.items?.type, "string");
+  assert.match(param.description, /INDEXED copy/);
+  assert.match(param.description, /8000/);
+  assert.match(param.description, /content_truncated/);
+  assert.match(param.description, /not_found/);
+  assert.match(param.description, /no GitHub API call/i);
+  // The id is a handle for the result set it arrived in, not a citation: this
+  // repository has migrated its vector id scheme once already.
+  assert.match(param.description, /not a durable identifier/);
+});
+
 test("repo description states the full-slug exact match and the unmatched-filter signal", () => {
   const repoParam = search?.inputSchema?.properties?.repo;
   assert.ok(repoParam, "repo param is present in the mirrored schema");

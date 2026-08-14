@@ -139,8 +139,39 @@ describe("worker <-> bridge stateless contract", () => {
         "top_k",
         "type",
         "until",
+        "vector_ids",
       ].sort(),
     );
+
+    await remote.reset();
+  });
+
+  // gh#239: fetch mode returns the index's copy of a body, not the live source.
+  // A caller that cannot tell those apart reads a prefix as a whole document,
+  // so the served text — the one surface every client sees — has to say which
+  // it is, and has to say that the id is a handle rather than a citation.
+  it("publishes fetch mode as index-derived, truncated, and handle-keyed", async () => {
+    const remote = createRemoteClient({
+      workerUrl: ENDPOINT,
+      clientVersion: "0.0.0-test",
+      fetch: fetchInto(workerHandler()),
+    });
+
+    const client = await remote.getClient();
+    const [search] = (await client.listTools()).tools;
+    const description = search.description as string;
+
+    expect(description).toContain("vector_ids");
+    expect(description).toMatch(/no GitHub API call/i);
+
+    const vectorIds = (
+      search.inputSchema as { properties?: Record<string, { description?: string }> }
+    ).properties?.["vector_ids"];
+    expect(vectorIds?.description).toMatch(/INDEXED copy/);
+    expect(vectorIds?.description).toContain("8000");
+    expect(vectorIds?.description).toContain("content_truncated");
+    expect(vectorIds?.description).toContain("not_found");
+    expect(vectorIds?.description).toMatch(/not a durable identifier/);
 
     await remote.reset();
   });
