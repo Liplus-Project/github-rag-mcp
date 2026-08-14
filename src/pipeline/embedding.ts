@@ -17,59 +17,55 @@ export const MAX_EMBEDDING_INPUT_CHARS = 8000;
  *   3030: Max context reached 85920 tokens but model supports only 60000
  *
  * Unpublished, so this is read off the error rather than a docs page. Kept named
- * because the budget below is a margin against it, and a margin whose reference
- * is inlined reads as an arbitrary number the next time someone retunes it.
+ * because the character budget below is derived from it, and a budget whose
+ * reference is inlined reads as an arbitrary number the next time someone
+ * retunes it.
  */
 export const WORKERS_AI_BATCH_CONTEXT_LIMIT = 60000;
 
 /**
- * Token budget for the inputs of one batched Workers AI embed call.
+ * Special tokens the model wraps around each input of a batch (`<s>` … `</s>`).
  *
- * Half the ceiling above. The halving is sized to the one error direction that
- * matters: `estimateEmbeddingTokens` approximates, and an estimate that comes in
- * *under* the true count is what puts a call over the ceiling — which fails the
- * whole chunk, and a commit whose vectors never landed is one the diff watermark
- * holds on, so the surface stalls there rather than passing it by. Punctuation-
- * dense payloads (lockfile hashes, minified sources) are where the ASCII ratio
- * below runs optimistic, and 2x covers that class with room left.
- *
- * The margin is not free and is not larger than it needs to be. Every extra batch
- * costs two subrequests (the AI call and its `VECTORIZE.upsert`) against an
- * invocation budget this worker already overruns, so a budget far below the
- * ceiling buys no safety and spends a neighbouring axis that is genuinely tight.
- *
- * A count cap cannot express any of this. Characters per token vary by an order of
- * magnitude across the content this pipeline embeds — roughly 3 for ASCII source,
- * roughly 1 for CJK prose — so N inputs bound the request only when every input
- * is assumed to be the cheap kind.
+ * The only part of a batch's token count that does not come from the input text,
+ * so it is the only part a character count cannot cover. It is charged per input
+ * rather than once per batch because the batch's input count is not bounded
+ * anywhere: a batch of many tiny inputs is where a single flat reserve would come
+ * up short, and that is exactly the case a fixed constant hides.
  */
-export const MAX_EMBEDDING_BATCH_TOKENS = WORKERS_AI_BATCH_CONTEXT_LIMIT / 2;
+export const SPECIAL_TOKENS_PER_INPUT = 2;
 
 /**
- * Characters per token assumed for the ASCII range. bge-m3 tokenizes with an
- * XLM-RoBERTa SentencePiece vocabulary, where English prose runs near 4 and
- * punctuation-dense source code runs nearer 3. The lower figure is used because
- * the diff surface is source code and an underestimate is what overruns a call.
- */
-const ASCII_CHARS_PER_TOKEN = 3;
-
-/**
- * Estimate the token cost of one embedding input.
+ * Character budget for the inputs of one batched Workers AI embed call.
  *
- * Deliberately an estimate: the tokenizer is not available inside the Worker, and
- * the value is only ever compared against a budget that is itself conservative.
- * Non-ASCII code units are counted one token each (the CJK worst case), ASCII at
- * `ASCII_CHARS_PER_TOKEN`. Counting UTF-16 code units rather than code points
- * makes a surrogate pair cost two, which errs toward the safe side.
+ * The ceiling itself, in characters, because characters *dominate* tokens rather
+ * than approximating them: every token of a BPE or SentencePiece vocabulary spans
+ * at least one character of the input, so for any input
+ *
+ *   tokens(input) <= input.length + SPECIAL_TOKENS_PER_INPUT
+ *
+ * and a batch whose charged total stays inside this budget is inside the ceiling
+ * unconditionally — no calibration, and no dependence on the payload's language or
+ * punctuation density. Which matters because the estimate this replaced was wrong
+ * by about 2.1x on the surface that actually failed: diff patches run near 1.4
+ * characters per token, not the 3 an ASCII-prose ratio assumed, so batches judged
+ * to fit under a 30000-token budget reached 60678 and 64413 against the ceiling and
+ * failed their whole chunk. A commit whose vectors never landed is one the diff
+ * watermark holds on, so the surface stalled on the same commit every cron tick.
+ *
+ * Equality with the ceiling is admissible: the rejections name counts strictly
+ * above it (`Max context reached 60678 tokens but model supports only 60000`), so
+ * 60000 is a supported count and not the first rejected one.
+ *
+ * Sized in characters rather than under the ceiling by a margin because a margin
+ * is not free — every extra batch costs two subrequests (the AI call and its
+ * `VECTORIZE.upsert`) against an invocation budget this worker already overruns,
+ * and a bound that holds by construction has nothing left for a margin to buy.
+ *
+ * `MAX_EMBEDDING_INPUT_CHARS` truncates one input to 8000 characters, so a batch
+ * holds at least 7 inputs however large each patch is. That floor is what the
+ * poller's per-file subrequest estimate rests on.
  */
-export function estimateEmbeddingTokens(text: string): number {
-  let wide = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) > 127) wide++;
-  }
-  const ascii = text.length - wide;
-  return wide + Math.ceil(ascii / ASCII_CHARS_PER_TOKEN);
-}
+export const MAX_EMBEDDING_BATCH_CHARS = WORKERS_AI_BATCH_CONTEXT_LIMIT;
 
 /** Half-open `[start, end)` index range over a caller's input array. */
 export interface EmbeddingBatchRange {
@@ -78,8 +74,14 @@ export interface EmbeddingBatchRange {
 }
 
 /**
- * Split embedding inputs into batches whose estimated token totals stay within
- * `budgetTokens`.
+ * Split embedding inputs into batches whose character totals stay within
+ * `budgetChars`.
+ *
+ * Each input is charged its own length plus `SPECIAL_TOKENS_PER_INPUT`, which makes
+ * the charged total an upper bound on the batch's true token count rather than an
+ * estimate of it (see `MAX_EMBEDDING_BATCH_CHARS`). Length is counted in UTF-16
+ * code units, so a surrogate pair costs two — one more than the code point it
+ * encodes, which errs on the side that keeps the bound.
  *
  * Index ranges are returned rather than the strings themselves so the caller can
  * slice its own parallel arrays (files, metadata) by the same boundaries — the
@@ -89,24 +91,24 @@ export interface EmbeddingBatchRange {
  * Contract:
  *  - order is preserved, ranges are contiguous, and every input falls in exactly one
  *  - no returned range is empty
- *  - an input whose own estimate already exceeds the budget occupies a range of
+ *  - an input whose own charge already exceeds the budget occupies a range of
  *    one. Cutting it down further belongs to the truncation axis
  *    (`MAX_EMBEDDING_INPUT_CHARS`), and dropping it would lose a file from the index.
  */
 export function planEmbeddingBatches(
   inputs: string[],
-  budgetTokens: number = MAX_EMBEDDING_BATCH_TOKENS,
+  budgetChars: number = MAX_EMBEDDING_BATCH_CHARS,
 ): EmbeddingBatchRange[] {
   const ranges: EmbeddingBatchRange[] = [];
   let start = 0;
   let total = 0;
 
   for (let i = 0; i < inputs.length; i++) {
-    const cost = estimateEmbeddingTokens(inputs[i]);
+    const cost = inputs[i].length + SPECIAL_TOKENS_PER_INPUT;
     // Close the open range before an input that would overrun the budget. The
     // `i > start` guard is what keeps an oversized input in a batch of its own
     // instead of closing an empty range and looping on it forever.
-    if (i > start && total + cost > budgetTokens) {
+    if (i > start && total + cost > budgetChars) {
       ranges.push({ start, end: i });
       start = i;
       total = 0;

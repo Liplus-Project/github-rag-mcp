@@ -206,11 +206,13 @@ const DIFF_SUBREQUEST_BUDGET_PER_RUN = 900;
  *
  *  Two are fixed and per-file: the D1 FTS mirror write and the Store DO row.
  *  The third is the amortised batch cost — a batch spends 2 (the Workers AI call
- *  and its `VECTORIZE.upsert`) and holds at least 3 files, because
+ *  and its `VECTORIZE.upsert`) and holds at least 7 files, because
  *  `MAX_EMBEDDING_INPUT_CHARS` caps one input at 8000 characters and
- *  `MAX_EMBEDDING_BATCH_TOKENS` gives a batch 30000 tokens, so even CJK prose at
- *  ~1 token per character fits 3. That puts the true figure at 2.67 and under; 3
- *  is it rounded to the safe side. */
+ *  `MAX_EMBEDDING_BATCH_CHARS` gives a batch 60000, whatever the payload is made
+ *  of. That puts the true figure at 2.29 and under; 3 is it rounded to the safe
+ *  side. The floor was 3 while the batch axis was an estimated token budget
+ *  (#237); moving that axis to characters (#241) raised the floor and left this
+ *  constant on the safe side of its own derivation, so it is unchanged. */
 const DIFF_SUBREQUESTS_PER_FILE = 3;
 
 /** Per-phase subrequests that are not per-file: up to 5 commit detail fetches,
