@@ -36,6 +36,8 @@ const {
   nextForwardDiffWatermark,
   nextBackfillDiffWatermark,
   nextIssueWatermark,
+  diffFileBudgetPerPhase,
+  parsePollRepos,
   MAX_EMBEDDINGS_PER_RUN,
   MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN,
   MAX_DOC_FETCHES_PER_REPO_PER_RUN,
@@ -68,9 +70,21 @@ function makeStore(
   const upserts: Array<{ number: number; bodyHash: string }> = [];
   /** Records written through `/upsert-release` (same retry markers, release side). */
   const releaseUpserts: Array<{ tagName: string; bodyHash: string }> = [];
+  /** Indexed diff file paths per `${repo}@${sha}` — what `GET /diffs` reports back,
+   *  i.e. the resume set a split commit is continued from. */
+  const diffPaths = new Map<string, Set<string>>();
+  /** Commit SHAs the poller asked the resume set for. */
+  const diffListCalls: string[] = [];
   const stub = {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/diffs") {
+        const repo = url.searchParams.get("repo") ?? "";
+        const sha = url.searchParams.get("commit_sha") ?? "";
+        diffListCalls.push(sha);
+        const paths = diffPaths.get(`${repo}@${sha}`) ?? new Set<string>();
+        return Response.json([...paths].map((filePath) => ({ filePath })));
+      }
       if (request.method === "GET" && url.pathname === "/watermark") {
         const key = url.searchParams.get("repo") ?? "";
         const value = watermarks.get(key);
@@ -109,6 +123,8 @@ function makeStore(
     etags,
     upserts,
     releaseUpserts,
+    diffPaths,
+    diffListCalls,
   };
 }
 
@@ -301,6 +317,8 @@ beforeEach(() => {
     skipped: 0,
     failed: 0,
     batches: 1,
+    alreadyIndexed: 0,
+    deferred: 0,
   });
 });
 
@@ -447,8 +465,8 @@ describe("poller: pollDiffs forward watermark / retry boundary", () => {
     processAndUpsertCommitDiffMock.mockImplementation(
       async (_env: unknown, _stub: unknown, _repo: string, detail: { sha: string }) =>
         detail.sha === "c1"
-          ? { embedded: 1, skipped: 0, failed: 0, batches: 1 }
-          : { embedded: 0, skipped: 0, failed: 3, batches: 1 },
+          ? { embedded: 1, skipped: 0, failed: 0, batches: 1, alreadyIndexed: 0, deferred: 0 }
+          : { embedded: 0, skipped: 0, failed: 3, batches: 1, alreadyIndexed: 0, deferred: 0 },
     );
 
     await pollDiffs(REPO, env, stub);
@@ -512,6 +530,251 @@ describe("poller: pollDiffs forward watermark / retry boundary", () => {
     expect(Date.parse(watermarks.get(FORWARD_KEY)!)).toBeGreaterThanOrEqual(
       Date.parse(wm),
     );
+  });
+});
+
+describe("poller: diffFileBudgetPerPhase", () => {
+  /** Subrequests the surface would spend in the worst case at a given repo count,
+   *  reproducing the arithmetic the constants document: every phase of every repo
+   *  fills its file budget, and each file costs 3 plus the phase's fixed overhead. */
+  const worstCaseSubrequests = (repoCount: number): number =>
+    repoCount * 2 * (diffFileBudgetPerPhase(repoCount) * 3 + 20);
+
+  it("keeps the whole invocation inside the 1000-subrequest ceiling", () => {
+    // The production list is 6. The ceiling holds up to 14 repos; past that the
+    // floor below wins on purpose and the overrun is preferred to a stall.
+    for (const repoCount of [1, 2, 3, 5, 6, 8, 10, 12, 14]) {
+      expect(worstCaseSubrequests(repoCount)).toBeLessThanOrEqual(1000);
+    }
+  });
+
+  it("shrinks the per-phase budget as repos are appended", () => {
+    // The defect this replaces: a literal cap sized against the repo list of the
+    // day, overrun silently by the next config commit that appends a repo.
+    expect(diffFileBudgetPerPhase(1)).toBeGreaterThan(diffFileBudgetPerPhase(6));
+    expect(diffFileBudgetPerPhase(6)).toBeGreaterThan(diffFileBudgetPerPhase(12));
+  });
+
+  it("clears the 44-file commit that holds the production watermark", () => {
+    // neuron-graph-rag@92eb94d, 44 files, at the production repo count. One run
+    // must not have to clear it in one pass — but it must make progress, so the
+    // budget has to be a usable fraction of it rather than a token few files.
+    expect(diffFileBudgetPerPhase(6)).toBeGreaterThanOrEqual(10);
+    expect(diffFileBudgetPerPhase(6)).toBeLessThan(44);
+  });
+
+  it("never returns a budget of zero, however long the repo list", () => {
+    // Zero would stall every diff watermark permanently — the failure shape the
+    // budget exists to remove. Overrunning the subrequest ceiling is recoverable
+    // on the next cron; a permanent stall is not.
+    for (const repoCount of [40, 400, 4000]) {
+      expect(diffFileBudgetPerPhase(repoCount)).toBeGreaterThanOrEqual(5);
+    }
+    expect(diffFileBudgetPerPhase(0)).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("poller: parsePollRepos", () => {
+  it("reads the list the cron dispatch walks", () => {
+    expect(parsePollRepos({ POLL_REPOS: " a/b , c/d ,, " } as unknown as Env)).toEqual([
+      "a/b",
+      "c/d",
+    ]);
+    expect(parsePollRepos({} as unknown as Env)).toEqual([]);
+  });
+});
+
+describe("poller: pollDiffs per-run file budget", () => {
+  /** Repo list long enough to drive the per-phase budget to its floor of 5, so the
+   *  split is exercised with a commit of a size the tests can spell out. */
+  const budgetEnv = {
+    GITHUB_TOKEN: "test-token",
+    POLL_REPOS: Array.from({ length: 40 }, (_, i) => `acme/r${i}`).join(","),
+  } as unknown as Env;
+
+  const FILE_BUDGET = 5;
+
+  /**
+   * Wire the pipeline mocks so a named commit carries `fileCount` files and the
+   * pipeline honours the bound and the resume set exactly as the real one does.
+   *
+   * The split arithmetic is reproduced rather than stubbed to a constant: what is
+   * under test is that the poller's budget, its resume query and the watermark
+   * invariant compose into a commit that finishes, and a stub that always claimed
+   * progress would pass whether or not they do.
+   */
+  function stubSplitPipeline(
+    fileCounts: Record<string, number>,
+    diffPaths: Map<string, Set<string>>,
+  ): void {
+    fetchCommitDetailMock.mockImplementation(async (_repo: string, sha: string) => ({
+      sha,
+      commit: { message: "m" },
+      files: Array.from({ length: fileCounts[sha] ?? 0 }, (_, i) => ({
+        filename: `src/${sha}-f${i}.ts`,
+        status: "modified",
+        patch: "p",
+      })),
+    }));
+    processAndUpsertCommitDiffMock.mockImplementation(
+      async (
+        _env: unknown,
+        _stub: unknown,
+        repo: string,
+        detail: { sha: string; files?: Array<{ filename: string }> },
+        options: { maxFiles?: number; indexedFilePaths?: ReadonlySet<string> } = {},
+      ) => {
+        const all = (detail.files ?? []).map((f) => f.filename);
+        const pending = all.filter((p) => !options.indexedFilePaths?.has(p));
+        const taken = pending.slice(0, options.maxFiles ?? pending.length);
+        const key = `${repo}@${detail.sha}`;
+        const landed = diffPaths.get(key) ?? new Set<string>();
+        for (const p of taken) landed.add(p);
+        diffPaths.set(key, landed);
+        return {
+          embedded: taken.length,
+          skipped: 0,
+          failed: 0,
+          batches: taken.length > 0 ? 1 : 0,
+          alreadyIndexed: all.length - pending.length,
+          deferred: pending.length - taken.length,
+        };
+      },
+    );
+  }
+
+  it("bounds one commit's files per run and finishes it over successive runs", async () => {
+    const heavy = "big";
+    const { stub, watermarks, diffPaths, diffListCalls } = makeStore({
+      [FORWARD_KEY]: "2026-07-01T00:00:00.000Z",
+      [BACKFILL_KEY]: "2026-06-01T00:00:00.000Z",
+    });
+    stubCommitList([commit(heavy, "2026-07-01T01:00:00.000Z")]);
+    // 12 files against a per-phase budget of 5 — three runs to drain.
+    stubSplitPipeline({ [heavy]: 12 }, diffPaths);
+
+    const indexedAfterEachRun: number[] = [];
+    for (let run = 0; run < 3; run++) {
+      await pollDiffs(REPO, budgetEnv, stub);
+      indexedAfterEachRun.push(diffPaths.get(`${REPO}@${heavy}`)!.size);
+    }
+
+    // Monotonic progress, never more than the budget in one run.
+    expect(indexedAfterEachRun).toEqual([FILE_BUDGET, FILE_BUDGET * 2, 12]);
+    // The resume set is read for the oversized commit, which is what makes each
+    // run continue rather than re-index the same leading files.
+    expect(diffListCalls).toContain(heavy);
+    // The watermark stayed put while the commit was mid-split, and moves only once
+    // its last file is indexed.
+    expect(Date.parse(watermarks.get(FORWARD_KEY)!)).toBeGreaterThan(
+      Date.parse("2026-07-01T01:00:00.000Z"),
+    );
+  });
+
+  it("holds the watermark on the run that only partly indexed the commit", async () => {
+    const heavy = "big";
+    const start = "2026-07-01T00:00:00.000Z";
+    const { stub, watermarks, diffPaths } = makeStore({
+      [FORWARD_KEY]: start,
+      [BACKFILL_KEY]: "2026-06-01T00:00:00.000Z",
+    });
+    stubCommitList([commit(heavy, "2026-07-01T01:00:00.000Z")]);
+    stubSplitPipeline({ [heavy]: 12 }, diffPaths);
+
+    await pollDiffs(REPO, budgetEnv, stub);
+
+    // Parked before the commit, exactly as for a failed one — a partial commit is
+    // not ingested, so nothing may pass it.
+    const wm = watermarks.get(FORWARD_KEY)!;
+    expect(Date.parse(wm)).toBeLessThan(Date.parse("2026-07-01T01:00:00.000Z"));
+    expect(Date.parse(wm)).toBeGreaterThanOrEqual(Date.parse(start));
+  });
+
+  it("defers the commits after the one that spent the budget", async () => {
+    const heavy = "big";
+    const { stub, diffPaths } = makeStore({
+      [FORWARD_KEY]: "2026-07-01T00:00:00.000Z",
+      [BACKFILL_KEY]: "2026-06-01T00:00:00.000Z",
+    });
+    stubCommitList([
+      commit(heavy, "2026-07-01T01:00:00.000Z"),
+      commit("after1", "2026-07-01T02:00:00.000Z"),
+      commit("after2", "2026-07-01T03:00:00.000Z"),
+    ]);
+    stubSplitPipeline({ [heavy]: 12 }, diffPaths);
+
+    await pollDiffs(REPO, budgetEnv, stub);
+
+    // The oldest commit alone spent the phase's budget, so the run stops there
+    // instead of fanning out past the invocation's subrequest ceiling.
+    expect(attemptedShas()).toEqual([heavy]);
+  });
+
+  it("spends no resume query on a commit that fits the budget", async () => {
+    const { stub, diffPaths, diffListCalls } = makeStore({
+      [FORWARD_KEY]: "2026-07-01T00:00:00.000Z",
+      [BACKFILL_KEY]: "2026-06-01T00:00:00.000Z",
+    });
+    stubCommitList([commit("small", "2026-07-01T01:00:00.000Z")]);
+    stubSplitPipeline({ small: 3 }, diffPaths);
+
+    await pollDiffs(REPO, budgetEnv, stub);
+
+    expect(diffListCalls).toEqual([]);
+    expect(diffPaths.get(`${REPO}@small`)!.size).toBe(3);
+  });
+
+  it("gives the backfill phase its own budget rather than the forward phase's leftovers", async () => {
+    // A repo whose forward window is busy would otherwise starve its historical
+    // sweep for good, since the forward phase runs first.
+    const { stub, diffPaths } = makeStore({
+      // Forward window is (00:45, now] — `old` sits below it, so only the backfill
+      // phase can reach it. Backfill walks `until=00:30`.
+      [FORWARD_KEY]: "2026-07-01T00:45:00.000Z",
+      [BACKFILL_KEY]: "2026-07-01T00:30:00.000Z",
+    });
+    stubCommitList([
+      commit("fwdheavy", "2026-07-01T01:00:00.000Z"),
+      commit("old", "2026-07-01T00:10:00.000Z"),
+    ]);
+    stubSplitPipeline({ fwdheavy: 12, old: 4 }, diffPaths);
+
+    await pollDiffs(REPO, budgetEnv, stub);
+
+    // Forward spent its whole budget on `fwdheavy` and still had nothing left, yet
+    // backfill indexed `old` in full — the two budgets are separate.
+    expect(diffPaths.get(`${REPO}@fwdheavy`)!.size).toBe(FILE_BUDGET);
+    expect(diffPaths.get(`${REPO}@old`)!.size).toBe(4);
+  });
+
+  it("treats a failed resume query as an unfinished commit", async () => {
+    const heavy = "big";
+    const start = "2026-07-01T00:00:00.000Z";
+    const base = makeStore({
+      [FORWARD_KEY]: start,
+      [BACKFILL_KEY]: "2026-06-01T00:00:00.000Z",
+    });
+    // The whole store surface, except `/diffs` is broken. An empty resume set would
+    // read as "nothing indexed yet" and silently restart the commit every run, so
+    // the query failing has to count as the commit failing.
+    const stub = {
+      async fetch(request: Request): Promise<Response> {
+        const url = new URL(request.url);
+        if (url.pathname === "/diffs") return new Response("boom", { status: 500 });
+        return base.stub.fetch(request);
+      },
+    } as unknown as DurableObjectStub;
+    stubCommitList([commit(heavy, "2026-07-01T01:00:00.000Z")]);
+    stubSplitPipeline({ [heavy]: 12 }, base.diffPaths);
+
+    await pollDiffs(REPO, budgetEnv, stub);
+
+    // Nothing was indexed, and the watermark is parked below the commit so the
+    // next run re-covers it.
+    expect(base.diffPaths.has(`${REPO}@${heavy}`)).toBe(false);
+    const wm = base.watermarks.get(FORWARD_KEY)!;
+    expect(Date.parse(wm)).toBeLessThan(Date.parse("2026-07-01T01:00:00.000Z"));
+    expect(Date.parse(wm)).toBeGreaterThanOrEqual(Date.parse(start));
   });
 });
 

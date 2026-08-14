@@ -212,7 +212,8 @@ POST /admin/diff-watermark?repo=owner/repo&since=2026-07-06T00:00:00Z
 
 運用上の注意:
 
-- 追いつき速度は 1 repo あたり 1 run 5 commits（毎時 `:30` なので約 120 commits/日）。数週間分の欠損は数日かかる
+- 追いつき速度は 1 repo 1 run あたり 2 軸で決まる: commit 数 5 件と、`POLL_REPOS` の repo 数から導出される phase ごとの file 予算（6 repo なら各 18 file 前後）。毎時 `:30` なので、commit が小さい範囲では約 120 commits/日、file 数が多い commit では遅くなる——予算を超える commit は複数 run に分割され、最後の file が index されるまでその watermark は止まる。数週間分の欠損は数日かかる
+- worker log の `{repo} diffs: ... [processed=.., partial=.., failed=.., deferred=..]` 行は 3 者を区別する: `partial` は分割途中の commit、`deferred` はその run が到達しなかった commit で、いずれもエラーではない
 - 再走査中も新規 commit は影響を受けない（webhook 経路が即時 index する）
 - upsert は `(repo, commit_sha, file_path)` で idempotent なので、index 済み期間を再走査しても安全
 - 進捗は worker log の `{repo} diffs: forward [...]` 行、または該当期間を `type: "diff"` で検索して確認する

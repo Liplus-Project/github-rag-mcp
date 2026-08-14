@@ -74,7 +74,14 @@ describe("embed-diff: the batch axis is the token budget, not the file count", (
 
     const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
 
-    expect(result).toEqual({ embedded: 30, skipped: 0, failed: 0, batches: 1 });
+    expect(result).toEqual({
+      embedded: 30,
+      skipped: 0,
+      failed: 0,
+      batches: 1,
+      alreadyIndexed: 0,
+      deferred: 0,
+    });
     expect(aiCalls).toHaveLength(1);
     expect(aiCalls[0]).toHaveLength(30);
   });
@@ -146,7 +153,123 @@ describe("embed-diff: the batch axis is the token budget, not the file count", (
 
     const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
 
-    expect(result).toEqual({ embedded: 1, skipped: 1, failed: 0, batches: 1 });
+    expect(result).toEqual({
+      embedded: 1,
+      skipped: 1,
+      failed: 0,
+      batches: 1,
+      alreadyIndexed: 0,
+      deferred: 0,
+    });
     expect(aiCalls[0]).toHaveLength(1);
+  });
+});
+
+describe("embed-diff: a file-heavy commit is split across runs, not thinned", () => {
+  it("indexes up to maxFiles and reports the rest as deferred", async () => {
+    const { env, aiCalls, upsertedIds } = mkEnv();
+    const commit = mkCommit(
+      Array.from({ length: 44 }, (_, i) => `@@ -1 +1 @@\n+line ${i}`),
+    );
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit, {
+      maxFiles: 18,
+    });
+
+    expect(result.embedded).toBe(18);
+    expect(result.deferred).toBe(26);
+    expect(result.failed).toBe(0);
+    // The bound is on files indexed, not on files seen: nothing past it is touched.
+    expect(aiCalls.flat()).toHaveLength(18);
+    expect(upsertedIds.flat()).toHaveLength(18);
+  });
+
+  it("takes the leading files first so the split has a stable order", async () => {
+    const { env, aiCalls } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 5 }, (_, i) => `patch ${i}`));
+
+    await processAndUpsertCommitDiff(env, mkStore(), REPO, commit, { maxFiles: 2 });
+
+    // Input format is "{message}\n\n{path}\n\n{patch}".
+    const paths = aiCalls.flat().map((text) => text.split("\n\n")[1]);
+    expect(paths).toEqual(["src/file-0.ts", "src/file-1.ts"]);
+  });
+
+  it("resumes past the files a previous run already indexed", async () => {
+    const { env, aiCalls } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 5 }, (_, i) => `patch ${i}`));
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit, {
+      maxFiles: 2,
+      indexedFilePaths: new Set(["src/file-0.ts", "src/file-1.ts"]),
+    });
+
+    const paths = aiCalls.flat().map((text) => text.split("\n\n")[1]);
+    expect(paths).toEqual(["src/file-2.ts", "src/file-3.ts"]);
+    expect(result.alreadyIndexed).toBe(2);
+    expect(result.embedded).toBe(2);
+    expect(result.deferred).toBe(1);
+  });
+
+  it("closes the split — the last run reports nothing deferred", async () => {
+    // Repeated bounded calls, each fed the paths the previous ones landed, must
+    // reach every file exactly once. A resume set that failed to shrink the pending
+    // list would loop on the same prefix and never report deferred=0.
+    const { env } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 7 }, (_, i) => `patch ${i}`));
+    const indexed = new Set<string>();
+    let runs = 0;
+    let last!: Awaited<ReturnType<typeof processAndUpsertCommitDiff>>;
+
+    do {
+      if (runs++ > 10) throw new Error("split did not converge");
+      last = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit, {
+        maxFiles: 3,
+        indexedFilePaths: new Set(indexed),
+      });
+      for (let i = 0; i < last.embedded; i++) {
+        indexed.add(`src/file-${indexed.size}.ts`);
+      }
+    } while (last.deferred > 0);
+
+    expect(runs).toBe(3);
+    expect(indexed.size).toBe(7);
+    expect(last.deferred).toBe(0);
+  });
+
+  it("leaves the unbounded call untouched (the webhook path)", async () => {
+    const { env, aiCalls } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 12 }, (_, i) => `patch ${i}`));
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
+
+    expect(result.embedded).toBe(12);
+    expect(result.deferred).toBe(0);
+    expect(result.alreadyIndexed).toBe(0);
+    expect(aiCalls.flat()).toHaveLength(12);
+  });
+
+  it("reports a fully-indexed commit as done rather than re-embedding it", async () => {
+    const { env, aiCalls } = mkEnv();
+    const commit = mkCommit(Array.from({ length: 3 }, (_, i) => `patch ${i}`));
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit, {
+      maxFiles: 2,
+      indexedFilePaths: new Set([
+        "src/file-0.ts",
+        "src/file-1.ts",
+        "src/file-2.ts",
+      ]),
+    });
+
+    expect(result).toEqual({
+      embedded: 0,
+      skipped: 0,
+      failed: 0,
+      batches: 0,
+      alreadyIndexed: 3,
+      deferred: 0,
+    });
+    expect(aiCalls).toHaveLength(0);
   });
 });

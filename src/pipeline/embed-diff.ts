@@ -44,6 +44,25 @@ export interface DiffUpsertResult {
   failed: number;
   /** Number of Workers AI batch calls issued (for observability) */
   batches: number;
+  /** Files the caller's `indexedFilePaths` set already listed, so this call left
+   *  them alone. Zero when the caller passed no resume set. */
+  alreadyIndexed: number;
+  /** Files with a patch, not in the resume set, that `maxFiles` kept this call
+   *  from attempting. Non-zero means the commit is *partially* indexed and the
+   *  caller must not treat it as done. Zero when the caller set no bound. */
+  deferred: number;
+}
+
+/** Bounds a single `processAndUpsertCommitDiff` call. Both fields absent = index
+ *  every file with a patch, which is what the webhook path wants: it handles one
+ *  push per invocation and has the whole subrequest budget to itself. */
+export interface DiffUpsertOptions {
+  /** Upper bound on files this call indexes. Files past it are reported as
+   *  `deferred` rather than dropped — the caller resumes them on a later run. */
+  maxFiles?: number;
+  /** File paths already on the index for this commit. Passing them is what makes
+   *  a bounded call *resume* instead of re-indexing the same prefix forever. */
+  indexedFilePaths?: ReadonlySet<string>;
 }
 
 /**
@@ -103,19 +122,28 @@ function normaliseFileStatus(status: string): DiffFileStatus {
  *
  * Flow:
  *   1. Filter `files[]` to those with a textual `patch` (binary / oversized files are skipped).
- *   2. Build embedding inputs = commit message + file path + patch, truncated.
- *   3. Batch-embed inputs via Workers AI (chunked by `planEmbeddingBatches`, which
+ *   2. Drop files the caller's `indexedFilePaths` resume set already lists, then
+ *      take at most `options.maxFiles` of what remains.
+ *   3. Build embedding inputs = commit message + file path + patch, truncated.
+ *   4. Batch-embed inputs via Workers AI (chunked by `planEmbeddingBatches`, which
  *      splits on an estimated token budget rather than a file count).
- *   4. Upsert all vectors into Vectorize in the same chunks.
- *   5. Record DiffRecord rows into the Durable Object store for each indexed file.
+ *   5. Upsert all vectors into Vectorize in the same chunks.
+ *   6. Record DiffRecord rows into the Durable Object store for each indexed file.
  *
  * Failures inside a chunk do not halt subsequent chunks — counts are tallied and
  * returned so the caller can log/escalate without losing partial progress.
+ *
+ * `maxFiles` splits a commit across runs; it never thins one. Every file with a
+ * patch is either indexed by this call or counted in `deferred` for the caller to
+ * resume, and the two step 2 filters are what make repeated calls converge:
+ * without the resume set a bounded call re-indexes the same prefix every run and
+ * the commit never finishes (issue #238).
  *
  * @param env - Worker env bindings (AI, VECTORIZE)
  * @param storeStub - Durable Object stub for IssueStore
  * @param repo - Repository in "owner/repo" format
  * @param commit - Commit detail from GitHub (from GET /repos/{repo}/commits/{sha})
+ * @param options - Per-call file bound and resume set; unbounded when omitted
  * @returns Summary of embeddings/upserts produced
  */
 export async function processAndUpsertCommitDiff(
@@ -123,6 +151,7 @@ export async function processAndUpsertCommitDiff(
   storeStub: DurableObjectStub,
   repo: string,
   commit: GitHubCommitDetail,
+  options: DiffUpsertOptions = {},
 ): Promise<DiffUpsertResult> {
   const commitSha = commit.sha;
   const commitMessage = commit.commit.message ?? "";
@@ -137,14 +166,26 @@ export async function processAndUpsertCommitDiff(
 
   // Keep only files with a textual patch. Binary blobs, submodule changes, and
   // oversized diffs arrive without a patch field and cannot be embedded.
-  const indexable = files.filter(
+  const withPatch = files.filter(
     (f): f is typeof f & { patch: string } =>
       typeof f.patch === "string" && f.patch.length > 0,
   );
-  const skipped = files.length - indexable.length;
+  const skipped = files.length - withPatch.length;
+
+  // Resume: an earlier run of a split commit already landed these.
+  const indexedPaths = options.indexedFilePaths;
+  const pending = indexedPaths
+    ? withPatch.filter((f) => !indexedPaths.has(f.filename))
+    : withPatch;
+  const alreadyIndexed = withPatch.length - pending.length;
+
+  // Bound what this call attempts. The remainder is reported, not dropped.
+  const limit = Math.max(0, options.maxFiles ?? pending.length);
+  const indexable = pending.slice(0, limit);
+  const deferred = pending.length - indexable.length;
 
   if (indexable.length === 0) {
-    return { embedded: 0, skipped, failed: 0, batches: 0 };
+    return { embedded: 0, skipped, failed: 0, batches: 0, alreadyIndexed, deferred };
   }
 
   let embedded = 0;
@@ -311,5 +352,5 @@ export async function processAndUpsertCommitDiff(
     embedded += chunk.length;
   }
 
-  return { embedded, skipped, failed, batches };
+  return { embedded, skipped, failed, batches, alreadyIndexed, deferred };
 }

@@ -188,11 +188,17 @@ commit diff poller は 2-phase 構成:
 - **forward phase** — `(lastPolledAt, pollStartTime]` の window を列挙し、その中の**古い側から**取り込む（webhook 取りこぼし時の redundancy）。watermark namespace は `diffs:${repo}`。
 - **backward phase** — `until=oldestUnprocessedDate` で履歴を徐々に遡行する（新規 deployment や webhook 起動前の commit を backfill する経路）。watermark namespace は `diffs_backfill:${repo}`。
 
-1 run あたりの取り込み上限は forward / backward それぞれ 5 commits。`processAndUpsertCommitDiff` の upsert は `(repo, commit_sha, file_path)` で idempotent なので、webhook / 両 phase 間で overlap しても副作用はない。
+1 repo 1 run あたりの上限は、各 phase が 2 軸で持つ: commit 数 5 件と、file 数 `diffFileBudgetPerPhase`。`processAndUpsertCommitDiff` の upsert は `(repo, commit_sha, file_path)` で idempotent なので、webhook / 両 phase 間で overlap しても副作用はない。
 
-両 phase は同一の watermark 不変条件に従う: **取り込みに成功していない commit を watermark が追い越さない。** commit が「取り込み済み」とみなされるのは、detail 取得が成功し、かつ `processAndUpsertCommitDiff` の failed が 0 の場合のみ（embedding / Vectorize の失敗は throw ではなく戻り値で報告されるため、戻り値も判定に含める）。判定は dense 側のみを見る: D1 FTS mirror / store row の失敗は pipeline 側で log のみ・failed に計上しない設計で、vector は既に landing 済み・sparse index は reindex で reconcile されるため。mirror 側まで watermark の条件にすると、FTS 側の障害が diff surface 全体を止めてしまう。帰結:
+commit 数は phase の消費量を縛れない。1 file の index は worst case で 3 subrequest（D1 FTS mirror 書き込み、store row、および embed batch の按分——1 batch は 2 subrequest を使い、`MAX_EMBEDDING_INPUT_CHARS` が 1 input を 8000 文字に切る一方 batch 予算は 30000 token なので、1 batch は最低 3 file を載せる）であり、1 commit は最大 300 file を運ぶため、5 commits のコストは 2 桁の幅を持つ。実測された帰結: `POLL_REPOS` の末尾 repo にある 44 file の commit で、embed batch 3 本すべてが `Too many subrequests by single Worker invocation` で拒否された。同じ loop の手前にある repo は正常に index されていた。そして後述の不変条件がその commit で watermark を止める——token 軸が起こしたのとまったく同じ、毎 cron 決定論的に再現する停止が、file 軸で起きた（issue #238）。
 
-- 失敗した commit と、1 run 上限で持ち越された commit は、次回 run の window に残る
+そこで diff surface は invocation 予算のうち自分の取り分を明示する: `DIFF_SUBREQUEST_BUDGET_PER_RUN` = Cloudflare が許す 1000 のうち 900。diffs は専用 cron を持つので、この天井を docs / wiki / issue / release と共有はしていない。しかし `POLL_REPOS` の全 repo と両 phase では共有しており、上記の失敗を生んだのはそちらの共有である。`diffFileBudgetPerPhase` は宣言した取り分を `repoCount × 2` で割り、残りを file 数に換算する。literal を固定せず repo list から導出するのは意図的である: `POLL_REPOS` は通常の config commit で増える（issue #233 が 6 番目の repo を追加した）ため、その日の list に合わせた literal は次の追加で天井を超え、しかもその超過は原因となった変更ではなく loop が最後に到達した repo の失敗として現れる。repo list が長く予算を下回るところまで割った場合は 5 file の下限が効く——超過は次の cron が再試行するが、予算 0 は全 diff watermark を恒久的に止める。それはいま取り除こうとしている失敗そのものである。
+
+file 予算は 1 commit を複数 run に分割しうる。間引きはしない: 1 run は残っている file の先頭側を index し、次の run は structured store（`GET /diffs`）から index 済み path を読み戻してそこから続ける。この読み戻しが分割を収束させる——これが無いと、上限付きの run が毎 cron 同じ先頭側を再 index し、その commit は永遠に完了しない。読み戻しを行うのは file 数が予算を超える commit だけなので、通常の commit はその判定に subrequest を払わない。またこの読み戻しが store 側エラーで失敗した場合は「まだ何も index されていない」と読むのではなく commit の失敗として扱う。前者は分割を黙って先頭からやり直させてしまう。
+
+両 phase は同一の watermark 不変条件に従う: **取り込みに成功していない commit を watermark が追い越さない。** commit が「取り込み済み」とみなされるのは、detail 取得が成功し、かつ `processAndUpsertCommitDiff` の failed が 0 で、**さらに未処理の file が残っていない**場合のみ（embedding / Vectorize の失敗は throw ではなく戻り値で報告されるため、戻り値も判定に含める）。判定は dense 側のみを見る: D1 FTS mirror / store row の失敗は pipeline 側で log のみ・failed に計上しない設計で、vector は既に landing 済み・sparse index は reindex で reconcile されるため。mirror 側まで watermark の条件にすると、FTS 側の障害が diff surface 全体を止めてしまう。帰結:
+
+- 失敗した commit、file 予算で一部しか index されなかった commit、そして 2 つの 1 run 上限のいずれかで持ち越された commit は、いずれも次回 run の window に残る。一部だけ index された commit はエラーではなく分割の途中であり、watermark を止めることが残りの file への到達性を保つ
 - commit list 取得が失敗した run は watermark を動かさないので、その期間全体が再試行対象のまま残る
 - forward phase は window の古い端を確定してからでないと watermark を進められないため、window は 100 件/page で列挙する。page が満杯なら「列挙不能」とみなして window 終端を半分に縮める（最大 8 回）。それでも収まらない場合は watermark を保持して log に出す — silent な欠損より、観測できる stall を選ぶ。
 

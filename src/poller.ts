@@ -170,16 +170,85 @@ export const MAX_RELEASE_UPSERTS_PER_REPO_PER_RUN = 10;
  *  of the diff poller per repo per run.
  *  Forward is normally a no-op because the webhook path already indexes new
  *  commits; this cap bounds the work when webhook delivery has stalled.
- *  Sized so that (forward + backward) × per-commit fan-out stays well under the
- *  Cloudflare Workers per-invocation subrequest limit (issue #124). */
+ *
+ *  A commit count is not what bounds the phase's subrequest spend — a commit
+ *  carries up to 300 files and each costs several subrequests, so 5 commits span
+ *  two orders of magnitude of cost (issue #238). `diffFileBudgetPerPhase` holds
+ *  that axis. This cap holds the GitHub-side one: detail fetches, and how far a
+ *  single run may walk the window (issue #124). */
 const MAX_DIFF_COMMITS_FORWARD_PER_RUN = 5;
 
 /** Maximum number of commits fetched in the backward (historical backfill) phase
  *  of the diff poller per repo per run.
  *  Backfill walks backward through repo history one hourly run at a time; the
- *  cap keeps per-run API and embedding cost bounded so the total sweep spreads
- *  over many runs (e.g. 5 commits/run × 24 runs/day = 120 commits/day per repo). */
+ *  cap keeps per-run API cost bounded so the total sweep spreads over many runs
+ *  (e.g. 5 commits/run × 24 runs/day = 120 commits/day per repo). Doubles as the
+ *  listing's `per_page`. The embedding and upsert cost of those commits is bounded
+ *  on the file axis by `diffFileBudgetPerPhase`, not here. */
 const MAX_DIFF_COMMITS_BACKWARD_PER_RUN = 5;
+
+/** Subrequests the commit-diff surface may spend in one `DIFFS_CRON` invocation.
+ *
+ *  Cloudflare allows 1000 per invocation. Diffs get a cron of their own, so the
+ *  surface is not sharing that ceiling with docs / wiki / issues / releases — but
+ *  it *is* sharing it across every repo in `POLL_REPOS` and both phases, which is
+ *  the sharing that actually bit: a 44-file commit in the last repo of the list
+ *  had all three of its embed batches rejected with `Too many subrequests by
+ *  single Worker invocation` while the repos ahead of it in the loop indexed
+ *  normally (issue #238). 900 of the 1000 leaves the margin for the dispatch
+ *  itself and for the estimates below coming in low.
+ *
+ *  This constant is the diff path's declared share. `diffFileBudgetPerPhase`
+ *  turns it into the per-phase file cap; nothing else reads it. */
+const DIFF_SUBREQUEST_BUDGET_PER_RUN = 900;
+
+/** Subrequests one indexed file costs, worst case.
+ *
+ *  Two are fixed and per-file: the D1 FTS mirror write and the Store DO row.
+ *  The third is the amortised batch cost — a batch spends 2 (the Workers AI call
+ *  and its `VECTORIZE.upsert`) and holds at least 3 files, because
+ *  `MAX_EMBEDDING_INPUT_CHARS` caps one input at 8000 characters and
+ *  `MAX_EMBEDDING_BATCH_TOKENS` gives a batch 30000 tokens, so even CJK prose at
+ *  ~1 token per character fits 3. That puts the true figure at 2.67 and under; 3
+ *  is it rounded to the safe side. */
+const DIFF_SUBREQUESTS_PER_FILE = 3;
+
+/** Per-phase subrequests that are not per-file: up to 5 commit detail fetches,
+ *  up to 5 resume queries for oversized commits, and the commit listing — 1 call
+ *  for backfill, up to 9 for a forward window that needs shrinking. */
+const DIFF_PHASE_OVERHEAD_SUBREQUESTS = 20;
+
+/** Floor under the per-phase file budget.
+ *
+ *  A `POLL_REPOS` long enough to divide the budget below this would otherwise
+ *  drive the cap to zero, which stalls every diff watermark permanently — the
+ *  exact failure shape this issue exists to remove. Holding the floor overruns
+ *  the subrequest budget instead, and an overrun is a transient failure the next
+ *  cron retries. Choose the recoverable side. */
+const MIN_DIFF_FILES_PER_PHASE_PER_RUN = 5;
+
+/**
+ * Files one diff phase may index for one repo in one cron run.
+ *
+ * Derived rather than hard-coded because the divisor is `POLL_REPOS`, which grows
+ * by ordinary config commits (issue #233 added the sixth repo). A literal cap
+ * sized against the repo list of the day silently overruns the invocation budget
+ * the next time a repo is appended, and the overrun surfaces as failures on
+ * whichever repo the loop reaches last — not on the change that caused them.
+ *
+ * @param repoCount number of repos this invocation will walk (>=1)
+ */
+export function diffFileBudgetPerPhase(repoCount: number): number {
+  // Two phases per repo, each spending from the same invocation budget.
+  const phases = Math.max(1, repoCount) * 2;
+  const perPhase =
+    Math.floor(DIFF_SUBREQUEST_BUDGET_PER_RUN / phases) -
+    DIFF_PHASE_OVERHEAD_SUBREQUESTS;
+  return Math.max(
+    MIN_DIFF_FILES_PER_PHASE_PER_RUN,
+    Math.floor(perPhase / DIFF_SUBREQUESTS_PER_FILE),
+  );
+}
 
 /** Page size used when the forward diff phase enumerates its commit window.
  *  Listing is 1 subrequest regardless of page size, while the per-commit
@@ -2379,6 +2448,42 @@ async function writeWatermark(
   );
 }
 
+/**
+ * Read the file paths already indexed for one commit, from the structured store.
+ *
+ * This is the resume set for a commit the phase's file budget has to split across
+ * runs. Without it a bounded run re-attempts the same prefix every cron tick and
+ * the commit never completes, so the watermark it holds never moves — the same
+ * permanent stall the budget was added to prevent, reached from the other side.
+ *
+ * Throws rather than returning an empty set on a store error: an empty set reads
+ * as "nothing indexed yet" and would silently restart the commit from its first
+ * file. The caller counts the throw as a failed commit and retries next run.
+ */
+async function listIndexedDiffPaths(
+  storeStub: DurableObjectStub,
+  repo: string,
+  commitSha: string,
+): Promise<Set<string>> {
+  const resp = await storeStub.fetch(
+    new Request(
+      `http://store/diffs?repo=${encodeURIComponent(repo)}` +
+        `&commit_sha=${encodeURIComponent(commitSha)}`,
+    ),
+  );
+  if (!resp.ok) {
+    throw new Error(
+      `store /diffs returned ${resp.status} for ${repo}@${commitSha}`,
+    );
+  }
+  const rows = (await resp.json()) as Array<{ filePath?: string }>;
+  const paths = new Set<string>();
+  for (const row of rows) {
+    if (row.filePath) paths.add(row.filePath);
+  }
+  return paths;
+}
+
 /** Extract the best-available ISO timestamp from a commit summary. */
 function commitDateOf(summary: GitHubCommitSummary): string | undefined {
   return (
@@ -2394,10 +2499,17 @@ function commitDateOf(summary: GitHubCommitSummary): string | undefined {
  * - `ok`       — the commit's every indexable file landed in Vectorize.
  * - `failed`   — the detail fetch, an embedding batch, or a Vectorize upsert
  *                failed for at least one file; the commit must stay retryable.
+ * - `partial`  — every file this run attempted landed, but the phase's file budget
+ *                left some of the commit's files unattempted. Not an error: the
+ *                commit is mid-split and the rest lands on a later run.
  * - `deferred` — the commit was inside the enumerated window but was not
- *                attempted this run (per-run commit cap).
+ *                attempted this run (per-run commit cap, or file budget spent).
+ *
+ * Only `ok` lets a watermark past. `partial` sits with `failed` and `deferred` on
+ * that axis, which is what keeps a split commit inside the next run's window until
+ * its last file is indexed.
  */
-export type DiffCommitStatus = "ok" | "failed" | "deferred";
+export type DiffCommitStatus = "ok" | "failed" | "partial" | "deferred";
 
 /** One commit's outcome, in the order the phase walked its commits. */
 export interface DiffCommitOutcome {
@@ -2405,6 +2517,9 @@ export interface DiffCommitOutcome {
   /** Commit timestamp; absent when GitHub returned neither author nor committer date. */
   date?: string;
   status: DiffCommitStatus;
+  /** Files this run attempted for the commit — what it spent from the phase's file
+   *  budget. Absent for a commit the phase never attempted. */
+  filesAttempted?: number;
 }
 
 /**
@@ -2416,6 +2531,10 @@ export interface DiffCommitOutcome {
  * failed — or that the per-run cap deferred — fell out of every subsequent
  * `since` window and was lost permanently (the backward phase only walks into
  * older history and never returns to that period).
+ *
+ * The test is `status !== "ok"`, so a commit the file budget only partly indexed
+ * bounds the watermark on the same footing as a failed one. That is what lets the
+ * budget split a commit without the split losing files (issue #238).
  *
  * @param since      watermark the phase started from (lower bound, never regressed)
  * @param windowEnd  upper bound of the window that was fully enumerated
@@ -2455,7 +2574,8 @@ export function nextForwardDiffWatermark(
  * Mirror image of the forward invariant: **the backfill watermark never moves
  * past the newest commit that has not been successfully ingested.** The phase
  * walks newest-first, so the watermark may only advance across the contiguous
- * successful prefix; the first failure freezes it, keeping that commit inside
+ * successful prefix; the first commit that is not `ok` — failed, partially
+ * indexed, or deferred — freezes it, keeping that commit inside
  * the next run's `until` window. Commits already ingested after the freeze
  * point are re-ingested next run, which is bounded by the per-run cap and
  * idempotent on (repo, commit_sha, file_path).
@@ -2549,32 +2669,63 @@ async function enumerateForwardWindow(
  * deliberately not counted, because the Vectorize upsert has already landed and
  * the sparse index reconciles on reindex. Gating the watermark on the sparse
  * mirror would let an FTS-side outage stall the whole diff surface.
+ *
+ * `fileBudget` is what the phase has left to spend. A commit carrying more files
+ * than that is indexed up to the bound and reported `partial`; the resume set read
+ * here is what makes the next run continue rather than restart it.
  */
 async function ingestCommitDiff(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
   summary: GitHubCommitSummary,
+  fileBudget: number,
 ): Promise<DiffCommitOutcome> {
   const date = commitDateOf(summary);
   try {
     const detail = await fetchCommitDetail(repo, summary.sha, env.GITHUB_TOKEN);
-    const result = await processAndUpsertCommitDiff(env, storeStub, repo, detail);
+
+    // Only a commit that cannot fit the budget needs the resume set, and the test
+    // uses the raw file count — an upper bound on the indexable ones — so a commit
+    // that fits spends no subrequest finding that out. The count is a property of
+    // the commit, so the test answers the same on the run that finishes a split
+    // commit as on the run that started it.
+    const fileCount = detail.files?.length ?? 0;
+    const indexedFilePaths =
+      fileCount > fileBudget
+        ? await listIndexedDiffPaths(storeStub, repo, summary.sha)
+        : undefined;
+
+    const result = await processAndUpsertCommitDiff(env, storeStub, repo, detail, {
+      maxFiles: fileBudget,
+      indexedFilePaths,
+    });
+    // Failed files spent their embed call, so charge them to the budget too.
+    const filesAttempted = result.embedded + result.failed;
+
     if (result.failed > 0) {
       console.error(
         `pollDiffs: ${repo}@${summary.sha} partially failed ` +
           `(embedded=${result.embedded}, failed=${result.failed}) — ` +
           `commit stays inside the retry window`,
       );
-      return { sha: summary.sha, date, status: "failed" };
+      return { sha: summary.sha, date, status: "failed", filesAttempted };
     }
-    return { sha: summary.sha, date, status: "ok" };
+    if (result.deferred > 0) {
+      console.log(
+        `pollDiffs: ${repo}@${summary.sha} split across runs ` +
+          `(indexed=${result.embedded}, already=${result.alreadyIndexed}, ` +
+          `remaining=${result.deferred}) — watermark held until the commit completes`,
+      );
+      return { sha: summary.sha, date, status: "partial", filesAttempted };
+    }
+    return { sha: summary.sha, date, status: "ok", filesAttempted };
   } catch (err) {
     console.error(
       `pollDiffs: commit ${repo}@${summary.sha} failed:`,
       err instanceof Error ? err.message : String(err),
     );
-    return { sha: summary.sha, date, status: "failed" };
+    return { sha: summary.sha, date, status: "failed", filesAttempted: 0 };
   }
 }
 
@@ -2583,24 +2734,36 @@ interface DiffPhaseStats {
   processed: number;
   failed: number;
   deferred: number;
+  /** Commits indexed up to the file budget with files still outstanding. Separate
+   *  from `failed` because nothing went wrong: the next run continues them. */
+  partial: number;
   /** Watermark did not advance this run (list failure, or an unprocessed commit at the boundary). */
   held: boolean;
+}
+
+/** Tally one commit outcome into a phase's counters. */
+function tallyDiffOutcome(stats: DiffPhaseStats, status: DiffCommitStatus): void {
+  if (status === "ok") stats.processed++;
+  else if (status === "partial") stats.partial++;
+  else if (status === "deferred") stats.deferred++;
+  else stats.failed++;
 }
 
 /**
  * Forward phase — webhook redundancy plus gap recovery.
  *
  * Enumerates `(watermark, pollStartTime]`, processes its **oldest**
- * MAX_DIFF_COMMITS_FORWARD_PER_RUN commits, and advances the watermark only
- * across the contiguous successfully-ingested prefix. Anything failed or
- * deferred stays inside the next run's window, so a burst larger than the
- * per-run cap drains over successive runs instead of being skipped.
+ * MAX_DIFF_COMMITS_FORWARD_PER_RUN commits within `fileBudget` files, and advances
+ * the watermark only across the contiguous successfully-ingested prefix. Anything
+ * failed, partial or deferred stays inside the next run's window, so a burst larger
+ * than either cap drains over successive runs instead of being skipped.
  */
 async function runForwardDiffPhase(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
   pollStartTime: string,
+  fileBudget: number,
 ): Promise<DiffPhaseStats> {
   const fwdKey = `diffs:${repo}`;
   const fwdWm = await readWatermark(storeStub, fwdKey);
@@ -2610,7 +2773,13 @@ async function runForwardDiffPhase(
     fwdWm?.lastPolledAt ??
     new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-  const stats: DiffPhaseStats = { processed: 0, failed: 0, deferred: 0, held: false };
+  const stats: DiffPhaseStats = {
+    processed: 0,
+    failed: 0,
+    deferred: 0,
+    partial: 0,
+    held: false,
+  };
 
   if (Date.parse(since) >= Date.parse(pollStartTime)) {
     console.warn(
@@ -2653,8 +2822,11 @@ async function runForwardDiffPhase(
   // over a prefix that is contiguous in commit-date order.
   const ordered = [...window.commits].reverse();
   const outcomes: DiffCommitOutcome[] = [];
+  let filesLeft = fileBudget;
   for (const summary of ordered) {
-    if (outcomes.length >= MAX_DIFF_COMMITS_FORWARD_PER_RUN) {
+    // Two independent caps, either one deferring the rest of the window: how many
+    // commits this run may walk, and how many files it may index.
+    if (outcomes.length >= MAX_DIFF_COMMITS_FORWARD_PER_RUN || filesLeft <= 0) {
       outcomes.push({
         sha: summary.sha,
         date: commitDateOf(summary),
@@ -2663,10 +2835,16 @@ async function runForwardDiffPhase(
       stats.deferred++;
       continue;
     }
-    const outcome = await ingestCommitDiff(repo, env, storeStub, summary);
+    const outcome = await ingestCommitDiff(
+      repo,
+      env,
+      storeStub,
+      summary,
+      filesLeft,
+    );
+    filesLeft -= outcome.filesAttempted ?? 0;
     outcomes.push(outcome);
-    if (outcome.status === "ok") stats.processed++;
-    else stats.failed++;
+    tallyDiffOutcome(stats, outcome.status);
   }
 
   const next = nextForwardDiffWatermark(since, window.windowEnd, outcomes);
@@ -2688,21 +2866,32 @@ async function runForwardDiffPhase(
  * Backward phase — historical backfill.
  *
  * Walks `until=watermark` into older history. The watermark advances only
- * across the contiguous successful prefix (newest-first), so a failed commit
- * stays inside the next run's window instead of being stepped over.
+ * across the contiguous successful prefix (newest-first), so a failed, partial or
+ * deferred commit stays inside the next run's window instead of being stepped over.
+ *
+ * Gets its own `fileBudget` rather than sharing one with the forward phase, which
+ * runs first: a repo whose forward window is busy would otherwise spend the whole
+ * budget every run and the historical sweep would never advance again.
  */
 async function runBackfillDiffPhase(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
   pollStartTime: string,
+  fileBudget: number,
 ): Promise<DiffPhaseStats> {
   const bwdKey = `diffs_backfill:${repo}`;
   const bwdWm = await readWatermark(storeStub, bwdKey);
   // First run: start walking backward from the current time.
   const until = bwdWm?.lastPolledAt ?? pollStartTime;
 
-  const stats: DiffPhaseStats = { processed: 0, failed: 0, deferred: 0, held: false };
+  const stats: DiffPhaseStats = {
+    processed: 0,
+    failed: 0,
+    deferred: 0,
+    partial: 0,
+    held: false,
+  };
 
   let commits: GitHubCommitSummary[];
   try {
@@ -2720,11 +2909,27 @@ async function runBackfillDiffPhase(
   }
 
   const outcomes: DiffCommitOutcome[] = [];
+  let filesLeft = fileBudget;
   for (const summary of commits) {
-    const outcome = await ingestCommitDiff(repo, env, storeStub, summary);
+    if (filesLeft <= 0) {
+      outcomes.push({
+        sha: summary.sha,
+        date: commitDateOf(summary),
+        status: "deferred",
+      });
+      stats.deferred++;
+      continue;
+    }
+    const outcome = await ingestCommitDiff(
+      repo,
+      env,
+      storeStub,
+      summary,
+      filesLeft,
+    );
+    filesLeft -= outcome.filesAttempted ?? 0;
     outcomes.push(outcome);
-    if (outcome.status === "ok") stats.processed++;
-    else stats.failed++;
+    tallyDiffOutcome(stats, outcome.status);
   }
 
   // With 0 commits returned the repo's history is exhausted (or the token lost
@@ -2769,10 +2974,17 @@ async function runBackfillDiffPhase(
  * deferred — all keep the commit inside the next run's window, so a transient
  * failure costs a retry instead of a permanent gap.
  *
- * Each phase is capped at a small commit count (see MAX_DIFF_COMMITS_*) to
- * spread cost across many cron ticks. `processAndUpsertCommitDiff` upserts
- * on the (repo, commit_sha, file_path) primary key, so overlap with webhook,
- * with the opposite phase, or with a retried commit is idempotent.
+ * Each phase is capped on two axes to spread cost across many cron ticks: a small
+ * commit count (see MAX_DIFF_COMMITS_*) and a file count
+ * (`diffFileBudgetPerPhase`). `processAndUpsertCommitDiff` upserts on the
+ * (repo, commit_sha, file_path) primary key, so overlap with webhook, with the
+ * opposite phase, or with a retried commit is idempotent.
+ *
+ * The file budget can split one commit across runs. Such a commit is `partial`,
+ * which the invariant treats exactly like `failed`: its watermark does not move
+ * until the last of its files is indexed. Nothing is thinned — a run indexes a
+ * prefix of what is left, reads the already-indexed paths back from the store on
+ * the next run, and continues from there (issue #238).
  *
  * Liveness tradeoff: a commit that fails on every attempt (e.g. a permanently
  * 5xx-ing detail fetch) blocks its phase's watermark. That is deliberate — a
@@ -2787,15 +2999,49 @@ export async function pollDiffs(
 ): Promise<void> {
   const pollStartTime = new Date().toISOString();
 
-  const fwd = await runForwardDiffPhase(repo, env, storeStub, pollStartTime);
-  const bwd = await runBackfillDiffPhase(repo, env, storeStub, pollStartTime);
+  // Every repo of this invocation draws from one subrequest budget, so the share
+  // each phase may spend depends on how many repos the invocation walks.
+  const fileBudget = diffFileBudgetPerPhase(parsePollRepos(env).length);
+
+  const fwd = await runForwardDiffPhase(
+    repo,
+    env,
+    storeStub,
+    pollStartTime,
+    fileBudget,
+  );
+  const bwd = await runBackfillDiffPhase(
+    repo,
+    env,
+    storeStub,
+    pollStartTime,
+    fileBudget,
+  );
 
   console.log(
-    `${repo} diffs: forward [processed=${fwd.processed}, failed=${fwd.failed}, ` +
-      `deferred=${fwd.deferred}, watermark=${fwd.held ? "held" : "advanced"}], ` +
-      `backward [processed=${bwd.processed}, failed=${bwd.failed}, ` +
+    `${repo} diffs (file budget ${fileBudget}/phase): ` +
+      `forward [processed=${fwd.processed}, partial=${fwd.partial}, ` +
+      `failed=${fwd.failed}, deferred=${fwd.deferred}, ` +
+      `watermark=${fwd.held ? "held" : "advanced"}], ` +
+      `backward [processed=${bwd.processed}, partial=${bwd.partial}, ` +
+      `failed=${bwd.failed}, deferred=${bwd.deferred}, ` +
       `watermark=${bwd.held ? "held" : "advanced"}]`,
   );
+}
+
+/**
+ * Repositories this invocation walks, from the `POLL_REPOS` binding.
+ *
+ * Shared by the cron dispatch and by `pollDiffs`, which needs the *count* to
+ * divide its subrequest budget: the two must agree, since a diff phase that sized
+ * its budget against a different repo list than the loop actually walks is exactly
+ * the overrun the budget exists to prevent.
+ */
+export function parsePollRepos(env: Env): string[] {
+  if (!env.POLL_REPOS) return [];
+  return env.POLL_REPOS.split(",")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0);
 }
 
 /** Cron expression that triggers the light-surface dispatch (issues / releases / docs). */
@@ -2937,11 +3183,7 @@ export async function handleScheduled(
     new Date(controller.scheduledTime).toISOString(),
   );
 
-  const repos = env.POLL_REPOS
-    ? env.POLL_REPOS.split(",")
-        .map((r) => r.trim())
-        .filter((r) => r.length > 0)
-    : [];
+  const repos = parsePollRepos(env);
 
   if (repos.length === 0) {
     console.warn("POLL_REPOS not configured — no repositories to poll");

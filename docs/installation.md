@@ -212,7 +212,8 @@ Authentication:
 
 Operational notes:
 
-- catch-up rate is 5 commits per repo per cron run (~120 commits/day at the hourly `:30` trigger), so a multi-week gap takes several days to drain
+- catch-up rate is bounded on two axes per repo per cron run: 5 commits, and a per-phase file budget derived from how many repos `POLL_REPOS` holds (~18 files each at six repos). At the hourly `:30` trigger that is ~120 commits/day where commits are small, and slower where they are file-heavy — a commit larger than the budget is split across runs and its watermark holds until the last of its files is indexed. A multi-week gap takes several days to drain
+- the `{repo} diffs: ... [processed=.., partial=.., failed=.., deferred=..]` log line separates the three: `partial` is a commit mid-split, `deferred` is one this run never reached, and neither is an error
 - new commits are unaffected while a replay is in flight: the webhook path indexes them in real time
 - upserts are idempotent on `(repo, commit_sha, file_path)`, so re-covering an already-indexed period is safe
 - verify progress with the `{repo} diffs: forward [...]` line in the worker logs, or by searching `type: "diff"` for the period
