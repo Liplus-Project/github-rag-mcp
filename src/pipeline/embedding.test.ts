@@ -4,6 +4,7 @@ import {
   planEmbeddingBatches,
   MAX_EMBEDDING_BATCH_TOKENS,
   MAX_EMBEDDING_INPUT_CHARS,
+  WORKERS_AI_BATCH_CONTEXT_LIMIT,
 } from "./embedding.js";
 
 /** Sum of the per-input estimates over one planned range. */
@@ -41,6 +42,27 @@ describe("estimateEmbeddingTokens", () => {
     const ascii = "x".repeat(MAX_EMBEDDING_INPUT_CHARS);
     const cjk = "あ".repeat(MAX_EMBEDDING_INPUT_CHARS);
     expect(estimateEmbeddingTokens(cjk)).toBeGreaterThan(estimateEmbeddingTokens(ascii));
+  });
+});
+
+describe("MAX_EMBEDDING_BATCH_TOKENS", () => {
+  it("keeps a margin against the endpoint's aggregate ceiling", () => {
+    // Asserted rather than left to the comment at the constant, because the
+    // pressure on this number runs one way: every batch costs two subrequests on
+    // an axis this worker already overruns, so the temptation is to walk the
+    // budget up toward the ceiling. The estimator approximates, and an estimate
+    // that lands under the true count is what reproduces the stall this batching
+    // exists to prevent. A failing assertion here is not a verdict that the new
+    // value is wrong — it says the estimator now has to earn the thinner margin.
+    expect(MAX_EMBEDDING_BATCH_TOKENS).toBeLessThanOrEqual(
+      WORKERS_AI_BATCH_CONTEXT_LIMIT / 2,
+    );
+  });
+
+  it("stays above the per-input maximum a truncated input can reach", () => {
+    // The floor on the same number: below this, a maximal input could not be sent
+    // even alone, and the planner would be handing the endpoint a call it rejects.
+    expect(MAX_EMBEDDING_BATCH_TOKENS).toBeGreaterThanOrEqual(MAX_EMBEDDING_INPUT_CHARS);
   });
 });
 

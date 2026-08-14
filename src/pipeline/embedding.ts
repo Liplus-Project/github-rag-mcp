@@ -10,19 +10,40 @@
 export const MAX_EMBEDDING_INPUT_CHARS = 8000;
 
 /**
+ * Aggregate context the Workers AI endpoint accepts across all inputs of one
+ * batched embed call. Not the per-input maximum bge-m3 documents (8192) — the
+ * batch is summed, and the endpoint reports the sum it rejected:
+ *
+ *   3030: Max context reached 85920 tokens but model supports only 60000
+ *
+ * Unpublished, so this is read off the error rather than a docs page. Kept named
+ * because the budget below is a margin against it, and a margin whose reference
+ * is inlined reads as an arbitrary number the next time someone retunes it.
+ */
+export const WORKERS_AI_BATCH_CONTEXT_LIMIT = 60000;
+
+/**
  * Token budget for the inputs of one batched Workers AI embed call.
  *
- * Anchored to bge-m3's documented per-input maximum (8192 tokens), which is the
- * only published number on this axis: a batch must be able to carry one maximal
- * input, so the budget cannot sit below it, and holding it exactly there means a
- * single call never presents more than one model context worth of text.
+ * Half the ceiling above. The halving is sized to the one error direction that
+ * matters: `estimateEmbeddingTokens` approximates, and an estimate that comes in
+ * *under* the true count is what puts a call over the ceiling — which fails the
+ * whole chunk, and a commit whose vectors never landed is one the diff watermark
+ * holds on, so the surface stalls there rather than passing it by. Punctuation-
+ * dense payloads (lockfile hashes, minified sources) are where the ASCII ratio
+ * below runs optimistic, and 2x covers that class with room left.
  *
- * A count cap cannot express this. Characters per token vary by an order of
+ * The margin is not free and is not larger than it needs to be. Every extra batch
+ * costs two subrequests (the AI call and its `VECTORIZE.upsert`) against an
+ * invocation budget this worker already overruns, so a budget far below the
+ * ceiling buys no safety and spends a neighbouring axis that is genuinely tight.
+ *
+ * A count cap cannot express any of this. Characters per token vary by an order of
  * magnitude across the content this pipeline embeds — roughly 3 for ASCII source,
  * roughly 1 for CJK prose — so N inputs bound the request only when every input
  * is assumed to be the cheap kind.
  */
-export const MAX_EMBEDDING_BATCH_TOKENS = 8192;
+export const MAX_EMBEDDING_BATCH_TOKENS = WORKERS_AI_BATCH_CONTEXT_LIMIT / 2;
 
 /**
  * Characters per token assumed for the ASCII range. bge-m3 tokenizes with an

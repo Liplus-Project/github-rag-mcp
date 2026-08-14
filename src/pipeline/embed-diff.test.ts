@@ -80,15 +80,16 @@ describe("embed-diff: the batch axis is the token budget, not the file count", (
   });
 
   it("splits a commit of large patches that a file count would have kept in one call", async () => {
-    // Six maximal CJK patches: one file count under the old cap, six model
-    // contexts worth of tokens. This is the shape that used to fail the call and
-    // take every file in the chunk down with it.
+    // Twenty maximal patches — exactly one chunk under the retired count cap, and
+    // the shape the endpoint rejected in production ("Max context reached 85920
+    // tokens but model supports only 60000"), taking every file in the chunk down
+    // with the call.
     const { env, aiCalls, upsertedIds } = mkEnv();
-    const commit = mkCommit(Array.from({ length: 6 }, () => "あ".repeat(9000)));
+    const commit = mkCommit(Array.from({ length: 20 }, () => "あ".repeat(9000)));
 
     const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
 
-    expect(result.embedded).toBe(6);
+    expect(result.embedded).toBe(20);
     expect(result.failed).toBe(0);
     expect(aiCalls.length).toBeGreaterThan(1);
     expect(result.batches).toBe(aiCalls.length);
@@ -102,8 +103,8 @@ describe("embed-diff: the batch axis is the token budget, not the file count", (
     }
 
     // No file is dropped or duplicated on the way through the split.
-    expect(aiCalls.flat()).toHaveLength(6);
-    expect(new Set(upsertedIds.flat()).size).toBe(6);
+    expect(aiCalls.flat()).toHaveLength(20);
+    expect(new Set(upsertedIds.flat()).size).toBe(20);
   });
 
   it("keeps each embed call paired with its own slice of files", async () => {
