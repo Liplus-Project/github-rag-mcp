@@ -20,7 +20,8 @@ describe("MAX_EMBEDDING_BATCH_CHARS", () => {
     // The whole guarantee rests on this: a token spans at least one character, so a
     // batch charged under the ceiling *in characters* is under it in tokens too.
     // Raise this above the ceiling and the bound stops holding by construction and
-    // goes back to being a calibration — the state that failed twice (#237, #240).
+    // goes back to being a calibration — the state #237 was in when the same two
+    // commits kept reporting the same over-ceiling token counts (#241).
     expect(MAX_EMBEDDING_BATCH_CHARS).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
   });
 
