@@ -208,15 +208,20 @@ const DIFF_SUBREQUEST_BUDGET_PER_RUN = 900;
  *  The third is the amortised batch cost — a batch spends 2 (the Workers AI call
  *  and its `VECTORIZE.upsert`) and holds at least 2 files, because
  *  `MAX_EMBEDDING_INPUT_CHARS` caps one input at 8000 characters, which is at most
- *  24000 UTF-8 bytes, against the 60000 bytes `MAX_EMBEDDING_BATCH_BYTES` gives a
- *  batch. Two files per batch puts the amortised share at exactly 1, so the worst
- *  case is exactly 3 — no longer rounded up from 2.29 but met on the nose.
+ *  24000 UTF-8 bytes, and the endpoint charges a batch its input count times its
+ *  longest input: `2 × 24003 = 48006` against the 60000 of
+ *  `WORKERS_AI_BATCH_CONTEXT_LIMIT`. Two files per batch puts the amortised share
+ *  at exactly 1, so the worst case is exactly 3 — no longer rounded up from 2.29
+ *  but met on the nose.
  *
  *  That floor moved with the batch axis: 7 files while the budget was counted in
- *  characters (#241), 2 now that it is counted in UTF-8 bytes (#244), because a
- *  Japanese character is charged 3 bytes where it used to be charged 1. The
- *  constant is unchanged and the derivation still holds, but it holds without slack
- *  — a further tightening of the batch axis lands here rather than being absorbed. */
+ *  characters (#241), 2 once it was counted in UTF-8 bytes (#244), because a
+ *  Japanese character is charged 3 bytes where it used to be charged 1. Moving the
+ *  bound off the input sum and onto count-times-longest (#246) left it at 2: the
+ *  two formulas agree exactly when every input is maximal, which is the case this
+ *  floor is read off. The constant is unchanged and the derivation still holds, but
+ *  it holds without slack — a further tightening of the batch axis lands here
+ *  rather than being absorbed. */
 const DIFF_SUBREQUESTS_PER_FILE = 3;
 
 /** Per-phase subrequests that are not per-file: up to 5 commit detail fetches,
