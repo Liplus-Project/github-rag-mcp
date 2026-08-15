@@ -1302,9 +1302,179 @@ const MAX_WIKI_DELETIONS_PER_REPO_PER_RUN = 5;
  *
  *  Sized at 3x the delete budget. A probe costs at most `WIKI_EXTENSIONS.length`
  *  = 2 subrequests, so this ceiling is 30, alongside the ~4-per-delete fan-out
- *  of at most 5 deletes. Both are spent outside the walk's fetch budget and stay
- *  well inside the Worker's 1000-subrequest invocation ceiling (issue #130). */
+ *  of at most 5 deletes. Both are spent outside the walk's fetch budget — but
+ *  not outside the run's: they are charged against
+ *  `WIKI_SUBREQUEST_BUDGET_PER_RUN` when spent, which is what keeps a reap-heavy
+ *  repo from starving the ones behind it (issue #248). They are not *reserved*
+ *  at admission, so this pair is the overrun an admitted pass may add. */
 const MAX_WIKI_REAP_PROBES_PER_REPO_PER_RUN = 15;
+
+/** Subrequests the wiki surface may spend in one `WIKI_CRON` invocation.
+ *
+ *  Every budget above this one is **per repo**. Each repo therefore keeps its
+ *  own contract while nothing watches the sum, and the sum is what Cloudflare
+ *  charges: the wiki cron walks `POLL_REPOS` inside a single invocation, so the
+ *  ceiling is shared across every repo in the list. On the 2026-08-15T03:45Z
+ *  tick five repos indexed normally and the sixth had every raw-content probe
+ *  rejected with `Too many subrequests by single Worker invocation`, reporting
+ *  8 failures for pages nobody had looked at. The starvation lands wholly on
+ *  whichever repo the loop reaches last, and that is a property of the loop,
+ *  not of the repo.
+ *
+ *  **Read this before trusting the number.** The unit here is call sites this
+ *  poller can see — one per `fetch`, per Durable Object round trip, per D1
+ *  statement, per Vectorize call, per Workers AI call — and that is not the
+ *  unit Cloudflare charges. Two facts fix how far this share can be trusted:
+ *
+ *  1. The gap is large and unexplained. In these units the observed run had
+ *     spent somewhere between ~70 (every page unchanged) and ~292 (every page
+ *     re-embedded) when the sixth repo's first probe threw, against a ceiling
+ *     documented as 1000. Nothing visible here accounts for the difference, so
+ *     at least one binding costs more than the 1 this file gives it. Which one,
+ *     and by how much, is unmeasured — and Workers expose no runtime counter to
+ *     measure it with, so no constant in this file can be calibrated against it.
+ *  2. The cost profile spans that whole range on its own. An unchanged page is
+ *     charged only its fetch attempts, because `WIKI_SUBREQUESTS_PER_EMBED` is
+ *     added past the hash-comparison `continue`. A steady-state run over
+ *     already-indexed wikis therefore costs a fraction of a bulk-import run
+ *     over the same page counts.
+ *
+ *  Together those mean **this share does not address the failure that opened
+ *  the issue.** At 250 the observed steady-state shape defers nothing and the
+ *  run proceeds in exactly the order that threw. What covers that case is
+ *  `isSubrequestExhaustion` — the exhaustion is *observable* when it happens,
+ *  which is a measurement rather than an estimate, and the walk stops the run
+ *  on it. Do not read this constant as the protection; read it as a bound on
+ *  the shape it can actually bound.
+ *
+ *  What it does bound: bulk import, where each fetched page carries the embed
+ *  fan-out at `WIKI_SUBREQUESTS_PER_FETCHED_PAGE`, so a handful of repos with
+ *  changed wikis reaches 250 well before a steady-state run would. That is the
+ *  runaway shape — a repo appended to `POLL_REPOS`, or a wiki newly enabled —
+ *  and bounding it costs only latency, since bulk imports already span runs.
+ *  `DIFF_SUBREQUEST_BUDGET_PER_RUN` is 900 because the diff surface's per-file
+ *  estimate was derived against measured rejections; this one has no such
+ *  derivation and must not borrow that figure's confidence. Its absolute value
+ *  is a judgement inside the observed range, not a calibration. Moving it
+ *  requires a measurement, and the only one that would settle it is the real
+ *  per-binding cost.
+ *
+ *  This is a ceiling over the per-repo budgets, not a replacement for them.
+ *  `wikiFetchBudgetForPass` converts what is left of it into the pass's fetch
+ *  cap, and `runWikiSurfaces` subtracts each pass's measured spend. */
+const WIKI_SUBREQUEST_BUDGET_PER_RUN = 250;
+
+/**
+ * Recognise Cloudflare's subrequest-exhaustion error.
+ *
+ * This is the one part of the run axis that is *measured* rather than
+ * estimated. Every constant in this file counts call sites, which is not the
+ * unit the ceiling is charged in (see `WIKI_SUBREQUEST_BUDGET_PER_RUN`), so no
+ * declared share can be relied on to engage before the real limit. The limit
+ * being hit, however, is directly observable: the binding throws, and it names
+ * itself.
+ *
+ * The exhaustion is invocation-scoped and terminal — nothing is returned to the
+ * budget mid-invocation, so once one subrequest is rejected every later one in
+ * the same invocation is rejected too. The observed run demonstrates exactly
+ * that: the Worker kept running and kept throwing, probe after probe, and the
+ * walk kept converting those throws into recorded page failures. So the correct
+ * response to the first sighting is to stop the run, not to continue and retry.
+ *
+ * Matched on the message rather than an error type because Workers surfaces it
+ * as a plain `Error`. Substring rather than equality because the text carries a
+ * trailing clause ("...by single Worker invocation.") that is not contractual.
+ */
+export function isSubrequestExhaustion(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("Too many subrequests");
+}
+
+/** Subrequests one changed wiki page costs downstream of its raw fetch, read
+ *  off `processAndUpsertWikiDoc`: the Workers AI embed, the Vectorize upsert,
+ *  the D1 FTS mirror write, the Store DO row, and *two* for the graph-edge
+ *  index — `indexWikiEdges` queries the repo's known slugs before it batches
+ *  the edge writes, so it is two round trips rather than the one its single
+ *  call site suggests. Charged per *embedded* page; an unchanged page stops at
+ *  its hash comparison and costs only its fetch. */
+const WIKI_SUBREQUESTS_PER_EMBED = 6;
+
+/** Subrequests one reaped wiki page costs: Vectorize delete, FTS5 row delete,
+ *  graph-edge delete, Store DO row delete. */
+const WIKI_SUBREQUESTS_PER_DELETE = 4;
+
+/** Subrequests one repo's pass spends outside the page walk and the reap:
+ *  the `.wiki.git` existence probe, the `_pages` scrape, the resume-cursor
+ *  read, the lap-anchor read, the store's wiki-doc snapshot, the D1 query for
+ *  indexed pages, and the two watermark writes at the end. */
+const WIKI_REPO_OVERHEAD_SUBREQUESTS = 8;
+
+/** Worst-case subrequests one fetched page costs: the fetch attempt itself
+ *  plus the embed fan-out it may authorize. Used to convert a remaining
+ *  subrequest budget into a fetch-attempt cap. */
+const WIKI_SUBREQUESTS_PER_FETCHED_PAGE = 1 + WIKI_SUBREQUESTS_PER_EMBED;
+
+/**
+ * Fetch attempts one repo's wiki pass may issue, given what is left of the
+ * invocation's declared share.
+ *
+ * The run-wide budget is spent by subtraction rather than by division: a repo
+ * with a five-page wiki and nothing changed returns almost all of its share, so
+ * the repos behind it keep the full per-repo cap instead of a sixth of it. The
+ * diff surface divides instead (`diffFileBudgetPerPhase`) because its phases
+ * are bounded per repo up front; the wiki walk's cost is only known once it has
+ * run.
+ *
+ * Returns 0 when the remainder cannot cover the pass's overhead plus one page.
+ * The caller must then skip the repo entirely rather than call `pollWiki` with
+ * a budget of zero: a pass always lets its *first* page run its whole candidate
+ * list (issue #192), so a zero budget would be exceeded rather than respected,
+ * and the pass would spend its overhead for one page's worth of progress.
+ *
+ * The reap's own budgets are deliberately **not** reserved here, though they
+ * are charged in full once spent. Reserving each repo's worst-case reap (50)
+ * against a share of 250 would tax every pass for work the reap almost never
+ * does — the candidate set is empty on a healthy wiki — and would defer repos
+ * on a run where nothing happened at all. What absorbs an admitted pass's reap
+ * instead is the margin between this declared share and the real ceiling, which
+ * is the same margin the unit mismatch above already demands.
+ *
+ * @param remaining subrequests still unspent in this invocation's share
+ */
+export function wikiFetchBudgetForPass(remaining: number): number {
+  const spendable = remaining - WIKI_REPO_OVERHEAD_SUBREQUESTS;
+  if (spendable < WIKI_SUBREQUESTS_PER_FETCHED_PAGE) return 0;
+  return Math.min(
+    MAX_WIKI_FETCHES_PER_REPO_PER_RUN,
+    Math.floor(spendable / WIKI_SUBREQUESTS_PER_FETCHED_PAGE),
+  );
+}
+
+/**
+ * Rotate the repo list so a different repo leads each run.
+ *
+ * A run-wide budget spent in list order always thins the same tail: the repos
+ * ahead take what they need and whoever is last takes the remainder, cron after
+ * cron. That is the same shape as the defect this budget removes — the loop
+ * position decides the outcome, not the repo — so bounding the overrun without
+ * moving the position would leave the unfairness intact and merely quiet.
+ *
+ * The offset is derived from the tick rather than stored, so it needs no
+ * watermark and no schema, and it is deterministic for a given scheduled time,
+ * which is what makes it testable. With an hourly cron and N repos every repo
+ * leads once every N hours.
+ *
+ * @param repos the configured list, unmodified
+ * @param tick  the cron's scheduled time in epoch milliseconds
+ */
+export function rotateReposForRun<T>(repos: readonly T[], tick: number): T[] {
+  if (repos.length === 0) return [];
+  const hours = Math.floor(tick / 3_600_000);
+  // `%` on a negative tick yields a negative index; epoch times before 1970 are
+  // not reachable here, but the guard costs nothing and removes the branch.
+  const offset = ((hours % repos.length) + repos.length) % repos.length;
+  return repos.map((_, i) => repos[(i + offset) % repos.length]);
+}
 
 /** Fraction of the indexed page set which, once the reap candidate set reaches
  *  it, is logged as an anomaly. Warn-only on purpose: a ratio cannot separate a
@@ -1629,6 +1799,14 @@ async function writeWikiLapAnchor(
  *
  * Returns null when no extension matches (page may have been deleted, renamed,
  * or moved to an unsupported format).
+ *
+ * `errored` separates an *observed* miss from an unobserved one. A candidate
+ * that answered 404 says the file is not there; a candidate whose `fetch()`
+ * threw says nothing at all — and subrequest exhaustion throws, so under a
+ * blown invocation budget every candidate errors and the caller used to log
+ * "all candidates 404" for pages it had never reached (issue #248). The two
+ * outcomes are indistinguishable in the return value alone, so the flag
+ * carries the difference out.
  */
 async function fetchWikiContent(
   repo: string,
@@ -1638,6 +1816,14 @@ async function fetchWikiContent(
 ): Promise<{
   result: { content: string; extension: string } | null;
   attempts: number;
+  /** True when at least one candidate threw instead of answering. */
+  errored: boolean;
+  /** True when a candidate threw *because the invocation is out of
+   *  subrequests*. Distinct from `errored`: a network blip is this page's
+   *  problem, whereas exhaustion is the whole run's and nothing after it can
+   *  succeed. The caller stops the run on it rather than moving to the next
+   *  page (issue #248). */
+  exhausted: boolean;
 }> {
   const exts = preferredExtension
     ? [preferredExtension, ...WIKI_EXTENSIONS.filter((e) => e !== preferredExtension)]
@@ -1654,9 +1840,11 @@ async function fetchWikiContent(
   // whose title-derived name misses is resolved by the slug on the *second*
   // attempt rather than after the whole extension set has been walked.
   let attempts = 0;
+  let errored = false;
+  let exhausted = false;
   for (const ext of exts) {
     for (const name of names) {
-      if (attempts >= maxAttempts) return { result: null, attempts };
+      if (attempts >= maxAttempts) return { result: null, attempts, errored, exhausted };
       const url = `https://raw.githubusercontent.com/wiki/${repo}/${encodeURIComponent(name)}.${ext}`;
       attempts++;
       try {
@@ -1667,9 +1855,23 @@ async function fetchWikiContent(
           return {
             result: { content: await resp.text(), extension: ext },
             attempts,
+            errored,
+            exhausted,
           };
         }
       } catch (err) {
+        errored = true;
+        if (isSubrequestExhaustion(err)) {
+          // Every remaining candidate would throw the same way, so stop
+          // probing this page rather than spending the rest of the list
+          // proving it.
+          exhausted = true;
+          console.error(
+            `fetchWikiContent probe ${ext} failed for ${repo}/${name}: ` +
+              `invocation is out of subrequests — abandoning this page's probes.`,
+          );
+          return { result: null, attempts, errored, exhausted };
+        }
         console.error(
           `fetchWikiContent probe ${ext} failed for ${repo}/${name}:`,
           err instanceof Error ? err.message : String(err),
@@ -1677,7 +1879,7 @@ async function fetchWikiContent(
       }
     }
   }
-  return { result: null, attempts };
+  return { result: null, attempts, errored, exhausted };
 }
 
 /** Verdict of the pre-reap existence probe. `gone` is the only one that
@@ -1723,29 +1925,41 @@ async function probeWikiPageAlive(
   repo: string,
   pageName: string,
   preferredExtension?: string,
-): Promise<WikiReapProbe> {
+): Promise<{ verdict: WikiReapProbe; attempts: number; exhausted: boolean }> {
   const exts = preferredExtension
     ? [preferredExtension, ...WIKI_EXTENSIONS.filter((e) => e !== preferredExtension)]
     : Array.from(WIKI_EXTENSIONS);
 
   let inconclusive = false;
+  let attempts = 0;
   for (const ext of exts) {
     const url = `https://raw.githubusercontent.com/wiki/${repo}/${encodeURIComponent(pageName)}.${ext}`;
+    attempts++;
     try {
       const resp = await fetch(url, {
         headers: { "User-Agent": "github-rag-mcp/0.1.0" },
       });
-      if (resp.ok) return "alive";
+      if (resp.ok) return { verdict: "alive", attempts, exhausted: false };
       if (resp.status !== 404) inconclusive = true;
     } catch (err) {
+      inconclusive = true;
+      if (isSubrequestExhaustion(err)) {
+        // `inconclusive` already withholds the delete, which is the safe
+        // verdict; the flag is what stops the reap loop from probing the rest
+        // of the candidate list into the same wall (issue #248).
+        console.error(
+          `Reap probe ${ext} failed for wiki ${repo}/${pageName}: ` +
+            `invocation is out of subrequests — reap abandoned for this run.`,
+        );
+        return { verdict: "inconclusive", attempts, exhausted: true };
+      }
       console.error(
         `Reap probe ${ext} failed for wiki ${repo}/${pageName}:`,
         err instanceof Error ? err.message : String(err),
       );
-      inconclusive = true;
     }
   }
-  return inconclusive ? "inconclusive" : "gone";
+  return { verdict: inconclusive ? "inconclusive" : "gone", attempts, exhausted: false };
 }
 
 /** Budget / cursor overrides for one wiki poll pass. Defaults are the cron
@@ -1777,9 +1991,23 @@ export interface WikiPollSummary {
   fetches: number;
   /** Pages whose content was examined this pass. */
   visited: number;
+  /** Subrequests this pass spent, counted at every call site that issues one.
+   *  The run-wide walker subtracts this from the invocation's declared share,
+   *  so the figure is an accounting input rather than a diagnostic: the fan-out
+   *  of an embed and of a reap is charged by the constants above, and every
+   *  HTTP / DO / D1 round-trip the pass makes itself is charged as one. */
+  subrequests: number;
   embedded: number;
   skipped: number;
+  /** Pages whose every candidate answered an observed 404. A real miss. */
   failed: number;
+  /** Pages whose candidates all *threw* rather than answering, so absence was
+   *  never observed. Kept off `failed` because recording a failure for a page
+   *  nobody reached is what made the wiki surface's own exhaustion read as a
+   *  property of the last repo's wiki (issue #248). The cursor still advances:
+   *  the page is retried on the next lap, whereas holding it would let one
+   *  permanently unreachable page stall the walk. */
+  inconclusive: number;
   removed: number;
   /** Orphan candidates the reap loop never reached, because it stopped on the
    *  delete or the probe budget. A withheld candidate *was* reached, so it is
@@ -1803,6 +2031,12 @@ export interface WikiPollSummary {
   wrapped: boolean;
   /** False when the `_pages` index could not be read; no reaping happened. */
   enumerated: boolean;
+  /** True when the invocation ran out of subrequests during this pass. The walk
+   *  stopped at that page with the cursor unmoved and the reap was skipped, and
+   *  the caller must not start another repo — the budget is invocation-scoped,
+   *  so nothing after it can succeed either (issue #248). Unlike every other
+   *  budget signal on this surface, this one is observed rather than estimated. */
+  exhausted: boolean;
 }
 
 /**
@@ -1836,6 +2070,11 @@ export interface WikiPollSummary {
  * cap is two budgets, not one: a withheld candidate spends a probe but no
  * delete slot, so it cannot hold the head of the sorted candidate list and
  * starve the real deletions behind it (issue #197).
+ *
+ * Every budget this function holds is scoped to one repo. The invocation
+ * ceiling they are really spending against is shared with every other repo in
+ * the run, and nothing inside one pass can see that; the pass therefore reports
+ * its measured `subrequests` and `runWikiSurfaces` owns the run axis (#248).
  */
 export async function pollWiki(
   repo: string,
@@ -1849,14 +2088,20 @@ export async function pollWiki(
   const probeBudget = MAX_WIKI_REAP_PROBES_PER_REPO_PER_RUN;
   const persistCursor = opts.persistCursor ?? true;
 
+  // Charged at every site that issues a subrequest, so an early return carries
+  // out what it actually spent rather than a nominal per-repo figure.
+  let subrequests = 0;
+
   const empty = (startCursor: string): WikiPollSummary => ({
     repo,
     pages: 0,
     fetches: 0,
+    subrequests,
     visited: 0,
     embedded: 0,
     skipped: 0,
     failed: 0,
+    inconclusive: 0,
     removed: 0,
     orphansDeferred: 0,
     orphansWithheld: 0,
@@ -1865,16 +2110,19 @@ export async function pollWiki(
     lapAnchor: startCursor,
     wrapped: false,
     enumerated: false,
+    exhausted: false,
   });
 
   // Cheap existence probe so repos without wiki incur a single HEAD-equivalent
   // round-trip per cron run instead of three (probe + index + content).
+  subrequests++;
   const hasWiki = await wikiExists(repo);
   if (!hasWiki) {
     console.log(`${repo} wiki: not enabled or not accessible — skip`);
     return empty("");
   }
 
+  subrequests++;
   const index = await listWikiPages(repo);
   const pages = index.pages;
   if (!index.ok) {
@@ -1887,18 +2135,21 @@ export async function pollWiki(
   // enumeration, so a readable index always yields at least one page. An empty
   // set only means the scrape failed, which the guard above already returned on.
 
+  if (opts.cursor === undefined) subrequests++;
   const startCursor = opts.cursor ?? (await readWikiCursor(storeStub, repo));
 
   // The lap anchor marks where the current sweep began. An explicit cursor
   // override is an operator saying "start the walk here", so it opens a fresh
   // lap at that point; otherwise the stored anchor carries across passes and
   // falls back to the current cursor the first time a repo is walked.
+  if (opts.cursor === undefined) subrequests++;
   const storedAnchor =
     opts.cursor !== undefined ? null : await readWikiLapAnchor(storeStub, repo);
   const lapAnchor = storedAnchor ?? startCursor;
 
   // Snapshot the existing wiki doc records so we can detect deletes and pick
   // a per-page preferred extension on subsequent polls.
+  subrequests++;
   const existingResp = await storeStub.fetch(
     new Request(`http://store/wiki-docs?repo=${encodeURIComponent(repo)}`),
   );
@@ -1911,12 +2162,14 @@ export async function pollWiki(
   let embedded = 0;
   let skipped = 0;
   let failed = 0;
+  let inconclusive = 0;
   let removed = 0;
   let orphansWithheld = 0;
   let fetches = 0;
   let visited = 0;
   let nextCursor = startCursor;
   let wrapped = false;
+  let exhausted = false;
 
   // Resume at the first page ordering strictly after the cursor; wrap to the
   // head when the cursor sits at (or past) the end, or when it names a page
@@ -1957,14 +2210,40 @@ export async function pollWiki(
     // it found it, so a budget below one page's candidate count stalls the walk
     // forever instead of self-healing on the next pass (issue #192). Letting the
     // first page finish its probes costs at most `candidates - 1` extra
-    // subrequests, once per pass, against an invocation budget of 1000.
-    const { result: fetched, attempts } = await fetchWikiContent(
+    // subrequests, once per pass. What absorbs that overrun is the margin under
+    // `WIKI_SUBREQUEST_BUDGET_PER_RUN`, not the documented 1000 this comment
+    // used to invoke: the run's real headroom is the declared share, and in the
+    // accounting that share is calibrated in, 1000 is not a reachable figure
+    // (issue #248). The exemption is admitted on the same terms either way —
+    // `wikiFetchBudgetForPass` never admits a pass it cannot fund a page for.
+    const {
+      result: fetched,
+      attempts,
+      errored,
+      exhausted: pageExhausted,
+    } = await fetchWikiContent(
       repo,
       page,
       prior?.extension,
       visited === 0 ? Number.POSITIVE_INFINITY : fetchBudget - fetches,
     );
     fetches += attempts;
+    subrequests += attempts;
+
+    if (pageExhausted) {
+      // The invocation is out of subrequests. Nothing about this page was
+      // observed, so break *before* the cursor moves and leave it for the next
+      // run — the same treatment the fetch-budget guard below gives an
+      // inconclusive probe, on the axis that is measured rather than estimated.
+      // Recording a failure here instead is the whole defect: 8 present pages
+      // reported missing because the walk kept going after the wall (#248).
+      exhausted = true;
+      console.warn(
+        `${repo} wiki: invocation out of subrequests while probing ${page.slug}. ` +
+          `Cursor held at ${nextCursor || "<head>"}; the run stops here and resumes next tick.`,
+      );
+      break;
+    }
 
     if (!fetched && visited > 0 && fetches >= fetchBudget) {
       // The budget ran out inside this page's candidate list, so "no content"
@@ -1988,8 +2267,24 @@ export async function pollWiki(
       // The slug was discovered in `_pages` but no extension served. Treat as
       // a transient miss and skip — the next poll will retry without spending
       // an embedding budget here.
-      console.warn(`No content fetched for ${repo}/wiki/${page.slug} (all candidates 404)`);
-      failed++;
+      //
+      // Which counter it lands in turns on whether the miss was *observed*.
+      // Every candidate answering 404 is an observation; a candidate whose
+      // `fetch()` threw is not, and the old message asserted the first shape
+      // for both. Under subrequest exhaustion — which throws — that read as
+      // eight 404s on a wiki whose pages were all present (issue #248).
+      if (errored) {
+        inconclusive++;
+        console.warn(
+          `No content fetched for ${repo}/wiki/${page.slug} (probe threw; absence not ` +
+            `observed — see the fetchWikiContent errors above for the cause). Retried next lap.`,
+        );
+      } else {
+        failed++;
+        console.warn(
+          `No content fetched for ${repo}/wiki/${page.slug} (every candidate answered 404)`,
+        );
+      }
       continue;
     }
 
@@ -1999,6 +2294,7 @@ export async function pollWiki(
       continue;
     }
 
+    subrequests += WIKI_SUBREQUESTS_PER_EMBED;
     const result = await processAndUpsertWikiDoc(
       env,
       storeStub,
@@ -2019,7 +2315,17 @@ export async function pollWiki(
   // the live FTS index: a page missing from the store but still in search_docs
   // is exactly the case a store-only diff cannot see, and it is the one that
   // actually happened in production (issue #184, cause E).
-  const indexed = await listIndexedWikiPages(env, repo);
+  // Skipped wholesale once the walk hit the wall: the reap's first act is a D1
+  // query and its per-candidate probes are subrequests too, so every one of
+  // them would throw. Withholding a reap costs nothing — the candidate set only
+  // shrinks, so the drain resumes next run (issue #248).
+  if (exhausted) {
+    console.warn(`${repo} wiki: reap skipped this run — invocation out of subrequests.`);
+  }
+  if (!exhausted) subrequests++;
+  const indexed = exhausted
+    ? { pages: [] as string[], ok: false }
+    : await listIndexedWikiPages(env, repo);
   const orphanSet = new Set<string>();
   for (const w of existing) {
     if (!currentSlugs.has(w.pageName)) orphanSet.add(w.pageName);
@@ -2037,7 +2343,7 @@ export async function pollWiki(
     ...existing.map((w) => w.pageName),
     ...indexed.pages,
   ]).size;
-  if (indexedTotal > 0 && orphans.length / indexedTotal >= WIKI_ORPHAN_RATIO_WARN) {
+  if (!exhausted && indexedTotal > 0 && orphans.length / indexedTotal >= WIKI_ORPHAN_RATIO_WARN) {
     console.warn(
       `${repo} wiki: reap set is ${orphans.length}/${indexedTotal} of the indexed pages ` +
         `(>= ${WIKI_ORPHAN_RATIO_WARN}). Legitimate bulk deletion and a short ` +
@@ -2052,17 +2358,28 @@ export async function pollWiki(
   // for the enumeration to recover (issue #197).
   let probes = 0;
   for (const pageName of orphans) {
-    if (removed >= deleteBudget || probes >= probeBudget) break;
+    // `exhausted` joins the two budgets as a third stop condition. Every
+    // candidate left over is reported as deferred, which is exactly what it is.
+    if (exhausted || removed >= deleteBudget || probes >= probeBudget) break;
 
     // Existence check before the delete. The candidate is only "orphaned" as
     // far as the enumeration knows, and the enumeration is exactly what may
     // have come back short (issue #187).
     probes++;
-    const probe = await probeWikiPageAlive(
-      repo,
-      pageName,
-      existingMap.get(pageName)?.extension,
-    );
+    const {
+      verdict: probe,
+      attempts: probeAttempts,
+      exhausted: probeExhausted,
+    } = await probeWikiPageAlive(repo, pageName, existingMap.get(pageName)?.extension);
+    subrequests += probeAttempts;
+    if (probeExhausted) {
+      // First sighting of the wall can land here rather than in the walk, when
+      // the walk finished inside its fetch budget. Same response: stop, withhold,
+      // let the caller end the run.
+      exhausted = true;
+      orphansWithheld++;
+      continue;
+    }
     if (probe !== "gone") {
       orphansWithheld++;
       console.warn(
@@ -2076,6 +2393,7 @@ export async function pollWiki(
     }
 
     const wvid = await wikiDocVectorId(repo, pageName);
+    subrequests += WIKI_SUBREQUESTS_PER_DELETE;
     // Each surface is torn down independently: a Vectorize failure must not
     // strand the D1 rows, which are the ones users actually retrieve.
     for (const [surface, run] of [
@@ -2123,29 +2441,36 @@ export async function pollWiki(
 
   if (persistCursor) {
     if (nextCursor !== startCursor) {
+      subrequests++;
       await writeWikiCursor(storeStub, repo, nextCursor);
     }
     if (nextLapAnchor !== storedAnchor) {
+      subrequests++;
       await writeWikiLapAnchor(storeStub, repo, nextLapAnchor);
     }
   }
 
   console.log(
     `${repo} wiki: ${pages.length} pages, ${visited} visited, ${fetches}/${fetchBudget} fetches, ` +
-      `${embedded} embedded, ${skipped} unchanged, ${failed} failed, ${removed} deleted, ` +
+      `${subrequests} subrequests, ` +
+      `${embedded} embedded, ${skipped} unchanged, ${failed} failed, ` +
+      `${inconclusive} inconclusive, ${removed} deleted, ` +
       `${orphansWithheld} reap withheld, ` +
       `cursor ${startCursor || "<head>"} -> ${nextCursor || "<head>"}, ` +
-      `lap ${lapAnchor || "<head>"}${wrapped ? " complete" : ` -> ${lapFinalSlug}`}`,
+      `lap ${lapAnchor || "<head>"}${wrapped ? " complete" : ` -> ${lapFinalSlug}`}` +
+      `${exhausted ? ", SUBREQUESTS EXHAUSTED" : ""}`,
   );
 
   return {
     repo,
     pages: pages.length,
     fetches,
+    subrequests,
     visited,
     embedded,
     skipped,
     failed,
+    inconclusive,
     removed,
     orphansDeferred,
     orphansWithheld,
@@ -2154,6 +2479,7 @@ export async function pollWiki(
     lapAnchor,
     wrapped,
     enumerated: true,
+    exhausted,
   };
 }
 
@@ -3152,13 +3478,90 @@ async function runWikiSurface(
   repo: string,
   env: Env,
   storeStub: DurableObjectStub,
-): Promise<void> {
+  fetchBudget: number,
+): Promise<{ spent: number; exhausted: boolean }> {
   try {
-    await pollWiki(repo, env, storeStub);
+    const summary = await pollWiki(repo, env, storeStub, { fetchBudget });
+    return { spent: summary.subrequests, exhausted: summary.exhausted };
   } catch (err) {
     console.error(
       `Failed to poll wiki for ${repo}:`,
       err instanceof Error ? err.message : String(err),
+    );
+    // A throw leaves the spend unmeasured, and the pass had at least been
+    // admitted, so charge it its overhead rather than nothing. Charging zero
+    // would let a repo that fails early hand the whole share on to the next one
+    // and reintroduce the overrun from the far side.
+    //
+    // An exhaustion that escapes as a throw rather than a summary flag — from a
+    // store or D1 call outside the paths that classify it — still ends the run.
+    // The budget is invocation-scoped, so the next repo would only rediscover
+    // the same wall at the cost of its own overhead.
+    return {
+      spent: WIKI_REPO_OVERHEAD_SUBREQUESTS,
+      exhausted: isSubrequestExhaustion(err),
+    };
+  }
+}
+
+/**
+ * Walk every repo's wiki within one invocation's declared subrequest share.
+ *
+ * Two things happen here that a plain `for` over `POLL_REPOS` cannot do.
+ *
+ * The share is spent by subtraction: each pass reports what it actually cost
+ * and the remainder carries to the next repo, so a repo that finds nothing
+ * changed hands its budget on almost whole. When the remainder can no longer
+ * fund a pass, the remaining repos are **not called at all** — their cursors
+ * stay where the last run left them and the next invocation resumes there.
+ * That is the same "hit the ceiling, keep the cursor, finish clean" behaviour a
+ * single deep wiki already had on the per-repo fetch budget, lifted to the run
+ * axis. Skipping is what keeps the alternative off the table: calling `pollWiki`
+ * with nothing left produced probe exceptions the walk then recorded as page
+ * failures, for pages it had never reached (issue #248).
+ *
+ * The order rotates per tick, because a budget spent in list order starves
+ * whoever is last, every run (`rotateReposForRun`).
+ */
+export async function runWikiSurfaces(
+  repos: readonly string[],
+  env: Env,
+  storeStub: DurableObjectStub,
+  tick: number,
+): Promise<void> {
+  const ordered = rotateReposForRun(repos, tick);
+  let remaining = WIKI_SUBREQUEST_BUDGET_PER_RUN;
+  const deferred: string[] = [];
+  let hitTheWall = false;
+
+  for (const repo of ordered) {
+    if (hitTheWall) {
+      deferred.push(repo);
+      continue;
+    }
+    const fetchBudget = wikiFetchBudgetForPass(remaining);
+    if (fetchBudget === 0) {
+      deferred.push(repo);
+      continue;
+    }
+    const { spent, exhausted } = await runWikiSurface(repo, env, storeStub, fetchBudget);
+    remaining -= spent;
+    hitTheWall = exhausted;
+  }
+
+  if (deferred.length > 0) {
+    // Two different reasons land here and the log must not blur them: the
+    // declared share is an estimate that may never engage, while the wall is an
+    // observation that already has (`WIKI_SUBREQUEST_BUDGET_PER_RUN`).
+    const cause = hitTheWall
+      ? `Invocation ran out of subrequests (observed). The declared share of ` +
+        `${WIKI_SUBREQUEST_BUDGET_PER_RUN} did not engage first — it counts call sites, ` +
+        `not what Cloudflare charges.`
+      : `Wiki run share exhausted (${WIKI_SUBREQUEST_BUDGET_PER_RUN} accounted subrequests).`;
+    console.warn(
+      `${cause} ${deferred.length} repo(s) deferred to the next run with cursors ` +
+        `unmoved: ${deferred.join(", ")}. Rotation advances each by one position per ` +
+        `tick, so every repo leads within ${ordered.length} ticks.`,
     );
   }
 }
@@ -3232,9 +3635,9 @@ export async function handleScheduled(
   }
 
   if (controller.cron === WIKI_CRON) {
-    for (const repo of repos) {
-      await runWikiSurface(repo, env, storeStub);
-    }
+    // Not a plain loop: the wiki surface's budgets are all per repo, so the
+    // sum across the list is what overruns the invocation ceiling (issue #248).
+    await runWikiSurfaces(repos, env, storeStub, controller.scheduledTime);
     return;
   }
 

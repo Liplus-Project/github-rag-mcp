@@ -278,10 +278,12 @@ POST /admin/backfill-wiki?repo=owner/repo
 レスポンス:
 
 ```json
-{ "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
-  "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5, "orphansWithheld": 0,
+{ "repo": "owner/repo", "pages": 77, "fetches": 20, "subrequests": 137, "visited": 20,
+  "embedded": 18, "skipped": 2, "failed": 0, "inconclusive": 0, "removed": 3,
+  "orphansDeferred": 5, "orphansWithheld": 0,
   "startCursor": "", "nextCursor": "current-architecture-as-concession",
-  "lapAnchor": "", "wrapped": false, "enumerated": true, "done": false }
+  "lapAnchor": "", "wrapped": false, "enumerated": true, "exhausted": false,
+  "done": false }
 ```
 
 運用上の注意:
@@ -292,6 +294,9 @@ POST /admin/backfill-wiki?repo=owner/repo
 - `enumerated: false` は `/wiki/_pages` の scrape が失敗したという意味。何も索引せず、意図的に何も削除していない。空の wiki と解釈せず再試行すること
 - `orphansDeferred` は、その run で**到達しなかった**削除候補の数。削除枠と probe 枠のどちらかが尽きて打ち切った分にあたる。0 になるまで呼び続ける。到達した上で見送った候補は `orphansWithheld` の側に数えられる — 枠が分かれているので、見送りが削除枠を消費して後ろに並ぶ実削除を止めることはない（issue #197）
 - `fetches` は、その call の**先頭** page が予算より多くの候補を必要とした場合に限り `limit` を最大 3 超える。1 page の probe は最大 4 回（ファイル名候補 2 × `md` / `markdown`）で、途中で打ち切った probe は結果を観測したことにならないため、そのままでは cursor を進めないまま毎回同じ page を probe し直すことになる。そこで各 call の先頭 page だけ候補リストを試し切らせている。2 page 目以降は予算どおりに打ち切る（issue #192）
+- `failed` は、ファイル名 / 拡張子の候補が全て 404 を返したことを**観測できた** page の数。`inconclusive` は、probe が応答ではなく例外を投げたために不在を観測できなかった page の数（ネットワークエラー、または subrequest 枯渇）。両者は "all candidates 404" という同一の文言で報告されており、実在する page が「無い」と読めたのはそのためである（issue #248）。`inconclusive` が 0 でない場合、それは wiki についてではなく run についての信号であり、当該 page は次の周回で再試行される
+- `subrequests` はその call が消費した量で、subrequest を発行する各 call site で数えている。cron 経路ではこれを run 全体の取り分から差し引くので、深い wiki を持つ 1 つの repo が後続の repo を枯渇させることはない。この endpoint は独立した Worker invocation なので、値は観測用に返すだけで取り分の適用は受けない。単位は call site であって Cloudflare の課金単位ではない点に注意 — 余裕の指標として読む前に要件記述を参照すること
+- `exhausted: true` は、その call の途中で invocation の subrequest が尽きたことを示す。walk はそこで cursor を動かさずに停止し、reap も省略されるので、確認できていない事実に基づいて failed や削除が記録されることはない。続きは再度呼べば進む。cron 経路ではこれが run 全体を終了させ、残りの repo は未接触で先送りされる（issue #248）
 - `orphansWithheld` は、削除候補に挙がったが content がまだ配信されていた（あるいは実在確認が結論を出せなかった）ため削除を見送った page 数。0 でない場合、`_pages` の scrape が**実際の wiki より少なく返っている**という意味。page 自体は無傷で守られており、調べるべきは列挙のほう。見送った page 名は worker のログに出る（issue #187）
 - カバレッジの確認は `search_docs` の `type = 'wiki_doc'` 行と `https://github.com/{repo}/wiki/_pages` の page 一覧を突き合わせる
 
