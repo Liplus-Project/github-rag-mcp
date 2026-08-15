@@ -820,3 +820,428 @@ describe("poller: pollWiki orphan reap", () => {
     expect(store.deletes).toEqual([]);
   });
 });
+
+// ── Run-wide subrequest budget (issue #248) ──────────────────
+
+const { runWikiSurfaces, wikiFetchBudgetForPass, rotateReposForRun } =
+  await import("./poller.js");
+
+/** `MAX_WIKI_FETCHES_PER_REPO_PER_RUN`, mirrored: the constant is module-private
+ *  and what these assertions are about is the run budget outranking it. */
+const PER_REPO_FETCH_CAP = 20;
+
+/**
+ * Stub the global fetch with several fake wikis at once.
+ *
+ * The single-repo `stubWiki` above keys everything off the `REPO` constant, and
+ * the defect this suite covers is only visible across repos: every per-repo
+ * budget holds while their sum overruns the invocation ceiling.
+ *
+ * `throwAfter` reproduces the production failure shape — `fetch()` raising
+ * `Too many subrequests by single Worker invocation` rather than answering — so
+ * the walk's classification of an *unobserved* miss can be asserted.
+ */
+function stubMultiWiki(
+  wikis: Record<string, FakeWiki>,
+  opts: { throwAfter?: number } = {},
+) {
+  const rawByRepo = new Map<string, string[]>();
+  let rawCount = 0;
+
+  const pagesHtmlFor = (repo: string, wiki: FakeWiki): string =>
+    wiki.listed
+      .map(
+        (p) =>
+          `<div class="flex-auto"><a href="/${repo}/wiki/${p.slug}">` +
+          `${p.title ?? p.slug.replace(/-/g, " ")}</a></div>`,
+      )
+      .join("\n");
+
+  const fetchMock = vi.fn(async (input: string | URL) => {
+    const url = String(input);
+
+    if (url.startsWith("https://github.com/") && url.includes(".wiki.git/info/refs")) {
+      const repo = url.slice("https://github.com/".length, url.indexOf(".wiki.git"));
+      return new Response("001e# service=git-upload-pack\n", {
+        status: wikis[repo] ? 200 : 404,
+      });
+    }
+
+    if (url.endsWith("/wiki/_pages")) {
+      const repo = url.slice("https://github.com/".length, url.indexOf("/wiki/_pages"));
+      const wiki = wikis[repo];
+      if (!wiki || wiki.indexFails) return new Response("boom", { status: 503 });
+      return new Response(pagesHtmlFor(repo, wiki), {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+
+    const rawRoot = "https://raw.githubusercontent.com/wiki/";
+    if (url.startsWith(rawRoot)) {
+      const tail = url.slice(rawRoot.length);
+      // `owner/repo/Page.ext` — the repo is the first two path segments.
+      const slash = tail.indexOf("/", tail.indexOf("/") + 1);
+      const repo = tail.slice(0, slash);
+      const file = tail.slice(slash + 1);
+
+      rawCount++;
+      const seen = rawByRepo.get(repo) ?? [];
+      seen.push(file);
+      rawByRepo.set(repo, seen);
+
+      if (opts.throwAfter !== undefined && rawCount > opts.throwAfter) {
+        throw new Error("Too many subrequests by single Worker invocation.");
+      }
+
+      const dot = file.lastIndexOf(".");
+      const name = decodeURIComponent(file.slice(0, dot));
+      const ext = file.slice(dot + 1);
+      const body = wikis[repo]?.files[name];
+      if (ext !== "md" || body === undefined) {
+        return new Response("Not Found", { status: 404 });
+      }
+      return new Response(body, { status: 200 });
+    }
+
+    throw new Error(`unexpected fetch in multi-wiki stub: ${url}`);
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+
+  return {
+    /** Raw-content requests issued for one repo. Empty = never walked. */
+    rawFor: (repo: string): string[] => rawByRepo.get(repo) ?? [],
+  };
+}
+
+/** IssueStore stand-in spanning several repos, so cursors can be compared. */
+function makeMultiStore() {
+  const watermarks = new Map<string, { lastPolledAt: string; etag: string }>();
+
+  const stub = {
+    async fetch(request: Request): Promise<Response> {
+      const url = new URL(request.url);
+      const path = url.pathname;
+
+      if (request.method === "GET" && path === "/wiki-docs") return Response.json([]);
+      if (request.method === "GET" && path === "/watermark") {
+        const wm = watermarks.get(url.searchParams.get("repo") ?? "");
+        if (!wm) return new Response("not found", { status: 404 });
+        return Response.json(wm);
+      }
+      if (request.method === "POST" && path === "/watermark") {
+        const body = (await request.json()) as {
+          repo: string;
+          lastPolledAt: string;
+          etag?: string;
+        };
+        watermarks.set(body.repo, {
+          lastPolledAt: body.lastPolledAt,
+          etag: body.etag ?? "",
+        });
+        return new Response("ok");
+      }
+      return new Response("ok");
+    },
+  };
+
+  return {
+    stub: stub as unknown as DurableObjectStub,
+    cursor: (repo: string) => watermarks.get(`wiki:${repo}`)?.etag,
+  };
+}
+
+/** A wiki whose enumeration totals `pages`. Nothing is in the store, so every
+ *  fetched page embeds and the pass costs its worst case — which is what brings
+ *  the run budget into play within a realistic repo count.
+ *
+ *  One of the `pages` is `Home`: `listWikiPages` unions it into every
+ *  enumeration whether or not `_pages` lists it, so a fixture without a `Home`
+ *  file hands the walk a genuine all-candidate 404 on every run. */
+function deepWiki(pages: number): FakeWiki {
+  const slugs = Array.from(
+    { length: pages - 1 },
+    (_, i) => `p${String(i).padStart(2, "0")}`,
+  );
+  return {
+    listed: slugs.map((slug) => ({ slug, title: slug })),
+    files: Object.fromEntries([...slugs, "Home"].map((s) => [s, `body of ${s}`])),
+  };
+}
+
+const repoList = (n: number): string[] =>
+  Array.from({ length: n }, (_, i) => `acme/r${String(i).padStart(2, "0")}`);
+
+const wikiSet = (repos: string[], pages: number): Record<string, FakeWiki> =>
+  Object.fromEntries(repos.map((r) => [r, deepWiki(pages)]));
+
+/** Capture the poller's console output for one run. The per-repo summary line
+ *  is the only place a pass's `failed` / `inconclusive` counts surface once
+ *  `runWikiSurfaces` has swallowed the summaries. */
+function captureConsole() {
+  const lines: string[] = [];
+  const record = (...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(" "));
+  };
+  const log = vi.spyOn(console, "log").mockImplementation(record);
+  const warn = vi.spyOn(console, "warn").mockImplementation(record);
+  const error = vi.spyOn(console, "error").mockImplementation(record);
+  return {
+    lines,
+    restore: () => {
+      log.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    },
+    /** The `{repo} wiki: ...` summary line for one repo, if the pass ran. */
+    summaryFor: (repo: string) => lines.find((l) => l.startsWith(`${repo} wiki: `)),
+  };
+}
+
+const TICK = Date.parse("2026-08-15T03:45:00Z");
+
+describe("poller: wiki run-wide subrequest budget", () => {
+  it("hands a repo the full per-repo cap while the run budget is untouched", () => {
+    expect(wikiFetchBudgetForPass(900)).toBe(PER_REPO_FETCH_CAP);
+  });
+
+  it("lets the run budget outrank the per-repo cap once the remainder is thin", () => {
+    // The remainder must cover the pass's fixed cost — overhead plus a reap
+    // that fills both of its budgets — before it funds a single page, so the
+    // cap falls below the per-repo constant well before the budget is spent.
+    const thin = wikiFetchBudgetForPass(120);
+    expect(thin).toBeGreaterThan(0);
+    expect(thin).toBeLessThan(PER_REPO_FETCH_CAP);
+    // Monotonic in the remainder: a repo later in the run never gets more.
+    expect(wikiFetchBudgetForPass(200)).toBeGreaterThanOrEqual(thin);
+  });
+
+  it("returns zero rather than a token budget when a pass cannot be funded", () => {
+    // Zero is the caller's signal to skip the repo outright. A pass always runs
+    // its first page's whole candidate list (issue #192), so a budget of 1 would
+    // be overrun rather than respected, and the pass would spend its fixed
+    // overhead to make one page of progress.
+    expect(wikiFetchBudgetForPass(14)).toBe(0);
+    expect(wikiFetchBudgetForPass(0)).toBe(0);
+    expect(wikiFetchBudgetForPass(-100)).toBe(0);
+    // One unit above the floor funds exactly one page, not zero.
+    expect(wikiFetchBudgetForPass(15)).toBe(1);
+  });
+
+  it("leaves no repo of the production six-repo run recording a failure", async () => {
+    // The observed shape (2026-08-15T03:45Z tick), page counts included: five
+    // repos indexed normally, one wiki not enabled, and the sixth reported 8
+    // failures for pages nobody had looked at — every per-repo budget held while
+    // their sum blew the invocation ceiling, and the tail wore all of it.
+    //
+    // Both outcomes for a trailing repo are correct now and neither records a
+    // failure: walked within the remaining share, or deferred untouched. What
+    // must not happen is the third one, a failure for a page never fetched.
+    const repos = [
+      "acme/webhook-mcp", // 5 pages
+      "acme/rag-mcp", // 7
+      "acme/desktop", // wiki not enabled
+      "acme/language", // 87 — the one that eats the run
+      "acme/dipper", // 5
+      "acme/neuron-graph", // 12 — the tail that reported 8 failures
+    ];
+    const wikis: Record<string, FakeWiki> = {
+      "acme/webhook-mcp": deepWiki(5),
+      "acme/rag-mcp": deepWiki(7),
+      "acme/language": deepWiki(87),
+      "acme/dipper": deepWiki(5),
+      "acme/neuron-graph": deepWiki(12),
+    };
+    const multi = stubMultiWiki(wikis);
+    const store = makeMultiStore();
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(repos, env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    let walked = 0;
+    for (const repo of repos) {
+      const summary = con.summaryFor(repo);
+      if (summary === undefined) {
+        // Deferred: never called, so its cursor cannot have moved.
+        expect(multi.rawFor(repo)).toEqual([]);
+        expect(store.cursor(repo)).toBeUndefined();
+        continue;
+      }
+      walked++;
+      expect(summary).toContain("0 failed");
+      expect(summary).toContain("0 inconclusive");
+    }
+    // Guard against the assertions above passing vacuously on a run that
+    // deferred everything: the share must fund real work, not just refuse it.
+    expect(walked).toBeGreaterThanOrEqual(3);
+    // The exception the fix exists to prevent must not appear at all.
+    expect(con.lines.some((l) => l.includes("Too many subrequests"))).toBe(false);
+  });
+
+  it("defers repos it cannot fund instead of walking them into exhaustion", async () => {
+    // Enough repos that the declared share cannot cover them all in one run.
+    const repos = repoList(12);
+    const multi = stubMultiWiki(wikiSet(repos, 30));
+    const store = makeMultiStore();
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(repos, env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    const ordered = rotateReposForRun(repos, TICK);
+    const walked = ordered.filter((r) => multi.rawFor(r).length > 0);
+    const deferred = ordered.filter((r) => multi.rawFor(r).length === 0);
+
+    expect(walked.length).toBeGreaterThan(0);
+    expect(deferred.length).toBeGreaterThan(0);
+    // Deferral is a suffix of the run order, never a hole in the middle.
+    expect(ordered.slice(0, walked.length)).toEqual(walked);
+
+    for (const repo of deferred) {
+      // Untouched cursor is the whole point: the next run resumes these repos
+      // exactly where the previous one left them, rather than recording a
+      // failure for a page that was never fetched.
+      expect(store.cursor(repo)).toBeUndefined();
+      expect(con.summaryFor(repo)).toBeUndefined();
+    }
+    expect(con.lines.some((l) => l.includes("Wiki run budget exhausted"))).toBe(true);
+  });
+
+  it("brings a deferred repo to the head of the order on a later tick", async () => {
+    // Without rotation the tail of `POLL_REPOS` is starved every run, which is
+    // the same "loop position decides the outcome" defect the budget removes.
+    const repos = repoList(12);
+    const store = makeMultiStore();
+    const { env } = makeWikiEnv();
+
+    const runAt = async (tick: number) => {
+      const multi = stubMultiWiki(wikiSet(repos, 30));
+      const con = captureConsole();
+      try {
+        await runWikiSurfaces(repos, env, store.stub, tick);
+      } finally {
+        con.restore();
+        vi.unstubAllGlobals();
+      }
+      return new Set(repos.filter((r) => multi.rawFor(r).length > 0));
+    };
+
+    const first = await runAt(TICK);
+    const deferred = repos.filter((r) => !first.has(r));
+    expect(deferred.length).toBeGreaterThan(0);
+
+    // Walk forward one tick at a time; every deferred repo must get walked
+    // within one full rotation of the list.
+    const covered = new Set(first);
+    for (let hour = 1; hour < repos.length; hour++) {
+      for (const r of await runAt(TICK + hour * 3_600_000)) covered.add(r);
+    }
+    for (const repo of deferred) expect(covered.has(repo)).toBe(true);
+  });
+
+  it("records an unobserved probe miss as inconclusive, not as a failure", async () => {
+    // A `fetch()` that throws says nothing about whether the page exists. The
+    // old message asserted "all candidates 404" for it, which is how eight
+    // present pages were reported as missing.
+    const repos = repoList(2);
+    stubMultiWiki(wikiSet(repos, 5), { throwAfter: 0 });
+    const store = makeMultiStore();
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(repos, env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    for (const repo of repos) {
+      const summary = con.summaryFor(repo);
+      expect(summary).toBeDefined();
+      expect(summary).toContain("0 failed");
+      expect(summary).not.toContain("0 inconclusive");
+    }
+    // The misleading literal is gone; the replacement names the cause.
+    expect(con.lines.some((l) => l.includes("all candidates 404"))).toBe(false);
+    expect(con.lines.some((l) => l.includes("probe threw; absence not observed"))).toBe(
+      true,
+    );
+  });
+
+  it("still reports an observed all-404 miss as a failure", async () => {
+    // The other side of the split: a page listed in `_pages` whose file is
+    // genuinely absent answers 404 on every candidate, and that *is* an
+    // observation. It must keep counting as a failure.
+    const wiki = deepWiki(3);
+    delete wiki.files.p01;
+    stubMultiWiki({ "acme/r00": wiki });
+    const store = makeMultiStore();
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(["acme/r00"], env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    const summary = con.summaryFor("acme/r00");
+    expect(summary).toContain("1 failed");
+    expect(summary).toContain("0 inconclusive");
+    expect(con.lines.some((l) => l.includes("every candidate answered 404"))).toBe(true);
+  });
+
+  it("does not break a deep wiki's multi-run drain", async () => {
+    // `liplus-language` shape: 87 pages against a 20-page pass budget, so the
+    // lap takes several runs. The run-wide budget sits above the per-repo one
+    // and must not disturb that walk when it is the only repo in the list.
+    const wikis = { "acme/deep": deepWiki(87) };
+    const store = makeMultiStore();
+    const { env } = makeWikiEnv();
+
+    const seen = new Set<string>();
+    for (let run = 0; run < 5; run++) {
+      const multi = stubMultiWiki(wikis);
+      const con = captureConsole();
+      try {
+        await runWikiSurfaces(["acme/deep"], env, store.stub, TICK + run * 3_600_000);
+      } finally {
+        con.restore();
+        vi.unstubAllGlobals();
+      }
+      for (const file of multi.rawFor("acme/deep")) {
+        seen.add(decodeURIComponent(file.slice(0, file.lastIndexOf("."))));
+      }
+      // A single-repo run always affords the full per-repo cap.
+      expect(con.summaryFor("acme/deep")).toContain(`/${PER_REPO_FETCH_CAP} fetches`);
+    }
+
+    // 87 pages at 20 per run: five runs cover every one of them.
+    expect(seen.size).toBe(87);
+  });
+
+  it("rotates the run order by tick without changing the list", () => {
+    const repos = repoList(6);
+    const leaders = new Set<string>();
+    for (let hour = 0; hour < repos.length; hour++) {
+      const ordered = rotateReposForRun(repos, TICK + hour * 3_600_000);
+      expect([...ordered].sort()).toEqual([...repos].sort());
+      leaders.add(ordered[0]);
+    }
+    // Every repo leads exactly once across one full rotation.
+    expect(leaders.size).toBe(repos.length);
+    // Same tick, same order — the offset is derived, not random.
+    expect(rotateReposForRun(repos, TICK)).toEqual(rotateReposForRun(repos, TICK));
+    expect(rotateReposForRun([], TICK)).toEqual([]);
+  });
+});
