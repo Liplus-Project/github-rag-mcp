@@ -823,8 +823,12 @@ describe("poller: pollWiki orphan reap", () => {
 
 // ── Run-wide subrequest budget (issue #248) ──────────────────
 
-const { runWikiSurfaces, wikiFetchBudgetForPass, rotateReposForRun } =
-  await import("./poller.js");
+const {
+  runWikiSurfaces,
+  wikiFetchBudgetForPass,
+  rotateReposForRun,
+  isSubrequestExhaustion,
+} = await import("./poller.js");
 
 /** `MAX_WIKI_FETCHES_PER_REPO_PER_RUN`, mirrored: the constant is module-private
  *  and what these assertions are about is the run budget outranking it. */
@@ -837,13 +841,16 @@ const PER_REPO_FETCH_CAP = 20;
  * the defect this suite covers is only visible across repos: every per-repo
  * budget holds while their sum overruns the invocation ceiling.
  *
- * `throwAfter` reproduces the production failure shape — `fetch()` raising
- * `Too many subrequests by single Worker invocation` rather than answering — so
- * the walk's classification of an *unobserved* miss can be asserted.
+ * `throwAfter` makes `fetch()` raise rather than answer once that many raw
+ * requests have been issued, so the walk's classification of an *unobserved*
+ * miss can be asserted. `throwMessage` picks which kind: the default is an
+ * ordinary network blip, and passing the subrequest-exhaustion text reproduces
+ * the production failure shape, which the poller must treat differently — one
+ * is this page's problem, the other is the whole run's.
  */
 function stubMultiWiki(
   wikis: Record<string, FakeWiki>,
-  opts: { throwAfter?: number } = {},
+  opts: { throwAfter?: number; throwMessage?: string } = {},
 ) {
   const rawByRepo = new Map<string, string[]>();
   let rawCount = 0;
@@ -891,7 +898,7 @@ function stubMultiWiki(
       rawByRepo.set(repo, seen);
 
       if (opts.throwAfter !== undefined && rawCount > opts.throwAfter) {
-        throw new Error("Too many subrequests by single Worker invocation.");
+        throw new Error(opts.throwMessage ?? "Network connection lost.");
       }
 
       const dot = file.lastIndexOf(".");
@@ -994,8 +1001,11 @@ function captureConsole() {
       warn.mockRestore();
       error.mockRestore();
     },
-    /** The `{repo} wiki: ...` summary line for one repo, if the pass ran. */
-    summaryFor: (repo: string) => lines.find((l) => l.startsWith(`${repo} wiki: `)),
+    /** The end-of-pass summary line for one repo, if the pass ran. Matched on
+     *  the `N pages,` field as well as the prefix: warn lines share the
+     *  `{repo} wiki: ` prefix and would otherwise be picked up instead. */
+    summaryFor: (repo: string) =>
+      lines.find((l) => l.startsWith(`${repo} wiki: `) && / \d+ pages, /.test(l)),
   };
 }
 
@@ -1114,7 +1124,7 @@ describe("poller: wiki run-wide subrequest budget", () => {
       expect(store.cursor(repo)).toBeUndefined();
       expect(con.summaryFor(repo)).toBeUndefined();
     }
-    expect(con.lines.some((l) => l.includes("Wiki run budget exhausted"))).toBe(true);
+    expect(con.lines.some((l) => l.includes("Wiki run share exhausted"))).toBe(true);
   });
 
   it("brings a deferred repo to the head of the order on a later tick", async () => {
@@ -1243,5 +1253,264 @@ describe("poller: wiki run-wide subrequest budget", () => {
     // Same tick, same order — the offset is derived, not random.
     expect(rotateReposForRun(repos, TICK)).toEqual(rotateReposForRun(repos, TICK));
     expect(rotateReposForRun([], TICK)).toEqual([]);
+  });
+});
+
+// ── Steady-state cost profile and the observed wall (issue #248) ─────
+
+/**
+ * IssueStore stand-in that already holds every page of every wiki, hashed to
+ * match, so the walk's hash comparison skips each one.
+ *
+ * This is the profile production actually runs in and the one `deepWiki` gets
+ * backwards. An unchanged page never reaches `processAndUpsertWikiDoc`, so it
+ * is charged its fetch attempts and nothing else — a sixth of what a changed
+ * page costs. A suite that only ever presents changed pages measures the
+ * expensive shape and leaves the common one untested, which is how a run-wide
+ * share that cannot engage on the observed tick passed review.
+ */
+async function makeIndexedStore(wikis: Record<string, FakeWiki>) {
+  const watermarks = new Map<string, { lastPolledAt: string; etag: string }>();
+  const byRepo = new Map<string, WikiDocRecord[]>();
+
+  for (const [repo, wiki] of Object.entries(wikis)) {
+    const records: WikiDocRecord[] = [];
+    for (const [name, body] of Object.entries(wiki.files)) {
+      records.push({
+        repo,
+        pageName: name,
+        extension: "md",
+        contentHash: await sha256Hex(body),
+        updatedAt: "2026-08-01T00:00:00Z",
+      });
+    }
+    byRepo.set(repo, records);
+  }
+
+  const stub = {
+    async fetch(request: Request): Promise<Response> {
+      const url = new URL(request.url);
+      const path = url.pathname;
+
+      if (request.method === "GET" && path === "/wiki-docs") {
+        return Response.json(byRepo.get(url.searchParams.get("repo") ?? "") ?? []);
+      }
+      if (request.method === "GET" && path === "/watermark") {
+        const wm = watermarks.get(url.searchParams.get("repo") ?? "");
+        if (!wm) return new Response("not found", { status: 404 });
+        return Response.json(wm);
+      }
+      if (request.method === "POST" && path === "/watermark") {
+        const body = (await request.json()) as {
+          repo: string;
+          lastPolledAt: string;
+          etag?: string;
+        };
+        watermarks.set(body.repo, {
+          lastPolledAt: body.lastPolledAt,
+          etag: body.etag ?? "",
+        });
+        return new Response("ok");
+      }
+      return new Response("ok");
+    },
+  };
+
+  return {
+    stub: stub as unknown as DurableObjectStub,
+    cursor: (repo: string) => watermarks.get(`wiki:${repo}`)?.etag,
+  };
+}
+
+/** The repo list and page counts of the 2026-08-15T03:45Z tick, in order.
+ *  `liplus-desktop` has no wiki, so it is absent from the wiki map. */
+const OBSERVED_REPOS = [
+  "acme/webhook-mcp",
+  "acme/rag-mcp",
+  "acme/desktop",
+  "acme/language",
+  "acme/dipper",
+  "acme/neuron-graph",
+];
+
+const observedWikis = (): Record<string, FakeWiki> => ({
+  "acme/webhook-mcp": deepWiki(5),
+  "acme/rag-mcp": deepWiki(7),
+  "acme/language": deepWiki(87),
+  "acme/dipper": deepWiki(5),
+  "acme/neuron-graph": deepWiki(12),
+});
+
+const SUBREQUEST_EXHAUSTION = "Too many subrequests by single Worker invocation.";
+
+describe("poller: wiki steady-state profile and the observed wall", () => {
+  it("charges an unchanged page only its fetch, not the embed fan-out", async () => {
+    // The load-bearing asymmetry. Everything below follows from it: the
+    // accounted cost of a run depends on how much changed, not on page count.
+    const wikis = { "acme/r00": deepWiki(6) };
+    const fresh = makeMultiStore();
+    const indexed = await makeIndexedStore(wikis);
+    const { env } = makeWikiEnv();
+
+    stubMultiWiki(wikis);
+    const changed = await pollWiki("acme/r00", env, fresh.stub, { fetchBudget: 20 });
+    vi.unstubAllGlobals();
+
+    stubMultiWiki(wikis);
+    const unchanged = await pollWiki("acme/r00", env, indexed.stub, { fetchBudget: 20 });
+    vi.unstubAllGlobals();
+
+    expect(changed.embedded).toBe(6);
+    expect(unchanged.embedded).toBe(0);
+    expect(unchanged.skipped).toBe(6);
+    // Same pages, same fetches, and the accounted spend differs by the whole
+    // embed fan-out.
+    expect(unchanged.fetches).toBe(changed.fetches);
+    expect(unchanged.subrequests).toBeLessThan(changed.subrequests / 2);
+  });
+
+  it("does not engage the declared share on the observed steady-state run", async () => {
+    // Honest negative test. On the profile that actually threw in production,
+    // the accounted spend of the whole six-repo run is far under the declared
+    // share, so nothing defers and the run proceeds in the order that threw.
+    //
+    // This is the limitation stated in `WIKI_SUBREQUEST_BUDGET_PER_RUN`, pinned
+    // so it cannot quietly stop being true: the share is not what protects this
+    // shape, and a future change that makes this test fail has either fixed the
+    // unit gap or broken the cost model — both worth stopping for.
+    const wikis = observedWikis();
+    const store = await makeIndexedStore(wikis);
+    const multi = stubMultiWiki(wikis);
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(OBSERVED_REPOS, env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    // Every repo walked; nothing deferred.
+    for (const repo of OBSERVED_REPOS) {
+      if (repo === "acme/desktop") continue; // no wiki — skipped, not deferred
+      expect(multi.rawFor(repo).length).toBeGreaterThan(0);
+    }
+    expect(con.lines.some((l) => l.includes("deferred to the next run"))).toBe(false);
+
+    // And the accounted total sits well under the share, which is why.
+    const total = con.lines
+      .map((l) => /, (\d+) subrequests,/.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .reduce((a, n) => a + Number(n), 0);
+    expect(total).toBeGreaterThan(0);
+    expect(total).toBeLessThan(150);
+  });
+
+  it("stops the whole run when the invocation reports subrequest exhaustion", async () => {
+    // What actually covers the observed failure. The share is an estimate that
+    // may never engage; the wall is observed, and the run ends on it.
+    const wikis = observedWikis();
+    const store = await makeIndexedStore(wikis);
+    // 14 raw requests in: past the first two repos, inside a later one.
+    const multi = stubMultiWiki(wikis, {
+      throwAfter: 14,
+      throwMessage: SUBREQUEST_EXHAUSTION,
+    });
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(OBSERVED_REPOS, env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    // No repo records a failure for a page it never observed. This is the
+    // literal acceptance criterion: 8 false failures became 0.
+    for (const repo of OBSERVED_REPOS) {
+      const summary = con.summaryFor(repo);
+      if (summary === undefined) continue;
+      expect(summary).toContain("0 failed");
+    }
+    // The run stopped rather than grinding every remaining repo into the wall.
+    expect(con.lines.some((l) => l.includes("out of subrequests (observed)"))).toBe(true);
+
+    const ordered = rotateReposForRun(OBSERVED_REPOS, TICK);
+    const walked = ordered.filter((r) => multi.rawFor(r).length > 0);
+    const unreached = ordered.filter((r) => multi.rawFor(r).length === 0);
+    expect(walked.length).toBeLessThan(ordered.length);
+    expect(unreached.length).toBeGreaterThan(0);
+    for (const repo of unreached) {
+      // Repos the run never reached kept their cursors; the next tick resumes
+      // them where the previous run left off.
+      expect(store.cursor(repo)).toBeUndefined();
+    }
+  });
+
+  it("holds the cursor on the page the wall interrupted", async () => {
+    // A page whose probes threw was never observed, so the cursor must not
+    // advance past it — the same treatment the fetch-budget guard gives an
+    // inconclusive probe, on the measured axis instead of the estimated one.
+    const wikis = { "acme/r00": deepWiki(9) };
+    const store = await makeIndexedStore(wikis);
+    const { env } = makeWikiEnv();
+
+    // Let three pages resolve, then hit the wall on the fourth.
+    stubMultiWiki(wikis, { throwAfter: 3, throwMessage: SUBREQUEST_EXHAUSTION });
+    const con = captureConsole();
+    let summary;
+    try {
+      summary = await pollWiki("acme/r00", env, store.stub, { fetchBudget: 20 });
+    } finally {
+      con.restore();
+    }
+
+    expect(summary.exhausted).toBe(true);
+    expect(summary.visited).toBe(3);
+    expect(summary.failed).toBe(0);
+    expect(summary.inconclusive).toBe(0);
+    // Slug order puts `Home` first, so the three observed pages are Home, p00,
+    // p01 and the wall lands on p02. The cursor sits on the last page actually
+    // observed, not on the one that threw.
+    expect(summary.nextCursor).toBe("p01");
+    expect(store.cursor("acme/r00")).toBe("p01");
+    // The reap is skipped wholesale — its probes would hit the same wall.
+    expect(summary.removed).toBe(0);
+    expect(con.lines.some((l) => l.includes("reap skipped this run"))).toBe(true);
+  });
+
+  it("keeps an ordinary network error on the per-page axis", async () => {
+    // The contrast that makes the exhaustion branch meaningful. A blip is this
+    // page's problem: it counts as inconclusive, the cursor advances past it,
+    // and the run carries on to the remaining repos.
+    const wikis = { "acme/r00": deepWiki(4), "acme/r01": deepWiki(4) };
+    const store = await makeIndexedStore(wikis);
+    const multi = stubMultiWiki(wikis, { throwAfter: 0 });
+    const { env } = makeWikiEnv();
+    const con = captureConsole();
+
+    try {
+      await runWikiSurfaces(["acme/r00", "acme/r01"], env, store.stub, TICK);
+    } finally {
+      con.restore();
+    }
+
+    // Both repos were walked — a blip does not end the run.
+    expect(multi.rawFor("acme/r00").length).toBeGreaterThan(0);
+    expect(multi.rawFor("acme/r01").length).toBeGreaterThan(0);
+    expect(con.lines.some((l) => l.includes("out of subrequests (observed)"))).toBe(false);
+    for (const repo of ["acme/r00", "acme/r01"]) {
+      expect(con.summaryFor(repo)).toContain("0 failed");
+      expect(con.summaryFor(repo)).not.toContain("0 inconclusive");
+    }
+  });
+
+  it("classifies the exhaustion message and nothing else", () => {
+    expect(isSubrequestExhaustion(new Error(SUBREQUEST_EXHAUSTION))).toBe(true);
+    expect(isSubrequestExhaustion(new Error("Too many subrequests"))).toBe(true);
+    expect(isSubrequestExhaustion(new Error("Network connection lost."))).toBe(false);
+    expect(isSubrequestExhaustion(new Error("429 Too Many Requests"))).toBe(false);
+    expect(isSubrequestExhaustion("Too many subrequests")).toBe(true);
+    expect(isSubrequestExhaustion(undefined)).toBe(false);
   });
 });
