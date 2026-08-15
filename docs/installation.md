@@ -278,8 +278,9 @@ Authentication:
 Response:
 
 ```json
-{ "repo": "owner/repo", "pages": 77, "fetches": 20, "visited": 20, "embedded": 18,
-  "skipped": 2, "failed": 0, "removed": 3, "orphansDeferred": 5, "orphansWithheld": 0,
+{ "repo": "owner/repo", "pages": 77, "fetches": 20, "subrequests": 137, "visited": 20,
+  "embedded": 18, "skipped": 2, "failed": 0, "inconclusive": 0, "removed": 3,
+  "orphansDeferred": 5, "orphansWithheld": 0,
   "startCursor": "", "nextCursor": "current-architecture-as-concession",
   "lapAnchor": "", "wrapped": false, "enumerated": true, "done": false }
 ```
@@ -292,6 +293,8 @@ Operational notes:
 - `enumerated: false` means the `/wiki/_pages` scrape failed — nothing was indexed and, deliberately, nothing was reaped; retry rather than treating it as an empty wiki
 - `orphansDeferred` counts reap candidates the call never reached, because it hit either the per-run delete cap or the per-run probe cap; keep calling until it reaches 0. A candidate that was reached and withheld is reported by `orphansWithheld`, not here — the two budgets are separate so a withheld candidate cannot spend a delete slot and stall the real deletions ordering behind it (issue #197)
 - `fetches` may exceed `limit` by up to 3 on a call whose *first* page needs more candidates than the budget allows. Probing a page is up to 4 attempts (two filename candidates x `md` / `markdown`), and a probe cut short mid-list is not an observed result, so the walk would otherwise re-probe that page on every call without ever moving the cursor. The first page of each call is therefore allowed to finish its candidate list; every page after it stops at the budget (issue #192)
+- `failed` counts pages whose every filename / extension candidate answered an **observed** 404. `inconclusive` counts pages whose probes *threw* instead of answering, so absence was never observed — a network error, or subrequest exhaustion. The two were reported as one under the literal "all candidates 404", which is how pages that were present read as missing (issue #248). A non-zero `inconclusive` is a signal about the run, not about the wiki; the page is retried on the next lap
+- `subrequests` is what the call spent, counted at each call site that issues one. The cron path subtracts it from a run-wide share so one repo's deep wiki cannot starve the repos behind it; this endpoint is its own Worker invocation, so the figure is reported for observability only and no share is applied to it
 - `orphansWithheld` counts reap candidates whose content still served (or whose existence probe could not conclude), so the delete was withheld. Non-zero means the `_pages` scrape came back **short of the live wiki** — the pages themselves are intact and were protected, but the enumeration is what to investigate; the worker log names each withheld page (issue #187)
 - verify coverage by comparing `search_docs` rows (`type = 'wiki_doc'`) against the page list at `https://github.com/{repo}/wiki/_pages`
 
