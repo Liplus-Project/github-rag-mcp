@@ -126,7 +126,7 @@ function normaliseFileStatus(status: string): DiffFileStatus {
  *      take at most `options.maxFiles` of what remains.
  *   3. Build embedding inputs = commit message + file path + patch, truncated.
  *   4. Batch-embed inputs via Workers AI (chunked by `planEmbeddingBatches`, which
- *      splits on a UTF-8 byte budget rather than a file count).
+ *      splits on input count times longest input rather than on a file count).
  *   5. Upsert all vectors into Vectorize in the same chunks.
  *   6. Record DiffRecord rows into the Durable Object store for each indexed file.
  *
@@ -196,16 +196,15 @@ export async function processAndUpsertCommitDiff(
     prepareDiffEmbeddingInput(commitMessage, f.filename, f.patch),
   );
 
-  // Chunk on the UTF-8 byte total of the inputs, not on how many files the commit
-  // touched. A file count bounds a call only if every patch is assumed to be
-  // small, and a commit that breaks that assumption used to fail the whole chunk —
-  // which the poller reads as an uningested commit and holds the diff watermark on,
-  // so the surface stalls there rather than skipping past it (#236). Bytes rather
-  // than estimated tokens, which ran about 2.1x low on diff patches (#241), and
-  // rather than characters, which production measured at 1.146 tokens per character
-  // on non-ASCII content: byte fallback splits a character the vocabulary lacks into
-  // its UTF-8 bytes, so only bytes are below every split the tokenizer can make
-  // (#244).
+  // Chunk on what the endpoint charges a batch — its input count times its longest
+  // input, measured in UTF-8 bytes — not on how many files the commit touched. A
+  // file count bounds a call only if every patch is assumed to be small, and a
+  // commit that breaks that assumption used to fail the whole chunk — which the
+  // poller reads as an uningested commit and holds the diff watermark on, so the
+  // surface stalls there rather than skipping past it (#236). The three budgets
+  // before this one bounded the *sum* of the inputs and kept being rejected at the
+  // same batches: the endpoint pads each slot to the longest input, so the sum never
+  // appears in the charge, whatever unit it is summed in (#246).
   for (const { start, end } of planEmbeddingBatches(allInputs)) {
     const chunk = indexable.slice(start, end);
     const inputs = allInputs.slice(start, end);

@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import type { Env } from "../types.js";
 import { processAndUpsertCommitDiff, type GitHubCommitDetail } from "./embed-diff.js";
 import {
-  MAX_EMBEDDING_BATCH_BYTES,
   TOKEN_OVERHEAD_PER_INPUT,
   WORKERS_AI_BATCH_CONTEXT_LIMIT,
   utf8ByteLength,
@@ -78,21 +77,32 @@ function mkDiffPatch(chars: number): string {
   return line.repeat(Math.ceil(chars / line.length)).slice(0, chars);
 }
 
-/** What the planner charges one Workers AI call. Upper-bounds its token count. */
+/** What the endpoint charges one Workers AI call: its input count times its longest
+ *  input, measured in UTF-8 bytes plus the per-input token overhead. The endpoint
+ *  pads every slot of a batch to the longest member (#246). */
 function callCharge(texts: string[]): number {
+  if (texts.length === 0) return 0;
+  const longest = Math.max(
+    ...texts.map((text) => utf8ByteLength(text) + TOKEN_OVERHEAD_PER_INPUT),
+  );
+  return texts.length * longest;
+}
+
+/** What the retired byte-sum budget charged the same call (#244). Kept in the tests
+ *  only, to hold the regression fixtures inside the shape it passed. */
+function retiredSumCharge(texts: string[]): number {
   return texts.reduce(
     (sum, text) => sum + utf8ByteLength(text) + TOKEN_OVERHEAD_PER_INPUT,
     0,
   );
 }
 
-/** What the retired character budget charged the same call (#242). Kept in the
- *  tests only, to hold the regression fixtures inside the shape it passed. */
+/** What the retired character budget charged the same call (#242). */
 function retiredCharCharge(texts: string[]): number {
   return texts.reduce((sum, text) => sum + text.length + 2, 0);
 }
 
-describe("embed-diff: the batch axis is the UTF-8 byte budget, not the file count", () => {
+describe("embed-diff: the batch axis is count times longest input, not the file count", () => {
   it("still sends an ordinary commit as one call", async () => {
     // 30 files well past the retired count cap of 20, each a small patch.
     const { env, aiCalls } = mkEnv();
@@ -130,7 +140,7 @@ describe("embed-diff: the batch axis is the UTF-8 byte budget, not the file coun
     // Every call carrying more than one input stays inside the budget.
     for (const call of aiCalls) {
       if (call.length > 1) {
-        expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_BYTES);
+        expect(callCharge(call)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
       }
     }
 
@@ -166,7 +176,7 @@ describe("embed-diff: the batch axis is the UTF-8 byte budget, not the file coun
 
     expect(aiCalls.length).toBeGreaterThan(1);
     for (const call of aiCalls) {
-      expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_BYTES);
+      expect(callCharge(call)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
     }
 
     // Splitting is only the fix if every file still lands.
@@ -197,12 +207,71 @@ describe("embed-diff: the batch axis is the UTF-8 byte budget, not the file coun
 
     expect(aiCalls.length).toBeGreaterThan(1);
     for (const call of aiCalls) {
-      expect(callCharge(call)).toBeLessThanOrEqual(MAX_EMBEDDING_BATCH_BYTES);
+      expect(callCharge(call)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
     }
 
     expect(result.embedded).toBe(16);
     expect(result.failed).toBe(0);
     expect(new Set(upsertedIds.flat()).size).toBe(16);
+  });
+
+  it("splits the 18-file commit that a byte-sum budget let through", async () => {
+    // `neuron-graph-rag@1fb0f6b`, the commit that still failed 8 hours after the byte
+    // budget went to 100% traffic: 20 files, 18 of them with a patch, and the
+    // rejection unchanged at `Max context reached 60678 tokens but model supports
+    // only 60000` across all three sum-axis budgets — 18 × 3371, the longest input
+    // charged once per slot. The sum of these inputs is a fifth of the ceiling, so no
+    // sum-axis budget of any unit sees this batch.
+    const { env, aiCalls, upsertedIds } = mkEnv();
+    const commit = mkCommit([
+      mkDiffPatch(3600),
+      ...Array.from({ length: 17 }, (_, i) => `@@ -1 +1 @@\n+line ${i}`),
+    ]);
+    commit.files!.push(
+      { filename: "assets/a.png", status: "modified", sha: "blobA" },
+      { filename: "assets/b.png", status: "added", sha: "blobB" },
+    );
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
+
+    const allInputs = aiCalls.flat();
+    // The fixture reproduces the shape only while it stays in the failing zone: well
+    // inside the retired byte-sum budget, over the ceiling once padded to 18 slots.
+    expect(retiredSumCharge(allInputs)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+    expect(callCharge(allInputs)).toBeGreaterThan(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+
+    expect(aiCalls.length).toBeGreaterThan(1);
+    for (const call of aiCalls) {
+      expect(callCharge(call)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+    }
+
+    expect(result.embedded).toBe(18);
+    expect(result.skipped).toBe(2);
+    expect(result.failed).toBe(0);
+    expect(new Set(upsertedIds.flat()).size).toBe(18);
+  });
+
+  it("clears the 44-file commit the watermark has been held on", async () => {
+    // `neuron-graph-rag@92eb94d`, the other commit in the stall: sent at 20 files it
+    // was charged 85920 and at 16 it was charged 68736 — one quotient, 4296, across
+    // both counts. The unbounded (webhook) path takes all 44 in one call, so the
+    // split has to come from the planner rather than from the poller's file budget.
+    const { env, aiCalls, upsertedIds } = mkEnv();
+    const commit = mkCommit(
+      Array.from({ length: 44 }, (_, i) => mkDiffPatch(i % 4 === 0 ? 4200 : 700)),
+    );
+
+    const result = await processAndUpsertCommitDiff(env, mkStore(), REPO, commit);
+
+    expect(aiCalls.length).toBeGreaterThan(1);
+    for (const call of aiCalls) {
+      expect(callCharge(call)).toBeLessThanOrEqual(WORKERS_AI_BATCH_CONTEXT_LIMIT);
+    }
+
+    expect(result.embedded).toBe(44);
+    expect(result.failed).toBe(0);
+    expect(aiCalls.flat()).toHaveLength(44);
+    expect(new Set(upsertedIds.flat()).size).toBe(44);
   });
 
   it("keeps each embed call paired with its own slice of files", async () => {

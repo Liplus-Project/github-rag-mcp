@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Env } from "./types.js";
 import {
-  MAX_EMBEDDING_BATCH_BYTES,
   MAX_EMBEDDING_INPUT_CHARS,
   TOKEN_OVERHEAD_PER_INPUT,
+  WORKERS_AI_BATCH_CONTEXT_LIMIT,
 } from "./pipeline/embedding.js";
 
 // `pollDiffs` fans out to the commit-diff pipeline (GitHub detail fetch + Workers
@@ -559,12 +559,14 @@ describe("poller: diffFileBudgetPerPhase", () => {
     // amortised over the files it holds. Moving the batch budget moves that floor —
     // it was 7 files under a character budget and is 2 under a byte budget (#244),
     // since truncation caps an input at MAX_EMBEDDING_INPUT_CHARS characters and a
-    // UTF-16 code unit is at most 3 UTF-8 bytes. At 2 the sum is exactly 3, so this
-    // holds without slack and a further tightening of the batch axis fails here
-    // rather than silently overrunning the invocation budget.
+    // UTF-16 code unit is at most 3 UTF-8 bytes. The move to count-times-longest
+    // (#246) left it at 2: on a batch of equal inputs the two formulas agree, and
+    // maximal inputs is the case this floor is read off. At 2 the sum is exactly 3,
+    // so this holds without slack and a further tightening of the batch axis fails
+    // here rather than silently overrunning the invocation budget.
     const maxBytesPerInput = MAX_EMBEDDING_INPUT_CHARS * 3;
     const minFilesPerBatch = Math.floor(
-      MAX_EMBEDDING_BATCH_BYTES / (maxBytesPerInput + TOKEN_OVERHEAD_PER_INPUT),
+      WORKERS_AI_BATCH_CONTEXT_LIMIT / (maxBytesPerInput + TOKEN_OVERHEAD_PER_INPUT),
     );
 
     expect(minFilesPerBatch).toBeGreaterThanOrEqual(1);
