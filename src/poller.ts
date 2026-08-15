@@ -3421,7 +3421,8 @@ export async function runWikiSurfaces(
     console.warn(
       `Wiki run budget exhausted (${WIKI_SUBREQUEST_BUDGET_PER_RUN} subrequests). ` +
         `${deferred.length} repo(s) deferred to the next run with cursors unmoved: ` +
-        `${deferred.join(", ")}. Rotation puts them ahead of this run's leaders next tick.`,
+        `${deferred.join(", ")}. Rotation advances each by one position per tick, ` +
+        `so every repo leads within ${ordered.length} ticks.`,
     );
   }
 }
