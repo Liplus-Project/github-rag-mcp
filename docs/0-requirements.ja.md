@@ -288,8 +288,10 @@ Vectorize は hybrid retrieval の dense 側を担う。次の metadata を伴�
 
 Metadata index（10/10 枠使用）:
 
-- Pre-filter 対応: repo, type, state, milestone
-- 将来の pre-filter 用に格納: label_0, label_1, label_2, label_3, assignee_0, assignee_1
+- Pre-filter 対応: repo, type, state, milestone, doc_path
+- 将来の pre-filter 用に格納: label_0, label_1, label_2, label_3, assignee_0
+
+`assignee_1` は vector metadata に保存し続け、現行 post-filter からも利用できるが、metadata index は持たない。platform の10枠上限に対する優先順位として、未使用だった将来用 `assignee_1` pre-filter 枠を `doc_path` へ振り替え、directory 単位の文書検索が ranking 前に dense 候補母集合を絞れるようにする。
 
 Vectorize の metadata filter はフィールド間で AND のみサポートし、OR は非対応。`label_0 = "bug" OR label_1 = "bug"` のようなクエリは表現できない。そのため labels / assignees は overfetch + post-filter で recall を改善している。Vectorize が OR または `$in`-across-fields をサポートした時点で、個別フィールドは即座に pre-filter 化可能。
 
@@ -390,7 +392,7 @@ retrieval layer は hybrid search（dense + sparse）+ cross-encoder rerank + st
 想定フロー:
 
 1. query の embedding を Workers AI BGE-M3 で生成
-2. structured params から Vectorize filter（dense 側）と D1 SQL WHERE（sparse 側）を同時構築（repo, state, type, milestone は pre-filter）
+2. structured params から Vectorize filter（dense 側）と D1 SQL WHERE（sparse 側）を同時構築（repo, state, type, milestone と文書 `path_prefix` は両側で pre-filter）
 3. 内部 topK を常にオーバーフェッチ（requestedTopK × 5, max 50）。条件なしなのは、8 の entity 集約がどの経路でも複数行を 1 件に畳むため、rerank 無効時でも候補プールが top_k を上回っていなければ要求件数を満たせないからである。reranker は最大 50 件まで処理
 4. dense (Vectorize.query) と sparse (D1 FTS5 MATCH + BM25) を並列実行
 5. 両 ranker の結果を Reciprocal Rank Fusion（RRF、k=60）で合成
@@ -527,13 +529,15 @@ Returns:
 - 同一実体の他の行を吸収した結果には `same_entity`（Entity Aggregation 参照）。`top_k` は行数ではなく実体数で数える
 - top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`、`filters_unmatched`
 
-**フィルタ不成立（`filters_unmatched`）.** `repo` はフルスラッグ（`owner/repo`）の完全一致である——dense 側は Vectorize metadata の `$eq`、sparse 側は `d.repo = ?`。短いリポジトリ名を渡すと1行にもマッチせず、返るレスポンスは「本当にヒットが無かった」場合と同じ形になる。`filters_unmatched` がこの2つを分ける: search mode では常に存在し、`[]` は適用した全フィルタが空でない母集合を選べたこと（つまり `count: 0` は真にヒットゼロ）を意味し、名前が載っていればそのフィルタの母集合が空、すなわち誤っているのはクエリではなくフィルタの値である。
+**フィルタ不成立（`filters_unmatched`）.** `repo` はフルスラッグ（`owner/repo`）の完全一致である——dense 側は Vectorize metadata の `$eq`、sparse 側は `d.repo = ?`。`path_prefix` は repository-relative path が指定 directory prefix で始まる doc 行を選ぶ。短いリポジトリ名や、doc 行を1件も選ばない path prefix を渡すと、返るレスポンスは「本当にヒットが無かった」場合と同じ形になる。`filters_unmatched` がこの2つを分ける: search mode では常に存在し、`[]` は適用した全フィルタが空でない母集合を選べたこと（つまり `count: 0` は真にヒットゼロ）を意味し、名前が載っていればそのフィルタの母集合が空、すなわち誤っているのはクエリではなくフィルタの値である。
 
 区別にフィールドを割く理由は、エージェンティックな多段検索が silent zero のコストを反転させるからである。単発検索ならゼロは呼び出し側が見に行く行き止まりだが、検索ループの中では「この角度には何も無かった」という正常な中間結果として消費されて次へ回る。フィルタ不成立が表に出ないまま、クエリ予算を1回分、偽陰性に使って終わる。
 
-判定は存在確認クエリ（`SELECT 1 FROM search_docs WHERE repo = ? LIMIT 1`）で、候補集合が空のときだけ走る——候補が1件でもあればフィルタが成立した証拠なので、追加の読みが hot path に乗ることはない。プローブ自体が失敗した場合は「観測していない不成立」を主張せず、何も報告しない。プローブ対象は `repo` のみ: もっともらしく見える誤値（フルスラッグに対する短いリポジトリ名）が存在するのはこのフィルタだからである。短い名前からフルスラッグへの自動解決は意図的に非スコープ——複数リポジトリにマッチする名前の曖昧解決を設計する必要がある。
+判定は候補集合が空のときだけ存在確認クエリを走らせる——候補が1件でもあればフィルタが成立した証拠なので、追加の読みが hot path に乗ることはない。まず repository を確認し、成立した場合だけその repository 内の doc path を確認する。誤った repository に対して、別の repository では妥当かもしれない path まで誤りと報告しないためである。プローブ自体が失敗した場合は「観測していない不成立」を主張せず、何も報告しない。短い名前からフルスラッグへの自動解決は意図的に非スコープ——複数リポジトリにマッチする名前の曖昧解決を設計する必要がある。
 
-**scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` は store 側へ push down されるので、窓に行があれば、その窓がどれだけ古くても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。
+**scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` と文書 `path_prefix` は store 側へ push down されるので、窓に対象行があれば、その窓がどれだけ古くても、prefix 外に新しい文書が何件あっても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。
+
+**文書 path prefix.** `path_prefix` は `type: "doc"` と組み合わせた場合だけ有効。repository-relative directory を表し、末尾 `/` が必須で、先頭 `/`、backslash、NUL、空 segment、`.` / `..` segment を含めず、Vectorize が string metadata の先頭64 byteだけを索引する制約に合わせUTF-8で64 byte以内とする。dense / sparse は `doc_path` に同じ半開 lexical range を適用し、scan は range を doc store query へ押し下げ、返った行を `startsWith` でも確認する。fetch mode は `vector_ids` が行を直接名指しするため、従来どおり無視する。
 
 scan mode は top-level に `truncated` を追加する。窓が応答に載せた以上の行を持つとき true になる（endpoint が cap 一杯まで返した、または merge 後の件数が `top_k` を超えた）。これが「該当なし」と「読み切れていない」を呼び出し側に区別させる: 返った最古の行の時刻を次の `until` にして遡ればよい。両者を区別できない欠損調査ツールは、存在しない欠損を報告し実在する取り込みを見落とす——#178 の再検証で 1 日に 2 度踏んだ誤りがこれである。
 

@@ -59,6 +59,7 @@ import {
   FETCH_MAX_VECTOR_IDS,
 } from "./fetch.js";
 import { entityKey, groupByEntity } from "./aggregate.js";
+import { pathPrefixRange, validateDocPathPrefix } from "./path-prefix.js";
 
 const GITHUB_API = "https://api.github.com";
 const USER_AGENT = "github-rag-mcp/0.1.0";
@@ -315,7 +316,7 @@ export function createRagMcpServer(env: Env): McpServer {
         "diff body without a second round trip to GitHub. Served from D1, so it makes no GitHub API call; what it " +
         "returns is the indexed copy of the body, truncated at " +
         `${FETCH_CONTENT_MAX_CHARS} characters, not the live source.\n` +
-        "Optional metadata filters (repo, state, labels, milestone, assignee, type) apply across modes 1-3 " +
+        "Optional metadata filters (repo, path_prefix, state, labels, milestone, assignee, type) apply across modes 1-3 " +
         "(mode 4 names its rows, so nothing is filtered there); " +
         "repo takes the full slug (owner/repo) and matches exactly, so a bare repository name selects nothing. " +
         "In search mode the response carries filters_unmatched: any filter listed there matched no row in the " +
@@ -355,6 +356,14 @@ export function createRagMcpServer(env: Env): McpServer {
             "Filter by repository — full slug (owner/repo), exact match. " +
               "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
               "search mode flags that case as \"repo\" in the response's filters_unmatched.",
+          ),
+        path_prefix: z
+          .string()
+          .optional()
+          .describe(
+            "Filter repository docs by a repository-relative directory prefix before ranking. " +
+              "Requires type=\"doc\", a trailing /, no leading /, backslash, NUL, empty, . or .. path segments, " +
+              "and at most 64 UTF-8 bytes. Search mode reports an unmatched value as \"path_prefix\" in filters_unmatched.",
           ),
         state: z
           .enum(["open", "closed", "all"])
@@ -505,6 +514,7 @@ export function createRagMcpServer(env: Env): McpServer {
     async ({
       query,
       repo,
+      path_prefix,
       state,
       labels,
       milestone,
@@ -554,6 +564,14 @@ export function createRagMcpServer(env: Env): McpServer {
         }
       }
 
+      const pathPrefixError = validateDocPathPrefix(path_prefix, type);
+      if (pathPrefixError) {
+        return {
+          content: [{ type: "text" as const, text: pathPrefixError }],
+          isError: true,
+        };
+      }
+
       const requestedTopK = top_k ?? 10;
       const fusionMode = fusion ?? "rrf";
       const rerankEnabled = rerank ?? true;
@@ -571,6 +589,7 @@ export function createRagMcpServer(env: Env): McpServer {
       if (isScanMode) {
         const scan = await runScan(getStore(env), {
           repo,
+          pathPrefix: path_prefix,
           state,
           labels,
           milestone,
@@ -650,6 +669,10 @@ export function createRagMcpServer(env: Env): McpServer {
               if (state && state !== "all") filter["state"] = { $eq: state };
               if (type && type !== "all") filter["type"] = { $eq: type };
               if (milestone) filter["milestone"] = { $eq: milestone };
+              if (path_prefix) {
+                const { lower, upper } = pathPrefixRange(path_prefix);
+                filter["doc_path"] = { $gte: lower, $lt: upper };
+              }
 
               const vectorizeFilter: VectorizeVectorMetadataFilter | undefined =
                 Object.keys(filter).length > 0 ? filter : undefined;
@@ -683,6 +706,7 @@ export function createRagMcpServer(env: Env): McpServer {
                 ftsFilter.type = type as FtsFilter["type"];
               }
               if (milestone) ftsFilter.milestone = milestone;
+              if (path_prefix) ftsFilter.pathPrefix = path_prefix;
               try {
                 return await queryFts(env.DB_FTS, trimmedQuery, internalTopK, ftsFilter);
               } catch (err) {
@@ -721,7 +745,7 @@ export function createRagMcpServer(env: Env): McpServer {
       // several repositories, which is a heavier change (issue #219 non-scope).
       const filtersUnmatched = await detectUnmatchedFilters(
         env.DB_FTS,
-        { repo },
+        { repo, pathPrefix: path_prefix },
         denseResult.hits.length + sparseHits.length,
       );
 

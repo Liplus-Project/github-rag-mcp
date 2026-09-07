@@ -122,19 +122,30 @@ describe("fts: reciprocalRankFusion", () => {
 // differ, so the test pins the decision, not the SQL (the SQL is exercised
 // against a real D1 in fts.workers.test.ts).
 describe("fts: detectUnmatchedFilters (#219)", () => {
-  /** Minimal D1 stand-in: records probes, answers from a fixed repo set. */
-  function fakeDb(indexedRepos: string[], opts: { throws?: boolean } = {}) {
+  /** Minimal D1 stand-in: records probes, answers from fixed repo/doc sets. */
+  function fakeDb(
+    indexedRepos: string[],
+    opts: { throws?: boolean; indexedDocs?: Array<{ repo: string; path: string }> } = {},
+  ) {
     const probes: string[] = [];
     const db = {
       probes,
-      prepare() {
+      prepare(sql: string) {
         return {
-          bind(repo: string) {
-            probes.push(repo);
+          bind(...args: string[]) {
+            probes.push(args.join("|"));
             return {
               first: async () => {
                 if (opts.throws) throw new Error("D1_ERROR: unreachable");
-                return indexedRepos.includes(repo) ? { present: 1 } : null;
+                if (sql.includes("type = 'doc'")) {
+                  const [lower, upper, repo] = args;
+                  const found = (opts.indexedDocs ?? []).some(
+                    (doc) =>
+                      (!repo || doc.repo === repo) && doc.path >= lower && doc.path < upper,
+                  );
+                  return found ? { present: 1 } : null;
+                }
+                return indexedRepos.includes(args[0]) ? { present: 1 } : null;
               },
             };
           },
@@ -168,6 +179,40 @@ describe("fts: detectUnmatchedFilters (#219)", () => {
     const db = fakeDb([]);
     expect(await detectUnmatchedFilters(db, {}, 0)).toEqual([]);
     expect(db.probes).toEqual([]);
+  });
+
+  it("flags path_prefix only after the selected repository is known to exist", async () => {
+    const repo = "Liplus-Project/neuron-graph-rag";
+    const db = fakeDb([repo], {
+      indexedDocs: [{ repo, path: "benchmarks/parity-v4/one.md" }],
+    });
+    expect(
+      await detectUnmatchedFilters(
+        db,
+        { repo, pathPrefix: "benchmarks/missing/" },
+        0,
+      ),
+    ).toEqual(["path_prefix"]);
+    expect(db.probes).toHaveLength(2);
+  });
+
+  it("does not blame path_prefix when the repository itself is unmatched", async () => {
+    const db = fakeDb([], {
+      indexedDocs: [
+        {
+          repo: "Liplus-Project/neuron-graph-rag",
+          path: "benchmarks/parity-v4/one.md",
+        },
+      ],
+    });
+    expect(
+      await detectUnmatchedFilters(
+        db,
+        { repo: "wrong/repo", pathPrefix: "benchmarks/parity-v4/" },
+        0,
+      ),
+    ).toEqual(["repo"]);
+    expect(db.probes).toEqual(["wrong/repo"]);
   });
 
   it("reports nothing when the probe itself fails (never assert an unobserved mismatch)", async () => {

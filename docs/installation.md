@@ -47,14 +47,16 @@ wrangler vectorize create-metadata-index github-rag-issues --type string --prope
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name type
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name state
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name milestone
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
 # Expanded label/assignee fields (stored for future Vectorize OR-filter support)
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_0
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_1
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_2
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_3
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name assignee_0
-wrangler vectorize create-metadata-index github-rag-issues --type string --property-name assignee_1
 ```
+
+The ten-property Vectorize limit is fully allocated. `assignee_1` is still stored as metadata and used by the current post-filter, but it deliberately has no metadata index; `doc_path` uses that slot because path-prefix filtering must narrow dense candidates before ranking.
 
 ### 3.3 KV namespace
 
@@ -179,6 +181,15 @@ Recommended verification flow:
 ## 9. Re-index if metadata filtering was added later
 
 If metadata indexes were created after vectors already existed, reset stored hashes so the next cron run re-embeds everything.
+
+For an existing deployment that still indexes `assignee_1`, replace that unused future-filter slot before deploying `path_prefix` support:
+
+```bash
+wrangler vectorize delete-metadata-index github-rag-issues --property-name assignee_1
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
+```
+
+Vectors upserted before `doc_path` was indexed are not path-filterable. Reset each existing repository whose old docs must support `path_prefix`; a new fixed corpus added after the metadata index exists needs no historical re-index.
 
 Admin endpoint:
 

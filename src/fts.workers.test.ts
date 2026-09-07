@@ -4,6 +4,7 @@ import {
   upsertFtsRow,
   queryFts,
   repoHasIndexedRows,
+  docPathPrefixHasIndexedRows,
   deleteFtsRow,
   backfillNatSegments,
   tokenizerKindForType,
@@ -588,6 +589,37 @@ describe("fts D1: structured filters", () => {
     const unfiltered = await queryFts(env.DB_FTS, "marker", 10, { repo });
     expect(unfiltered.map((h) => h.vectorId).sort()).toEqual(["d:wt-doc", "w:wt-wiki"]);
   });
+
+  it("pre-filters doc candidates by repository-relative path prefix", async () => {
+    const repo = "t/doc-path-prefix";
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({
+        vectorId: "d:path-in",
+        type: "doc",
+        repo,
+        docPath: "benchmarks/parity-v4/inside.md",
+        content: "shared parity marker",
+      }),
+    );
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({
+        vectorId: "d:path-out",
+        type: "doc",
+        repo,
+        docPath: "docs/outside.md",
+        content: "shared parity marker",
+      }),
+    );
+
+    const hits = await queryFts(env.DB_FTS, "marker", 10, {
+      repo,
+      type: "doc",
+      pathPrefix: "benchmarks/parity-v4/",
+    });
+    expect(hits.map((h) => h.vectorId)).toEqual(["d:path-in"]);
+  });
 });
 
 // Issue #219: an unmatched `repo` filter and a genuine zero-hit search produce
@@ -623,6 +655,36 @@ describe("fts D1: repoHasIndexedRows (filters_unmatched probe)", () => {
     expect(await repoHasIndexedRows(env.DB_FTS, "t/repo-exac")).toBe(false);
     expect(await repoHasIndexedRows(env.DB_FTS, "t/repo-exact-extra")).toBe(false);
     expect(await repoHasIndexedRows(env.DB_FTS, "t/repo-exact")).toBe(true);
+  });
+});
+
+describe("fts D1: docPathPrefixHasIndexedRows", () => {
+  it("checks the prefix inside the selected repository", async () => {
+    const repo = "t/path-probe";
+    await upsertFtsRow(
+      env.DB_FTS,
+      mkRow({
+        vectorId: "d:path-probe",
+        type: "doc",
+        repo,
+        docPath: "benchmarks/parity-v4/one.md",
+        content: "probe body",
+      }),
+    );
+
+    expect(
+      await docPathPrefixHasIndexedRows(env.DB_FTS, "benchmarks/parity-v4/", repo),
+    ).toBe(true);
+    expect(await docPathPrefixHasIndexedRows(env.DB_FTS, "benchmarks/missing/", repo)).toBe(
+      false,
+    );
+    expect(
+      await docPathPrefixHasIndexedRows(
+        env.DB_FTS,
+        "benchmarks/parity-v4/",
+        "t/other-repo",
+      ),
+    ).toBe(false);
   });
 });
 

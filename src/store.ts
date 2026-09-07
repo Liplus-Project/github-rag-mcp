@@ -18,6 +18,7 @@ import type {
   PRReviewCommentRecord,
   PollWatermark,
 } from "./types.js";
+import { pathPrefixRange } from "./path-prefix.js";
 
 /**
  * Options shared by every `getRecent*` reader: a half-open time window
@@ -31,6 +32,7 @@ export type RecentWindowOpts = {
   until?: string;
   limit?: number;
   repo?: string;
+  pathPrefix?: string;
 };
 
 /** Row shape returned by SQLite for the issues table */
@@ -542,6 +544,7 @@ export class IssueStore implements DurableObject {
     table: string,
     timeCol: string,
     opts?: RecentWindowOpts,
+    pathColumn?: string,
   ): { query: string; params: (string | number)[] } {
     const limit = opts?.limit ?? 20;
     const since =
@@ -552,6 +555,11 @@ export class IssueStore implements DurableObject {
     if (opts?.repo) {
       conditions.push(`repo = ?`);
       params.push(opts.repo);
+    }
+    if (opts?.pathPrefix && pathColumn) {
+      const { lower, upper } = pathPrefixRange(opts.pathPrefix);
+      conditions.push(`${pathColumn} >= ? AND ${pathColumn} < ?`);
+      params.push(lower, upper);
     }
     conditions.push(`${timeCol} >= ?`);
     params.push(since);
@@ -682,7 +690,7 @@ export class IssueStore implements DurableObject {
   }
 
   getRecentDocs(opts?: RecentWindowOpts): DocRecord[] {
-    const { query, params } = this.recentWindowQuery("docs", "updated_at", opts);
+    const { query, params } = this.recentWindowQuery("docs", "updated_at", opts, "path");
     const cursor = this.sql.exec<DocRow>(query, ...params);
     return [...cursor].map(rowToDocRecord);
   }
@@ -1101,6 +1109,7 @@ export class IssueStore implements DurableObject {
         until: url.searchParams.get("until") ?? undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
         repo: url.searchParams.get("repo") ?? undefined,
+        pathPrefix: url.searchParams.get("path_prefix") ?? undefined,
       };
     };
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { IssueStore } from "./store.js";
-import type { DiffRecord } from "./types.js";
+import type { DiffRecord, DocRecord } from "./types.js";
 import { runScan } from "./scan.js";
 
 /**
@@ -216,5 +216,47 @@ describe("scan mode: default window", () => {
       "ae78c99",
       "9044cb6",
     ]);
+  });
+});
+
+describe("scan mode: document path prefix", () => {
+  it("pushes the prefix below the recency cap instead of starving matching docs", async () => {
+    const stub = env.ISSUE_STORE.get(env.ISSUE_STORE.idFromName("scan-doc-path-prefix"));
+    await runInDurableObject(stub, (s: IssueStore) => {
+      for (let i = 0; i < 150; i++) {
+        const outside: DocRecord = {
+          repo: REPO,
+          path: `docs/outside-${i}.md`,
+          blobSha: `outside-${i}`,
+          updatedAt: "2026-08-02T00:00:00Z",
+        };
+        s.upsertDoc(outside);
+      }
+      for (let i = 0; i < 3; i++) {
+        const inside: DocRecord = {
+          repo: REPO,
+          path: `benchmarks/parity-v4/inside-${i}.md`,
+          blobSha: `inside-${i}`,
+          updatedAt: "2026-08-01T00:00:00Z",
+        };
+        s.upsertDoc(inside);
+      }
+    });
+
+    const out = await runScan(stub, {
+      repo: REPO,
+      pathPrefix: "benchmarks/parity-v4/",
+      type: "doc",
+      topK: 10,
+      sort: "updated_desc",
+      since: "2026-08-01T00:00:00Z",
+      until: "2026-08-03T00:00:00Z",
+    });
+
+    expect(out.rows).toHaveLength(3);
+    expect(out.rows.every((row) => row.doc_path?.startsWith("benchmarks/parity-v4/"))).toBe(
+      true,
+    );
+    expect(out.truncated).toBe(false);
   });
 });

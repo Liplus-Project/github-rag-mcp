@@ -130,6 +130,7 @@ describe("worker <-> bridge stateless contract", () => {
         "include_content",
         "labels",
         "milestone",
+        "path_prefix",
         "query",
         "repo",
         "rerank",

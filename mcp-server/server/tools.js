@@ -25,7 +25,7 @@ export const TOOLS = [
       "(3) doc content fetch — include_content: true inlines raw content on top doc and wiki_doc results; " +
       "(4) stored-content fetch — vector_ids reads back the body text the index holds for the named rows, " +
       "for every type and with no GitHub API call, truncated at the 8000-character ingest ceiling. " +
-      "Structured filters (repo, state, labels, milestone, assignee, type) apply across modes 1-3 " +
+      "Structured filters (repo, path_prefix, state, labels, milestone, assignee, type) apply across modes 1-3 " +
       "(mode 4 names its rows, so nothing is filtered there); " +
       "type: \"wiki_doc\" narrows to GitHub Wiki pages only; repo takes the full slug (owner/repo) and matches " +
       "exactly, so a bare repository name selects nothing. In search mode the response carries " +
@@ -59,6 +59,13 @@ export const TOOLS = [
             "Filter by repository — full slug (owner/repo), exact match. " +
             "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
             "search mode flags that case as \"repo\" in the response's filters_unmatched.",
+        },
+        path_prefix: {
+          type: "string",
+          description:
+            "Filter repository docs by a repository-relative directory prefix before ranking. " +
+            "Requires type=\"doc\", a trailing /, no leading /, backslash, NUL, empty, . or .. path segments, " +
+            "and at most 64 UTF-8 bytes. Search mode reports an unmatched value as \"path_prefix\" in filters_unmatched.",
         },
         state: {
           type: "string",

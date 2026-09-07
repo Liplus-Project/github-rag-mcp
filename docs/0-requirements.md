@@ -294,8 +294,10 @@ Vectorize is the dense side of hybrid retrieval. It stores semantic embeddings a
 
 Metadata indexes (10/10 slots used):
 
-- Pre-filter capable: repo, type, state, milestone
-- Stored for future pre-filter: label_0, label_1, label_2, label_3, assignee_0, assignee_1
+- Pre-filter capable: repo, type, state, milestone, doc_path
+- Stored for future pre-filter: label_0, label_1, label_2, label_3, assignee_0
+
+`assignee_1` remains stored in vector metadata and remains available to the current post-filter, but has no metadata index. The ten-index platform ceiling makes the index allocation a priority choice: `doc_path` replaced the unused future `assignee_1` pre-filter slot so directory-scoped document retrieval can narrow the dense candidate population before ranking.
 
 Vectorize metadata filters support AND between fields only, not OR. A query like `label_0 = "bug" OR label_1 = "bug"` cannot be expressed. Labels and assignees therefore remain post-filtered via overfetch strategy. When Vectorize adds OR or `$in`-across-fields support, the expanded fields are immediately usable for pre-filtering.
 
@@ -396,7 +398,7 @@ The retrieval layer supports a 3-tier pipeline: hybrid search (dense + sparse), 
 Expected retrieval behavior:
 
 1. Generate an embedding for the query via Workers AI BGE-M3.
-2. Build Vectorize metadata filter (dense side) and D1 SQL WHERE clause (sparse side) from the same structured params (repo, state, type, milestone are pre-filtered on both sides).
+2. Build Vectorize metadata filter (dense side) and D1 SQL WHERE clause (sparse side) from the same structured params (repo, state, type, milestone, and document `path_prefix` are pre-filtered on both sides).
 3. Overfetch internally on both sides (requestedTopK × 5, max 50). Unconditional: entity aggregation (step 8) collapses several rows into one result on every path, so the candidate pool must exceed top_k even when the reranker is off. The reranker processes at most 50 candidates per call.
 4. Query Vectorize (dense) and D1 FTS5 (sparse, BM25) in parallel.
 5. Combine the two rankers via Reciprocal Rank Fusion (RRF, k=60).
@@ -533,13 +535,15 @@ Returns:
 - `same_entity` on results that absorbed other rows of the same entity (see Entity Aggregation); `top_k` counts entities, not rows
 - top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`, `filters_unmatched`
 
-**Unmatched filters (`filters_unmatched`).** `repo` takes the full slug (`owner/repo`) and matches exactly — on the dense side as a Vectorize metadata `$eq`, on the sparse side as `d.repo = ?`. A bare repository name therefore matches no row, and the response that comes back is shaped exactly like a genuine zero-hit search. `filters_unmatched` separates the two: it is always present in search mode, `[]` means every applied filter selected a non-empty population (so `count: 0` really is "no hits"), and a listed name means that filter's population is empty — the value is wrong, not the query.
+**Unmatched filters (`filters_unmatched`).** `repo` takes the full slug (`owner/repo`) and matches exactly — on the dense side as a Vectorize metadata `$eq`, on the sparse side as `d.repo = ?`. `path_prefix` selects doc rows whose repository-relative path begins with the named directory prefix. A bare repository name or a path prefix that selects no doc row therefore produces a response shaped exactly like a genuine zero-hit search. `filters_unmatched` separates the two: it is always present in search mode, `[]` means every applied filter selected a non-empty population (so `count: 0` really is "no hits"), and a listed name means that filter's population is empty — the value is wrong, not the query.
 
 The distinction is worth a field because agentic multi-step search inverts the cost of a silent zero. In a single search a zero is a dead end the caller inspects; in a search loop it is a normal intermediate result ("nothing down this angle") that the caller consumes and moves past, so the mis-specified filter never surfaces and one query out of the budget is spent on a false negative.
 
-The check is an existence probe (`SELECT 1 FROM search_docs WHERE repo = ? LIMIT 1`) run only when the candidate set is empty — a non-empty candidate set already proves the filter matched, so the extra read stays off the hot path. A failed probe reports nothing rather than asserting a mismatch it did not observe. Only `repo` is probed: it is the filter with a plausible-looking wrong value. Resolving a short name to a full slug is deliberately out of scope — that needs an ambiguity design for a name matching several repositories.
+The checks are existence probes run only when the candidate set is empty — a non-empty candidate set already proves the filters matched, so the extra reads stay off the hot path. The repository probe runs first. When it succeeds, the path probe checks doc rows inside that repository; a bad repository therefore reports `repo` without falsely blaming the path that may be valid elsewhere. A failed probe reports nothing rather than asserting a mismatch it did not observe. Resolving a short repository name to a full slug is deliberately out of scope — that needs an ambiguity design for a name matching several repositories.
 
-**Scan mode (empty query).** Vectorize / FTS5 / reranker are skipped and the result set is aggregated from the structured store's recency endpoints. `since` / `until` are pushed down to the store, so a window returns rows whenever it holds rows, however far back it sits. `since` defaults to 7 days before `until` (before now when `until` is omitted), so an `until`-only query does not degenerate into an empty window above its own ceiling.
+**Scan mode (empty query).** Vectorize / FTS5 / reranker are skipped and the result set is aggregated from the structured store's recency endpoints. `since` / `until` and document `path_prefix` are pushed down to the store, so a window returns matching rows whenever it holds them, however far back it sits and however many newer documents exist outside the prefix. `since` defaults to 7 days before `until` (before now when `until` is omitted), so an `until`-only query does not degenerate into an empty window above its own ceiling.
+
+**Document path prefix.** `path_prefix` is valid only with `type: "doc"`. It names a repository-relative directory, must end in `/`, must not begin with `/`, contain backslashes, NUL, empty segments, or `.` / `..` segments, and must fit in 64 UTF-8 bytes because Vectorize indexes only that prefix of string metadata. Dense and sparse retrieval use the same half-open lexical range over `doc_path`; scan mode pushes the range into the doc store query and verifies `startsWith` on returned rows. Fetch mode continues to ignore it because `vector_ids` names rows directly.
 
 Scan mode adds one top-level field, `truncated`, which is true when the window holds more rows than the response carries — either an endpoint filled its row cap, or the merged set was longer than `top_k`. This is what tells a caller that zero results means "no such rows" rather than "the read stopped short": walk backwards by re-issuing the scan with `until` set to the oldest row returned. A gap-hunting tool that cannot separate those two answers reports absent rows that exist and misses rows that do not, which is how #178 was mis-diagnosed twice in one day.
 

@@ -79,6 +79,7 @@ export interface ScanStore {
 
 export interface ScanParams {
   repo?: string;
+  pathPrefix?: string;
   state?: string;
   labels?: string[];
   milestone?: string;
@@ -141,12 +142,13 @@ export async function runScan(
   // starving the final page.
   const storeLimit = Math.min(topK * 5, STORE_ROW_CAP);
 
-  const buildParams = (): URLSearchParams => {
+  const buildParams = (pathPrefix?: string): URLSearchParams => {
     const p = new URLSearchParams();
     p.set("since", since);
     if (until) p.set("until", until);
     p.set("limit", String(storeLimit));
     if (params.repo) p.set("repo", params.repo);
+    if (pathPrefix) p.set("path_prefix", pathPrefix);
     return p;
   };
 
@@ -156,10 +158,11 @@ export async function runScan(
   const collect = async <T>(
     path: string,
     map: (record: T) => ScanRow | null,
+    pathPrefix?: string,
   ): Promise<void> => {
     try {
       const res = await store.fetch(
-        new Request(`http://store/${path}?${buildParams().toString()}`),
+        new Request(`http://store/${path}?${buildParams(pathPrefix).toString()}`),
       );
       if (!res.ok) return;
       const records = (await res.json()) as T[];
@@ -230,7 +233,7 @@ export async function runScan(
       updated_at: d.updatedAt,
       created_at: d.updatedAt,
       doc_path: d.path,
-    }));
+    }), params.pathPrefix);
   }
 
   if (wantType("wiki_doc")) {
@@ -345,6 +348,12 @@ export async function runScan(
   const labels = params.labels;
   if (labels && labels.length > 0) {
     filtered = filtered.filter((r) => labels.every((l) => r.labels.includes(l)));
+  }
+  if (params.pathPrefix) {
+    const prefix = params.pathPrefix;
+    filtered = filtered.filter(
+      (r) => r.type === "doc" && r.doc_path?.startsWith(prefix) === true,
+    );
   }
 
   // Time sort. "created_desc" sorts by created_at; "updated_desc" (the scan
