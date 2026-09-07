@@ -108,7 +108,7 @@ Four modes are selected by the parameter set:
 3. **Doc / wiki content fetch** — set `include_content: true`. For result rows whose `type` is `"doc"`, the raw file content is fetched from the GitHub contents API; for `type: "wiki_doc"` rows, the raw markup is fetched from `raw.githubusercontent.com/wiki/`. Both are inlined as a `content` field. Capped at the first few rows of each type to bound API fan-out. This subsumes the previous `get_doc_content` tool.
 4. **Stored-content fetch** — pass `vector_ids` (the `vector_id` values carried by earlier results). Every indexed type returns the body text the index already holds for that exact row — issues, PRs, comments, reviews, releases and diffs included, not just docs — so locating something with `search` and then reading it no longer costs a round trip through `gh` or grep. Served from D1: no GitHub API call is made. See [Stored-content fetch](#stored-content-fetch) below for what the returned text is and is not.
 
-Structured filters (`repo`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode except stored-content fetch, where the rows are named rather than selected.
+Structured filters (`repo`, `path_prefix`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode except stored-content fetch, where the rows are named rather than selected. `path_prefix` is intentionally narrower: it is valid only with `type: "doc"` and selects one repository-relative directory before ranking.
 
 Search mode reports filters that matched nothing at all in `filters_unmatched` (always present, `[]` when every filter matched something). `repo` is an exact match on the full `owner/repo` slug, so a bare repository name selects an empty population and returns a response shaped exactly like a genuine zero-hit search — this field is what separates the two. It matters most in multi-step agentic search, where a zero reads as a normal intermediate result and the mis-specified filter would otherwise never surface.
 
@@ -120,6 +120,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 |------|------|-------------|
 | `query` | string (optional) | Natural-language query. Omit or empty = scan mode. |
 | `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search mode reports that as `"repo"` in the response's `filters_unmatched`. |
+| `path_prefix` | string | Filter docs by repository-relative directory prefix. Requires `type: "doc"`, a trailing `/`, and at most 64 UTF-8 bytes. |
 | `state` | `"open"` \| `"closed"` \| `"all"` | Filter by state (default `all`). |
 | `labels` | string[] | Filter by label names (AND). |
 | `milestone` | string | Filter by milestone title. |

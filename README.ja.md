@@ -108,7 +108,7 @@ GitHub の issue / pull request / release / documentation / **GitHub Wiki page**
 3. **doc 本文取得** — `include_content: true` を指定すると、`type="doc"` 結果の本文が GitHub contents API 経由で取得され、該当行の `content` フィールドに inline されます。API fan-out を抑えるため先頭の数件に絞られます。従来の `get_doc_content` を置き換えます。
 4. **保存済み本文の取得** — `vector_ids`（先行する結果が持つ `vector_id`）を渡します。索引済みの全 type がその行の本文を返します——doc だけでなく issue / PR / comment / review / release / diff も対象です。`search` であたりを付けたあと本文を読むための `gh` / grep の一往復が不要になります。D1 から返すので GitHub API は呼びません。返る文字列が何であって何でないかは下記「保存済み本文の取得」を参照してください。
 
-structured filter (`repo` / `state` / `labels` / `milestone` / `assignee` / `type`) は、保存済み本文の取得を除くすべてのモードで有効です。保存済み本文の取得では行をサーバが選ぶのではなく呼び出し側が名指しするため、filter は適用しません。
+structured filter (`repo` / `path_prefix` / `state` / `labels` / `milestone` / `assignee` / `type`) は、保存済み本文の取得を除くすべてのモードで有効です。`path_prefix` だけは意図的に狭く、`type: "doc"` と組み合わせて repository-relative directory を ranking 前に選びます。保存済み本文の取得では行をサーバが選ぶのではなく呼び出し側が名指しするため、filter は適用しません。
 
 search モードは「1件もマッチしなかったフィルタ」を `filters_unmatched` に載せます (常に存在し、すべて成立していれば `[]`)。`repo` はフルスラッグ `owner/repo` の完全一致なので、短いリポジトリ名を渡すと母集合が空になり、本当にヒットゼロだった場合と同じ形のレスポンスが返ります。このフィールドがその2つを区別します。効くのは多段のエージェンティック検索で、ゼロが正常な中間結果として読まれてしまい、フィルタ不成立が表に出ないまま終わる場面です。
 
@@ -120,6 +120,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 |------|----|------|
 | `query` | string (省略可) | 自然言語クエリ。省略または空文字で scan モード。 |
 | `repo` | string | repository で絞り込み。フルスラッグ (`owner/repo`) の完全一致。短いリポジトリ名は1件もマッチせず、search モードはそれをレスポンスの `filters_unmatched` に `"repo"` として報告します。 |
+| `path_prefix` | string | repository-relative directory prefix で doc を絞り込み。`type: "doc"`、末尾 `/`、UTF-8で64 byte以内が必須。 |
 | `state` | `"open"` / `"closed"` / `"all"` | state で絞り込み (既定 `all`)。 |
 | `labels` | string[] | label 名で AND 絞り込み。 |
 | `milestone` | string | milestone title で絞り込み。 |

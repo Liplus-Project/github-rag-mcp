@@ -27,6 +27,7 @@
  */
 
 import { segmentForFts } from "./segment.js";
+import { pathPrefixRange } from "./path-prefix.js";
 import type { DiffFileStatus, VectorMetadata } from "./types.js";
 
 /** Which FTS5 virtual table a row is indexed in. */
@@ -272,6 +273,25 @@ export async function repoHasIndexedRows(
   return row != null;
 }
 
+/** True when a repository contains at least one indexed doc under the prefix. */
+export async function docPathPrefixHasIndexedRows(
+  db: D1Database,
+  pathPrefix: string,
+  repo?: string,
+): Promise<boolean> {
+  const { lower, upper } = pathPrefixRange(pathPrefix);
+  const repoSql = repo ? " AND repo = ?" : "";
+  const params = repo ? [lower, upper, repo] : [lower, upper];
+  const row = await db
+    .prepare(
+      `SELECT 1 AS present FROM search_docs ` +
+        `WHERE type = 'doc' AND doc_path >= ? AND doc_path < ?${repoSql} LIMIT 1`,
+    )
+    .bind(...params)
+    .first<{ present: number }>();
+  return row != null;
+}
+
 /**
  * Names of the applied filters whose selected population is empty (issue #219).
  *
@@ -287,24 +307,39 @@ export async function repoHasIndexedRows(
  *   - a probe failure is not a finding. An unreachable D1 yields an empty list
  *     (the safer direction: never assert a mismatch that was not observed).
  *
- * `repo` is the only filter probed. It is the one where a plausible-looking wrong
- * value exists — the bare repository name against the required `owner/repo` slug.
- * `state` / `type` are enum-constrained, and `milestone` / `assignee` do not have
- * a comparable near-miss form.
+ * `repo` is probed first. `pathPrefix` is then probed inside that repository only
+ * when the repository exists, so a bad repo does not falsely blame a path that may
+ * be valid elsewhere. `state` / `type` are enum-constrained, and the remaining
+ * filters do not have a comparable near-miss form.
  */
 export async function detectUnmatchedFilters(
   db: D1Database,
-  filters: { repo?: string },
+  filters: { repo?: string; pathPrefix?: string },
   candidateCount: number,
 ): Promise<string[]> {
   const unmatched: string[] = [];
   if (candidateCount > 0) return unmatched;
+  let repoMatched = true;
   if (filters.repo) {
     try {
-      if (!(await repoHasIndexedRows(db, filters.repo))) unmatched.push("repo");
+      repoMatched = await repoHasIndexedRows(db, filters.repo);
+      if (!repoMatched) unmatched.push("repo");
     } catch (err) {
+      repoMatched = false;
       console.error(
         "detectUnmatchedFilters: repo probe failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  if (filters.pathPrefix && repoMatched) {
+    try {
+      if (!(await docPathPrefixHasIndexedRows(db, filters.pathPrefix, filters.repo))) {
+        unmatched.push("path_prefix");
+      }
+    } catch (err) {
+      console.error(
+        "detectUnmatchedFilters: path_prefix probe failed:",
         err instanceof Error ? err.message : String(err),
       );
     }
@@ -340,6 +375,7 @@ export interface FtsFilter {
   type?: VectorMetadata["type"];
   state?: "open" | "closed" | "published" | "active";
   milestone?: string;
+  pathPrefix?: string;
 }
 
 /**
@@ -394,6 +430,11 @@ export async function queryFts(
   if (filter?.milestone) {
     whereClauses.push("d.milestone = ?");
     params.push(filter.milestone);
+  }
+  if (filter?.pathPrefix) {
+    const { lower, upper } = pathPrefixRange(filter.pathPrefix);
+    whereClauses.push("d.doc_path >= ? AND d.doc_path < ?");
+    params.push(lower, upper);
   }
   const whereSql =
     whereClauses.length > 0 ? ` AND ${whereClauses.join(" AND ")}` : "";

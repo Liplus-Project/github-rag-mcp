@@ -47,14 +47,16 @@ wrangler vectorize create-metadata-index github-rag-issues --type string --prope
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name type
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name state
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name milestone
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
 # label/assignee 展開フィールド (将来の Vectorize OR フィルター対応に備えて格納)
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_0
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_1
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_2
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name label_3
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name assignee_0
-wrangler vectorize create-metadata-index github-rag-issues --type string --property-name assignee_1
 ```
+
+Vectorize の10 property上限をすべて使う。`assignee_1` は metadata に保存し、現行 post-filter でも使い続けるが、metadata index は意図的に持たない。`path_prefix` は ranking 前に dense 候補を絞る必要があるため、`doc_path` がその枠を使う。
 
 ### 3.3 KV namespace
 
@@ -179,6 +181,15 @@ wrangler deploy
 ## 9. 後から metadata filtering を有効化した場合の再 index
 
 vector 作成後に metadata index を追加した場合、stored hash を reset して次回 cron で全件 re-embed させる。
+
+既存 deployment が `assignee_1` を index 済みなら、`path_prefix` 対応の deploy 前に未使用の将来用 filter 枠を置き換える。
+
+```bash
+wrangler vectorize delete-metadata-index github-rag-issues --property-name assignee_1
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
+```
+
+`doc_path` index 作成前に upsert 済みの vector は path filter の対象にならない。既存 doc に `path_prefix` を使う repository ごとに reset する。metadata index 作成後に追加する新しい固定コーパスには過去分の再 index は不要。
 
 Admin endpoint:
 

@@ -78,3 +78,13 @@ test("repo description states the full-slug exact match and the unmatched-filter
   assert.match(repoParam.description, /exact match/i);
   assert.match(repoParam.description, /filters_unmatched/);
 });
+
+test("path_prefix is exposed as a doc-only directory filter", () => {
+  const param = search?.inputSchema?.properties?.path_prefix;
+  assert.ok(param, "path_prefix param is present in the mirrored schema");
+  assert.equal(param.type, "string");
+  assert.match(param.description, /type="doc"/);
+  assert.match(param.description, /(trailing \/|end with \/)/i);
+  assert.match(param.description, /64 UTF-8 bytes/);
+  assert.match(param.description, /filters_unmatched/);
+});
