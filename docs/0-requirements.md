@@ -292,7 +292,7 @@ Vectorize is the dense side of hybrid retrieval. It stores semantic embeddings a
 - wiki page slug + extension (wiki_doc rows)
 - commit SHA, file path, file status, commit date, commit author, blob SHA (diff only)
 
-Metadata indexes (10/10 slots used):
+Fresh-install metadata index allocation (10/10 platform slots):
 
 - Pre-filter capable: repo, type, state, milestone, doc_path
 - Stored for future pre-filter: label_0, label_1, label_2, label_3, assignee_0

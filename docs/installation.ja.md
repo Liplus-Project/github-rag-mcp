@@ -182,12 +182,26 @@ wrangler deploy
 
 vector 作成後に metadata index を追加した場合、stored hash を reset して次回 cron で全件 re-embed させる。
 
-既存 deployment が `assignee_1` を index 済みなら、`path_prefix` 対応の deploy 前に未使用の将来用 filter 枠を置き換える。
+既存 deployment はmetadata indexを変更する前に実在一覧を確認する。
+
+```bash
+wrangler vectorize list-metadata-index github-rag-issues
+```
+
+`doc_path` がすでに存在すれば変更不要。存在せず、一覧が10件未満なら何も削除せず追加する。
+
+```bash
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
+```
+
+10枠すべて使用済みで、かつ `assignee_1` が一覧に実在する場合だけ、未使用の将来用 filter 枠を置き換える。
 
 ```bash
 wrangler vectorize delete-metadata-index github-rag-issues --property-name assignee_1
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
 ```
+
+10枠使用済みでも `assignee_1` が実在しない場合は、別の未使用な将来用 index を明示的に選ぶ。production pre-filterを推測で削除しない。
 
 `doc_path` index 作成前に upsert 済みの vector は path filter の対象にならない。既存 doc に `path_prefix` を使う repository ごとに reset する。metadata index 作成後に追加する新しい固定コーパスには過去分の再 index は不要。
 
