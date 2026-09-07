@@ -182,12 +182,26 @@ Recommended verification flow:
 
 If metadata indexes were created after vectors already existed, reset stored hashes so the next cron run re-embeds everything.
 
-For an existing deployment that still indexes `assignee_1`, replace that unused future-filter slot before deploying `path_prefix` support:
+Inspect an existing deployment before changing its metadata indexes:
+
+```bash
+wrangler vectorize list-metadata-index github-rag-issues
+```
+
+If `doc_path` is already listed, no index mutation is needed. If it is absent and fewer than ten properties are listed, create it without deleting anything:
+
+```bash
+wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
+```
+
+Only when all ten slots are occupied **and** `assignee_1` is actually listed, replace that unused future-filter slot:
 
 ```bash
 wrangler vectorize delete-metadata-index github-rag-issues --property-name assignee_1
 wrangler vectorize create-metadata-index github-rag-issues --type string --property-name doc_path
 ```
+
+If all ten slots are occupied but `assignee_1` is not listed, choose another unused future-filter index deliberately; do not delete a production pre-filter by assumption.
 
 Vectors upserted before `doc_path` was indexed are not path-filterable. Reset each existing repository whose old docs must support `path_prefix`; a new fixed corpus added after the metadata index exists needs no historical re-index.
 

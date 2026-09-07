@@ -286,7 +286,7 @@ Vectorize は hybrid retrieval の dense 側を担う。次の metadata を伴�
 - documentation path
 - commit SHA / file path / file status / commit date / commit author / blob SHA（diff only）
 
-Metadata index（10/10 枠使用）:
+fresh install向けmetadata index割当（platform上限10枠）:
 
 - Pre-filter 対応: repo, type, state, milestone, doc_path
 - 将来の pre-filter 用に格納: label_0, label_1, label_2, label_3, assignee_0
