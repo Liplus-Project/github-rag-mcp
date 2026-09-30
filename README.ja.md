@@ -95,7 +95,15 @@ GitHub webhooks + GitHub API
 
 ## MCP Tools
 
-この MCP サーバーが公開するツールは 1 つに統合されています。意味検索、時系列 activity scan、doc 本文取得、`vector_id` 指定の保存済み本文取得のいずれも `search` のパラメータ経由で扱えます。以前の build で分かれていた `get_issue_context` / `get_doc_content` / `list_recent_activity` は削除され、用途は下記パラメータに吸収されました。
+この MCP サーバーは `search` と3つの非公開 feedback ツールを公開します。意味検索、時系列 activity scan、doc 本文取得、`vector_id` 指定の保存済み本文取得のいずれも `search` のパラメータ経由で扱えます。以前の build で分かれていた `get_issue_context` / `get_doc_content` / `list_recent_activity` は削除され、用途は下記パラメータに吸収されました。
+
+### 非公開 feedback ツール
+
+成功検索は既定で UTC trace を保存し、資料の版を指す `source_id` と現在 activation を返します。`memory_history` で履歴・利用段階・取消し audit を読み、`record_source_use` で selected→validated→used、`record_outcome` で confirmed または receipt を指定した corrected/rolled_back を記録します。検索だけでは used/confirmed になりません。保存不可の結果には trace がなく feedback 不可です。半減期3600秒、activation は各 channel 上限10（total20）、graph strength 上限5です。成功検索に DO request と保存コストが加わります。
+
+live inline doc/wiki 本文は返した本文の SHA-256 で版を識別し、`github_live` provenance を持ちます。stored fetch と graph 本文は index snapshot の版で、索引 timestamp が同じでも live 本文の変更は別 source_id になります。
+
+[仕様・移行・合成実演](docs/2-feedback-memory.ja.md) を参照してください。0008 を Worker deploy より先に適用し、新 schema JSON を bridge artifact に同梱します。検索品質向上は未評価です。
 
 ### `search`
 
@@ -134,8 +142,9 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `until` | ISO 8601 文字列 | `updated_at < until` の結果だけを残します。 |
 | `include_content` | boolean | 上位 doc 結果に本文を inline する (既定 `false`)。 |
 | `vector_ids` | string[] | 保存済み本文の取得。読み出す行の `vector_id`、1 回あたり最大 50 件。他モードより優先され、指定時は `query` / `sort` と全 filter が無視されます。下記「保存済み本文の取得」参照。 |
-| `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで別配列 `graph_results` として返す（下記「検索の 2 軸」参照）。既定 `false` は標準ハイブリッド検索とバイト単位で同一（グラフ未参照）。 |
+| `graph_expand` | boolean | opt-in の GraphRAG 拡張（search モードのみ）。`true` のとき fusion 後の上位結果を seed に Decision-Structure の mention グラフ（D1 `doc_edges`）を辿り、関連 wiki ページを `graph_hop` / `graph_from` 付きで別配列 `graph_results` として返す（下記「検索の 2 軸」参照）。既定 `false` は標準ハイブリッドの順位を保つ（グラフ未参照）。trace metadata は追加される。 |
 | `graph_hops` | number | `graph_expand` のグラフ探索深度（1 または 2、既定 1）。`graph_expand` が `false` のときは無視。 |
+| `use_memory` | boolean | 既定 false。true は最大200 graph 候補を同 hop 内で learned strength 順にしてから返却上限へ絞る。keyword の score/rank は維持。 |
 
 #### `type` 値
 

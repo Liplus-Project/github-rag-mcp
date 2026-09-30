@@ -83,7 +83,7 @@ describe("worker <-> bridge stateless contract", () => {
 
     const client = await remote.getClient();
     const tools = await client.listTools();
-    expect(tools.tools.map((t: { name: string }) => t.name)).toEqual(["search"]);
+    expect(tools.tools.map((t: { name: string }) => t.name)).toEqual(["memory_history", "record_source_use", "record_outcome", "search"]);
 
     // The whole exchange, connect included, is POST-only and session-free.
     expect(seen.length).toBeGreaterThan(0);
@@ -116,7 +116,7 @@ describe("worker <-> bridge stateless contract", () => {
     });
 
     const client = await remote.getClient();
-    const [search] = (await client.listTools()).tools;
+    const search = (await client.listTools()).tools.find((t: any) => t.name === "search")!;
 
     // The drift check compares source text; this asserts the schema actually
     // survives registration and serialization to the client.
@@ -141,6 +141,7 @@ describe("worker <-> bridge stateless contract", () => {
         "type",
         "until",
         "vector_ids",
+        "use_memory",
       ].sort(),
     );
 
@@ -159,7 +160,7 @@ describe("worker <-> bridge stateless contract", () => {
     });
 
     const client = await remote.getClient();
-    const [search] = (await client.listTools()).tools;
+    const search = (await client.listTools()).tools.find((t: any) => t.name === "search")!;
     const description = search.description as string;
 
     expect(description).toContain("vector_ids");
@@ -188,7 +189,7 @@ describe("worker <-> bridge stateless contract", () => {
     });
 
     const client = await remote.getClient();
-    const [search] = (await client.listTools()).tools;
+    const search = (await client.listTools()).tools.find((t: any) => t.name === "search")!;
     const description = search.description as string;
 
     expect(description).toContain("graph_results");

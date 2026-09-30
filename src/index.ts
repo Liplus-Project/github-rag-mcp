@@ -30,6 +30,7 @@
  *   Hourly (fallback) -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
  */
 
+import { backfillSourceIdentities } from "./backfill-source-identities.js";
 import type { Env } from "./types.js";
 import {
   createOAuthProvider,
@@ -116,6 +117,15 @@ const innerHandler: ExportedHandler<Env> = {
     // -- GitHub webhook receiver (IP allowlist + signature verification) --
     if (request.method === "POST" && url.pathname === "/webhooks/github") {
       return handleWebhook(request, env);
+    }
+
+    // Bounded repair from existing canonical DO event IDs; no GitHub fetch or embedding.
+    if (request.method === "POST" && url.pathname === "/admin/backfill-source-identities") {
+      if (!env.GITHUB_TOKEN || request.headers.get("GITHUB_TOKEN") !== env.GITHUB_TOKEN) return new Response("Unauthorized", { status: 401 });
+      try {
+        const result = await backfillSourceIdentities(env.DB_FTS, env.ISSUE_STORE.get(env.ISSUE_STORE.idFromName("global")), { repo: url.searchParams.get("repo") ?? "", cursor: url.searchParams.get("cursor") ?? undefined, limit: Number(url.searchParams.get("limit") ?? 50) });
+        return Response.json(result);
+      } catch { return Response.json({ error: "Identity backfill failed; cursor unchanged" }, { status: 400 }); }
     }
 
     // -- Admin: reset hashes and watermarks to trigger full re-embedding on next cron --

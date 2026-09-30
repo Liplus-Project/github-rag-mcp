@@ -76,3 +76,7 @@ It is not:
 - a substitute for source-of-truth GitHub artifacts
 
 It is a retrieval layer that helps agents recover the right state from those artifacts.
+
+## Private retrieval feedback
+
+[Retrieval feedback memory](2-feedback-memory.md) records queries, returned source provenance and explicit usage/outcomes. It preserves the recoverable-state stance over GitHub artifacts without duplicating conversations or bodies.

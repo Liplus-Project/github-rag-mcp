@@ -32,7 +32,7 @@ import {
 import { createRequire } from "node:module";
 import { createOAuthProvider, OAuthPendingError } from "./oauth.js";
 import { createRemoteClient } from "./remote-client.js";
-import { TOOLS } from "./tools.js";
+import { TOOLS, MEMORY_CONTRACT } from "./tools.js";
 
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require("../package.json");
@@ -67,7 +67,7 @@ async function callRemoteTool(name, args) {
 
 const server = new Server(
   { name: "github-rag-mcp", version: PACKAGE_VERSION },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {} }, instructions: MEMORY_CONTRACT.instructions },
 );
 
 // ── Tool Definitions ─────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
     return {
-      content: [{ type: "text", text: `Failed to reach worker: ${err}` }],
+      content: [{ type: "text", text: "Failed to reach worker" }],
       isError: true,
     };
   }

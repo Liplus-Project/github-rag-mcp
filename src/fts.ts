@@ -62,6 +62,8 @@ export interface FtsUpsertRow {
   fileStatus?: DiffFileStatus | "";
   commitDate?: string;
   commitAuthor?: string;
+  commentId?: number;
+  reviewId?: number;
   content: string;     // tokenizable text (title+body or commit msg + path + patch)
 }
 
@@ -120,8 +122,8 @@ export async function upsertFtsRow(
       `INSERT INTO search_docs (
          vector_id, repo, type, state, labels, milestone, assignees, updated_at,
          number, tag_name, doc_path, commit_sha, file_path, file_status,
-         commit_date, commit_author, tokenizer_kind, content, content_fts, indexed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         commit_date, commit_author, comment_id, review_id, tokenizer_kind, content, content_fts, indexed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (vector_id) DO UPDATE SET
          repo            = excluded.repo,
          type            = excluded.type,
@@ -138,6 +140,8 @@ export async function upsertFtsRow(
          file_status     = excluded.file_status,
          commit_date     = excluded.commit_date,
          commit_author   = excluded.commit_author,
+         comment_id      = excluded.comment_id,
+         review_id       = excluded.review_id,
          tokenizer_kind  = excluded.tokenizer_kind,
          content         = excluded.content,
          content_fts     = excluded.content_fts,
@@ -160,6 +164,8 @@ export async function upsertFtsRow(
       row.fileStatus ?? "",
       row.commitDate ?? "",
       row.commitAuthor ?? "",
+      row.commentId ?? 0,
+      row.reviewId ?? 0,
       tokenizerKind,
       row.content,
       ftsIndexText(row.content, tokenizerKind),
@@ -326,10 +332,7 @@ export async function detectUnmatchedFilters(
       if (!repoMatched) unmatched.push("repo");
     } catch (err) {
       repoMatched = false;
-      console.error(
-        "detectUnmatchedFilters: repo probe failed:",
-        err instanceof Error ? err.message : String(err),
-      );
+      console.error("detectUnmatchedFilters: repo probe failed:");
     }
   }
   if (filters.pathPrefix && repoMatched) {
@@ -338,10 +341,7 @@ export async function detectUnmatchedFilters(
         unmatched.push("path_prefix");
       }
     } catch (err) {
-      console.error(
-        "detectUnmatchedFilters: path_prefix probe failed:",
-        err instanceof Error ? err.message : String(err),
-      );
+      console.error("detectUnmatchedFilters: path_prefix probe failed:");
     }
   }
   return unmatched;
@@ -365,6 +365,8 @@ export interface FtsHit {
   fileStatus: string;
   commitDate: string;
   commitAuthor: string;
+  commentId?: number;
+  reviewId?: number;
   content: string;
   score: number;
 }
@@ -483,7 +485,7 @@ export async function queryFts(
         SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
-               d.commit_date, d.commit_author, d.content,
+               d.commit_date, d.commit_author, d.comment_id, d.review_id, d.content,
                bm25(search_docs_nat_fts_v3) AS score, ${tier} AS tier
           FROM search_docs_nat_fts_v3 f
           JOIN search_docs d ON d.rowid = f.rowid
@@ -497,7 +499,7 @@ export async function queryFts(
         SELECT d.vector_id AS vector_id, d.repo, d.type, d.state, d.labels,
                d.milestone, d.assignees, d.updated_at,
                d.number, d.tag_name, d.doc_path, d.commit_sha, d.file_path, d.file_status,
-               d.commit_date, d.commit_author, d.content,
+               d.commit_date, d.commit_author, d.comment_id, d.review_id, d.content,
                bm25(search_docs_code_fts_v2) AS score, 0 AS tier
           FROM search_docs_code_fts_v2 f
           JOIN search_docs d ON d.rowid = f.rowid
@@ -562,6 +564,8 @@ export async function queryFts(
       fileStatus: String(r.file_status ?? ""),
       commitDate: String(r.commit_date ?? ""),
       commitAuthor: String(r.commit_author ?? ""),
+      commentId: Number(r.comment_id ?? 0),
+      reviewId: Number(r.review_id ?? 0),
       content: String(r.content ?? ""),
       score: Number(r.score ?? 0),
     });
@@ -644,4 +648,9 @@ export function reciprocalRankFusion(
       fusedScore,
       contributions: contributions.get(vectorId) ?? {},
     }));
+}
+
+/** Repair canonical event IDs even when unchanged content skips embedding. */
+export async function repairSourceEventIdentity(db: D1Database, vectorId: string, kind: 'comment' | 'review', id: number): Promise<void> {
+  await db.prepare(`UPDATE search_docs SET ${kind === 'comment' ? 'comment_id' : 'review_id'}=? WHERE vector_id=?`).bind(id, vectorId).run();
 }

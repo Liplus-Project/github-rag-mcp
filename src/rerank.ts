@@ -180,10 +180,7 @@ export async function rerankCandidates(
       top_k: trimmedCandidates.length,
     })) as unknown as RerankerResponse;
   } catch (err) {
-    console.error(
-      "rerankCandidates: bge-reranker-base call failed:",
-      err instanceof Error ? err.message : String(err),
-    );
+    console.error("rerankCandidates: bge-reranker-base call failed:");
     return null;
   }
 

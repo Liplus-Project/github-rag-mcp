@@ -76,3 +76,7 @@ session boundary は普通に起こる。
 - source-of-truth GitHub artifact の代替
 
 これはそれらの artifact から正しい state を引き戻すための retrieval layer である。
+
+## 非公開 retrieval feedback
+
+[検索 feedback memory](2-feedback-memory.ja.md) は query、返却資料の provenance、明示的 usage/outcome を保存する。会話全体や本文を複製せず、GitHub artifact から recoverable state を取り出す立場を保つ。

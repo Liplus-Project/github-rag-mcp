@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+const SEARCH_CONTRACT = JSON.parse(readFileSync(new URL("./search-schema.json", import.meta.url), "utf8"));
+export const MEMORY_CONTRACT = JSON.parse(readFileSync(new URL("./memory-tools.json", import.meta.url), "utf8"));
 /**
  * Static mirror of the Worker `search` tool schema.
  *
@@ -15,7 +18,7 @@ export const TOOLS = [
     name: "search",
     title: "Search GitHub",
     description:
-      "Unified search across GitHub issues, PRs, releases, repository documentation, " +
+      MEMORY_CONTRACT.instructions + "\n" + "Unified search across GitHub issues, PRs, releases, repository documentation, " +
       "GitHub Wiki pages, commit diffs, issue/PR top-level comments, PR reviews, and " +
       "PR inline review comments. Four modes, all derived from the parameter set: " +
       "(1) hybrid semantic search — dense BGE-M3 + sparse BM25 over D1 FTS5 fused via RRF, then re-scored " +
@@ -44,162 +47,13 @@ export const TOOLS = [
       "absence of a score is not a score of zero). Triage: appearing on BOTH axes is the strongest signal — " +
       "two independent paths agreed. Keyword axis only = the words matched. Relationship axis only = the " +
       "vocabulary did not match but the entry is structurally adjacent to what did.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description:
-            "Natural language search query. Omit or leave empty to switch to metadata-only scan mode " +
-            "(results ordered by the timestamp implied by sort; default sort=\"updated_desc\" when empty).",
-        },
-        repo: {
-          type: "string",
-          description:
-            "Filter by repository — full slug (owner/repo), exact match. " +
-            "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
-            "search mode flags that case as \"repo\" in the response's filters_unmatched.",
-        },
-        path_prefix: {
-          type: "string",
-          description:
-            "Filter repository docs by a repository-relative directory prefix before ranking. " +
-            "Requires type=\"doc\", a trailing /, no leading /, backslash, NUL, empty, . or .. path segments, " +
-            "and at most 64 UTF-8 bytes. Search mode reports an unmatched value as \"path_prefix\" in filters_unmatched.",
-        },
-        state: {
-          type: "string",
-          enum: ["open", "closed", "all"],
-          description: "Filter by state (default: all)",
-        },
-        labels: {
-          type: "array",
-          items: { type: "string" },
-          description: "Filter by label names (AND logic)",
-        },
-        milestone: {
-          type: "string",
-          description: "Filter by milestone title",
-        },
-        assignee: {
-          type: "string",
-          description: "Filter by assignee login",
-        },
-        type: {
-          type: "string",
-          enum: [
-            "issue",
-            "pull_request",
-            "release",
-            "doc",
-            "wiki_doc",
-            "diff",
-            "issue_comment",
-            "pr_review",
-            "pr_review_comment",
-            "all",
-          ],
-          description:
-            "Filter by type (default: all). " +
-            "\"doc\" = repository docs (files in /docs/ etc.). " +
-            "\"wiki_doc\" = GitHub Wiki pages (separate from repo docs; both surfaces co-exist). " +
-            "\"diff\" = per-file commit diffs. " +
-            "\"issue_comment\" = top-level comments on issues and PRs. " +
-            "\"pr_review\" = PR review bodies (approve / request_changes / comment). " +
-            "\"pr_review_comment\" = inline per-line review comments on PR diffs.",
-        },
-        top_k: {
-          type: "number",
-          description:
-            "Max results (default: 10, max: 50). Counts distinct entities, not index rows " +
-            "(a file's doc row and its commit diffs collapse into one result).",
-        },
-        fusion: {
-          type: "string",
-          enum: ["rrf", "dense_only", "sparse_only"],
-          description:
-            "Fusion strategy (default: rrf). dense_only / sparse_only for debugging or single-ranker queries. " +
-            "Ignored in scan mode (empty query).",
-        },
-        rerank: {
-          type: "boolean",
-          description:
-            "Cross-encoder reranking with @cf/baai/bge-reranker-base (default: true). " +
-            "Set false to skip — faster, no rerank cost; recommended for short identifier queries or debugging. " +
-            "Ignored in scan mode (empty query).",
-        },
-        sort: {
-          type: "string",
-          enum: ["relevance", "updated_desc", "created_desc"],
-          description:
-            "Result ordering. Default: \"relevance\" when query is non-empty, \"updated_desc\" when query is empty. " +
-            "Setting \"updated_desc\" / \"created_desc\" forces time-ordered output and overrides ranker scores.",
-        },
-        since: {
-          type: "string",
-          description:
-            "ISO 8601 timestamp (inclusive) — keep only results whose updated_at >= since. " +
-            "Pair with sort=\"updated_desc\" + empty query for an activity scan. " +
-            "Default in scan mode: 7 days back from until (or from now when until is omitted).",
-        },
-        until: {
-          type: "string",
-          description:
-            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until. " +
-            "In scan mode the [since, until) window is applied inside the index, so any window " +
-            "holding rows returns rows however far back it sits; the response carries " +
-            "truncated: true when the window holds more than one page.",
-        },
-        include_content: {
-          type: "boolean",
-          description:
-            "When true, inline the raw content of top doc and wiki_doc rows (docs via the GitHub " +
-            "contents API, wiki pages via raw.githubusercontent.com/wiki) on those rows. Capped at " +
-            "the first few rows of each surface to bound API fan-out. Other rows are unaffected. " +
-            "Default: false.",
-        },
-        vector_ids: {
-          type: "array",
-          items: { type: "string" },
-          maxItems: 50,
-          description:
-            "Stored-content fetch. Pass the vector_id values carried by earlier search-mode results " +
-            "(scan-mode rows come from the structured store and carry none) to read back the " +
-            "body text the index holds for those exact rows, for every type — issue, pull_request, " +
-            "issue_comment, pr_review, pr_review_comment, release, diff, doc, wiki_doc. " +
-            "Served from D1: no GitHub API call is made. Takes precedence over the other modes — query, sort, " +
-            "and every metadata filter are ignored when this is present, because the rows are named rather " +
-            "than selected. " +
-            "The text is the INDEXED copy of the body (the embedding input), truncated at 8000 characters — " +
-            "not the live source. Each row carries content_truncated so a prefix is never mistaken for a whole " +
-            "body, and the response carries content_source: \"index\". Unknown or stale ids are listed in " +
-            "not_found and the remaining rows still return. Max 50 ids per call. " +
-            "Treat vector_id as a handle for a row you just found, not a durable identifier: the id scheme has " +
-            "been migrated before and may be again, so do not store one for later use.",
-        },
-        graph_expand: {
-          type: "boolean",
-          description:
-            "Opt-in GraphRAG expansion (search mode only). When true, after fusion the top " +
-            "results seed a traversal of the Decision-Structure mention graph (D1 doc_edges); " +
-            "related wiki pages are returned in a separate graph_results array marked with " +
-            "graph_hop / graph_from — never mixed into results, and carrying no score. " +
-            "Default false = byte-identical to standard hybrid retrieval (no graph read, " +
-            "no graph_results field).",
-        },
-        graph_hops: {
-          type: "number",
-          minimum: 1,
-          maximum: 2,
-          description:
-            "Graph traversal depth for graph_expand (1 or 2). Default 1. " +
-            "Ignored when graph_expand is false.",
-        },
-      },
-    },
+    inputSchema: SEARCH_CONTRACT.inputSchema,
+    outputSchema: SEARCH_CONTRACT.outputSchema,
     annotations: {
-      title: "Search GitHub",
-      readOnlyHint: true,
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
     },
   },
+  ...MEMORY_CONTRACT.tools,
 ];
