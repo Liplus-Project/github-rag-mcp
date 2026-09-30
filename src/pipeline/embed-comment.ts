@@ -13,7 +13,7 @@ import type {
   PRReviewRecord,
   PRReviewCommentRecord,
 } from "../types.js";
-import { upsertFtsRow } from "../fts.js";
+import { upsertFtsRow, repairSourceEventIdentity } from "../fts.js";
 import { isBotSender, isBodyTooShort } from "./ingest-filter.js";
 import { computeBodyHash, prepareCommentEmbeddingInput } from "./hash.js";
 import { generateEmbedding } from "./embedding.js";
@@ -94,6 +94,7 @@ export async function ingestIssueComment(
   if (existingResp.ok) {
     const existing = (await existingResp.json()) as IssueCommentRecord;
     if (existing.bodyHash === bodyHash) {
+      await repairSourceEventIdentity(env.DB_FTS, await issueCommentVectorId(repo, comment.id), "comment", comment.id);
       return { embedded: false, skippedUnchanged: true, filtered: false, failed: false };
     }
   }
@@ -125,6 +126,7 @@ export async function ingestIssueComment(
         vectorId: vid,
         repo,
         type: "issue_comment",
+        commentId: comment.id,
         state: "active",
         labels: "",
         milestone: "",
@@ -205,6 +207,7 @@ export async function ingestPRReview(
   if (existingResp.ok) {
     const existing = (await existingResp.json()) as PRReviewRecord;
     if (existing.bodyHash === bodyHash) {
+      await repairSourceEventIdentity(env.DB_FTS, await prReviewVectorId(repo, review.id), "review", review.id);
       return { embedded: false, skippedUnchanged: true, filtered: false, failed: false };
     }
   }
@@ -238,6 +241,7 @@ export async function ingestPRReview(
         vectorId: vid,
         repo,
         type: "pr_review",
+        reviewId: review.id,
         state: review.state,
         labels: "",
         milestone: "",
@@ -327,6 +331,7 @@ export async function ingestPRReviewComment(
   if (existingResp.ok) {
     const existing = (await existingResp.json()) as PRReviewCommentRecord;
     if (existing.bodyHash === bodyHash) {
+      await repairSourceEventIdentity(env.DB_FTS, await prReviewCommentVectorId(repo, comment.id), "comment", comment.id);
       return { embedded: false, skippedUnchanged: true, filtered: false, failed: false };
     }
   }
@@ -361,6 +366,7 @@ export async function ingestPRReviewComment(
         vectorId: vid,
         repo,
         type: "pr_review_comment",
+        commentId: comment.id,
         state: "active",
         labels: "",
         milestone: "",

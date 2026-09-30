@@ -18,6 +18,7 @@ import type {
   PRReviewCommentRecord,
   PollWatermark,
 } from "./types.js";
+import { MemoryStore } from "./memory.js";
 import { pathPrefixRange } from "./path-prefix.js";
 
 /**
@@ -249,10 +250,12 @@ function rowToDiffRecord(row: DiffRow): DiffRecord {
 
 export class IssueStore implements DurableObject {
   private sql: SqlStorage;
+  private memory: MemoryStore;
 
   constructor(state: DurableObjectState, _env: Env) {
     this.sql = state.storage.sql;
     this.initSchema();
+    this.memory = new MemoryStore(this.sql, fn => state.storage.transactionSync(fn));
   }
 
   /**
@@ -1097,6 +1100,39 @@ export class IssueStore implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    if (request.method === "GET" && path === "/source-identities") {
+      const repo = url.searchParams.get("repo") ?? "";
+      const limit = Number(url.searchParams.get("limit") ?? 50);
+      const cursor = url.searchParams.get("cursor") ?? "";
+      const match = cursor ? /^(issue_comment|pr_review|pr_review_comment):([0-9]+)$/.exec(cursor) : null;
+      if (!repo || repo.length > 256 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor && !match)) return new Response("Invalid identity page", { status: 400 });
+      const definitions = [{ type: "issue_comment", table: "issue_comments", id: "comment_id" }, { type: "pr_review", table: "pr_reviews", id: "review_id" }, { type: "pr_review_comment", table: "pr_review_comments", id: "comment_id" }];
+      const rows: { repo: string; type: string; event_id: number }[] = [];
+      for (const d of definitions) {
+        if (match && d.type < match[1]) continue;
+        const after = match && d.type === match[1] ? Number(match[2]) : 0;
+        for (const r of this.sql.exec(`SELECT ${d.id} AS event_id FROM ${d.table} WHERE repo=? AND ${d.id}>? ORDER BY ${d.id} LIMIT ?`, repo, after, limit + 1).toArray()) rows.push({ repo, type: d.type, event_id: Number(r.event_id) });
+      }
+      rows.sort((a,b) => a.type.localeCompare(b.type) || a.event_id - b.event_id);
+      const page = rows.slice(0, limit); const last = page.at(-1);
+      return Response.json({ rows: page, next_cursor: rows.length > limit && last ? `${last.type}:${last.event_id}` : null, done: rows.length <= limit });
+    }
+    if (request.method === "POST" && path === "/memory") {
+      try {
+        const body = await request.json() as { principal: string; action: string; args: unknown };
+        if (!/^github:[1-9][0-9]*$/.test(body.principal)) throw new Error("Invalid authenticated principal");
+        const data = body.action === "save" ? this.memory.save(body.principal, body.args as Parameters<MemoryStore['save']>[1])
+          : body.action === "memory_history" ? this.memory.history(body.principal, body.args)
+          : body.action === "strengths" ? this.memory.strengths(body.principal, body.args as Parameters<MemoryStore['strengths']>[1])
+          : body.action === "record_source_use" || body.action === "record_outcome" ? this.memory.mutate(body.principal, body.action, body.args)
+          : (() => { throw new Error("Unknown memory action"); })();
+        return Response.json(data);
+      } catch (err) {
+        const codes: Record<string, string> = { 'Unknown trace': 'unknown_trace', 'Unknown source in trace': 'unknown_source', 'Unknown cursor': 'unknown_cursor', 'Idempotency conflict': 'idempotency_conflict', 'Usage stage order violation': 'stage_order_violation', 'Confirmation requires used source': 'used_source_required', 'Unknown confirmation for trace': 'unknown_confirmation', 'Reversal requires confirmation_id only': 'confirmation_id_required', 'confirmed requires source_ids only': 'source_ids_required' };
+        const code = codes[err instanceof Error ? err.message : ''] ?? 'invalid_memory_request';
+        return Response.json({ error: code }, { status: 400 });
+      }
+    }
 
     /**
      * Query-string form of the recency window shared by every `/recent*`

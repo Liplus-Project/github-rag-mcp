@@ -1,5 +1,5 @@
 /**
- * MCP server factory exposing a single consolidated semantic search tool.
+ * MCP server factory exposing consolidated retrieval and private feedback tools.
  *
  * Tools:
  *   search — hybrid search + time-ordered activity scan + inline doc
@@ -22,7 +22,7 @@
  *
  * Protocol revision 2026-07-28 (stateless core, issue #224). The server is
  * built fresh per HTTP request by `createMcpHandler` in `index.ts` — there is
- * no session, no `initialize`, and no Durable Object in the serving path. What
+ * no session or `initialize`; private memory uses the existing IssueStore DO. What
  * `McpAgent` used to provide in two roles is now split: instance resolution
  * from a session ID is gone outright, and user identity comes from the OAuth
  * props of the request being served, read through `getMcpAuthContext()`.
@@ -32,9 +32,10 @@
  * `retired-do.ts` so this module imports nothing from `cloudflare:workers`.
  */
 
+import { registerMemoryTools, rememberResult, memoryCall, MEMORY_INSTRUCTIONS } from "./memory-api.js";
 import { getMcpAuthContext } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
+import { searchInputSchema, searchOutputSchema, INCLUDE_CONTENT_MAX_DOCS } from "./search-contract.js";
 import type {
   Env,
   IssueRecord,
@@ -105,7 +106,7 @@ function githubHeaders(token: string): Record<string, string> {
  * top_k for generic scanning. Callers that need more should page via
  * additional queries rather than lifting this cap.
  */
-const INCLUDE_CONTENT_MAX_DOCS = 5;
+
 
 /**
  * Per-candidate payload assembled after fusion: the dense metadata, the sparse
@@ -180,8 +181,8 @@ function resolveRow(p: RowPayload | undefined): ResolvedRow {
     commitDate: meta?.commit_date ?? ftsRow?.commitDate ?? "",
     commitAuthor: meta?.commit_author ?? ftsRow?.commitAuthor ?? "",
     author: meta?.author ?? "",
-    commentId: meta?.comment_id ?? 0,
-    reviewId: meta?.review_id ?? 0,
+    commentId: meta?.comment_id ?? ftsRow?.commentId ?? 0,
+    reviewId: meta?.review_id ?? ftsRow?.reviewId ?? 0,
     line: meta?.line ?? 0,
   };
 }
@@ -239,6 +240,8 @@ export type GraphItem = {
   content?: string;
   graph_hop: number;
   graph_from: string;
+  graph_path?: import("./memory.js").SavedEdge[];
+  learned_strength?: number;
 };
 
 /**
@@ -273,6 +276,7 @@ export function buildGraphItem(
     repo,
     graph_hop: neighbor.hop,
     graph_from: fromSlug,
+    graph_path: neighbor.path ?? [],
   };
   if (type === "wiki_doc") item.wiki_path = path;
   if (type === "doc") item.doc_path = path;
@@ -294,14 +298,16 @@ export function createRagMcpServer(env: Env): McpServer {
   const server = new McpServer({
     name: "github-rag-mcp",
     version: "0.1.0",
-  });
+  }, { instructions: MEMORY_INSTRUCTIONS });
+  registerMemoryTools(server, env);
 
   // ── search ──────────────────────────────────────────
   server.registerTool(
     "search",
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       description:
-        "Unified search across GitHub issues, PRs, releases, repository documentation, GitHub Wiki pages, " +
+        MEMORY_INSTRUCTIONS + "\n" + "Unified search across GitHub issues, PRs, releases, repository documentation, GitHub Wiki pages, " +
         "commit diffs, issue/PR top-level comments, PR reviews, and PR inline review comments. " +
         "Four modes, all derived from the parameter set:\n" +
         "  1. Hybrid semantic search (default): dense BGE-M3 over Vectorize + sparse BM25 over D1 FTS5, " +
@@ -340,178 +346,11 @@ export function createRagMcpServer(env: Env): McpServer {
         "absence of a score is not a score of zero). Triage: appearing on BOTH axes is the strongest signal — " +
         "two independent paths agreed. Keyword axis only = the words matched. Relationship axis only = the " +
         "vocabulary did not match but the entry is structurally adjacent to what did.",
-      inputSchema: z.object({
-        query: z
-          .string()
-          .optional()
-          .describe(
-            "Natural language search query. When omitted or empty, the tool " +
-              "switches to metadata-only scan mode and results are ordered " +
-              "by the timestamp implied by sort (default sort=\"updated_desc\" for empty query).",
-          ),
-        repo: z
-          .string()
-          .optional()
-          .describe(
-            "Filter by repository — full slug (owner/repo), exact match. " +
-              "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
-              "search mode flags that case as \"repo\" in the response's filters_unmatched.",
-          ),
-        path_prefix: z
-          .string()
-          .optional()
-          .describe(
-            "Filter repository docs by a repository-relative directory prefix before ranking. " +
-              "Requires type=\"doc\", a trailing /, no leading /, backslash, NUL, empty, . or .. path segments, " +
-              "and at most 64 UTF-8 bytes. Search mode reports an unmatched value as \"path_prefix\" in filters_unmatched.",
-          ),
-        state: z
-          .enum(["open", "closed", "all"])
-          .optional()
-          .default("all")
-          .describe("Filter by state"),
-        labels: z
-          .array(z.string())
-          .optional()
-          .describe("Filter by label names (AND logic)"),
-        milestone: z
-          .string()
-          .optional()
-          .describe("Filter by milestone title"),
-        assignee: z
-          .string()
-          .optional()
-          .describe("Filter by assignee login"),
-        type: z
-          .enum([
-            "issue",
-            "pull_request",
-            "release",
-            "doc",
-            "wiki_doc",
-            "diff",
-            "issue_comment",
-            "pr_review",
-            "pr_review_comment",
-            "all",
-          ])
-          .optional()
-          .default("all")
-          .describe(
-            "Filter by type (default: all). " +
-              "\"doc\" = repository docs (files in /docs/ etc.). " +
-              "\"wiki_doc\" = GitHub Wiki pages (separate from repo docs; both surfaces co-exist). " +
-              "\"diff\" = per-file commit diffs. " +
-              "\"issue_comment\" = top-level comments on issues and PRs. " +
-              "\"pr_review\" = PR review bodies (approve / request_changes / comment). " +
-              "\"pr_review_comment\" = inline per-line review comments on PR diffs.",
-          ),
-        top_k: z
-          .number()
-          .min(1)
-          .max(50)
-          .optional()
-          .default(10)
-          .describe("Max results (default: 10, max: 50)"),
-        fusion: z
-          .enum(["rrf", "dense_only", "sparse_only"])
-          .optional()
-          .default("rrf")
-          .describe(
-            "Fusion strategy. Default: rrf (Reciprocal Rank Fusion over dense + sparse). " +
-              "dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only. " +
-              "Use rrf unless debugging a specific ranker. Ignored in metadata-only scan mode (empty query).",
-          ),
-        rerank: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe(
-            "Cross-encoder reranking with @cf/baai/bge-reranker-base. Default: true. " +
-              "When enabled, the fused (or single-ranker) candidates are overfetched (top_k × 5, max 50), " +
-              "post-filtered, then re-scored by the cross-encoder before being trimmed to top_k. " +
-              "Set false to disable (faster, no Workers AI rerank cost; recommended for debugging or " +
-              "when query is a short identifier where lexical match is already decisive). " +
-              "Ignored in metadata-only scan mode (empty query).",
-          ),
-        sort: z
-          .enum(["relevance", "updated_desc", "created_desc"])
-          .optional()
-          .describe(
-            "Result ordering. Default: \"relevance\" when query is non-empty, \"updated_desc\" when query is empty. " +
-              "\"updated_desc\" / \"created_desc\" force time-ordered output and override ranker scores.",
-          ),
-        since: z
-          .string()
-          .optional()
-          .describe(
-            "ISO 8601 timestamp (inclusive) — keep only results whose updated_at >= since. " +
-              "Pair with sort=\"updated_desc\" + empty query for an activity scan. " +
-              "Default in scan mode: 7 days back from until (or from now when until is omitted).",
-          ),
-        until: z
-          .string()
-          .optional()
-          .describe(
-            "ISO 8601 timestamp (exclusive) — keep only results whose updated_at < until. " +
-              "In scan mode the [since, until) window is applied inside the index, so any window " +
-              "holding rows returns rows however far back it sits; the response carries " +
-              "truncated: true when the window holds more than one page.",
-          ),
-        include_content: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            "When true and a result row is type=\"doc\", fetch the file content from the GitHub " +
-              "contents API and inline it as a \"content\" field on that row. Capped at the first " +
-              `${INCLUDE_CONTENT_MAX_DOCS} doc rows in the result set to bound API fan-out. ` +
-              "Non-doc rows are unaffected.",
-          ),
-        vector_ids: z
-          .array(z.string())
-          .max(FETCH_MAX_VECTOR_IDS)
-          .optional()
-          .describe(
-            "Stored-content fetch. Pass the vector_id values carried by earlier search-mode results " +
-              "(scan-mode rows come from the structured store and carry none) to read back the " +
-              "body text the index holds for those exact rows, for every type — issue, pull_request, " +
-              "issue_comment, pr_review, pr_review_comment, release, diff, doc, wiki_doc. " +
-              "Served from D1: no GitHub API call is made. Takes precedence over the other modes — query, " +
-              "sort, and every metadata filter are ignored when this is present, because the rows are named " +
-              "rather than selected. " +
-              "The text is the INDEXED copy of the body (the embedding input), truncated at " +
-              `${FETCH_CONTENT_MAX_CHARS} characters — not the live source. Each row carries content_truncated ` +
-              "so a prefix is never mistaken for a whole body, and the response carries content_source: \"index\". " +
-              "Unknown or stale ids are listed in not_found and the remaining rows still return. " +
-              `Max ${FETCH_MAX_VECTOR_IDS} ids per call. ` +
-              "Treat vector_id as a handle for a row you just found, not a durable identifier: the id scheme " +
-              "has been migrated before and may be again, so do not store one for later use.",
-          ),
-        graph_expand: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            "Opt-in GraphRAG expansion (search mode only). When true, after fusion the top " +
-              "results seed a traversal of the Decision-Structure mention graph (D1 doc_edges); " +
-              "related wiki pages are returned in a separate graph_results array marked with " +
-              "graph_hop / graph_from — never mixed into results, and carrying no score. " +
-              "Default false = byte-identical to standard hybrid retrieval (no graph read, " +
-              "no graph_results field).",
-          ),
-        graph_hops: z
-          .number()
-          .min(1)
-          .max(2)
-          .optional()
-          .default(1)
-          .describe(
-            "Graph traversal depth for graph_expand (1 or 2). Default 1. Ignored when graph_expand is false.",
-          ),
-      }),
+      inputSchema: searchInputSchema,
+      outputSchema: searchOutputSchema,
     },
-    async ({
+    async (args) => {
+      const result = await (async ({
       query,
       repo,
       path_prefix,
@@ -530,7 +369,11 @@ export function createRagMcpServer(env: Env): McpServer {
       vector_ids,
       graph_expand,
       graph_hops,
+      use_memory,
     }) => {
+      const memoryRequest = { query, repo, path_prefix, state, labels, milestone, assignee, type, top_k, fusion, rerank, sort, since, until, include_content, vector_ids, graph_expand, graph_hops, use_memory };
+      const remember = (payload: unknown) => rememberResult(env, payload, memoryRequest);
+
       // ── Fetch mode (vector_ids): stored content for named rows ───
       // First branch on purpose: a fetch call carries no query, so leaving it
       // below the empty-query test would route it into scan mode. The rows are
@@ -541,17 +384,14 @@ export function createRagMcpServer(env: Env): McpServer {
           const payload = await fetchStoredContent(env.DB_FTS, fetchIds);
           return {
             content: [
-              { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+              { type: "text" as const, text: JSON.stringify(await remember(payload), null, 2) },
             ],
           };
         } catch (err) {
           // Reported as an error rather than as an all-missing response: an
           // empty `results` with every id in `not_found` would assert the rows
           // do not exist, which a failed read gives no ground to claim.
-          console.error(
-            "search: stored-content fetch failed:",
-            err instanceof Error ? err.message : String(err),
-          );
+          console.error("search: stored-content fetch failed:");
           return {
             content: [
               {
@@ -613,7 +453,7 @@ export function createRagMcpServer(env: Env): McpServer {
             {
               type: "text" as const,
               text: JSON.stringify(
-                {
+                await remember({
                   count: items.length,
                   mode: "scan",
                   sort: effectiveSort,
@@ -621,7 +461,8 @@ export function createRagMcpServer(env: Env): McpServer {
                   until: until ?? null,
                   truncated: scan.truncated,
                   results: items,
-                },
+                  memory_incomplete: scan.incomplete,
+                }),
                 null,
                 2,
               ),
@@ -693,6 +534,7 @@ export function createRagMcpServer(env: Env): McpServer {
             })();
 
       // ── Sparse path: D1 FTS5 BM25 query ──────────────────────
+      let retrievalIncomplete = false;
       const sparsePromise: Promise<FtsHit[]> =
         fusionMode === "dense_only"
           ? Promise.resolve([])
@@ -710,10 +552,8 @@ export function createRagMcpServer(env: Env): McpServer {
               try {
                 return await queryFts(env.DB_FTS, trimmedQuery, internalTopK, ftsFilter);
               } catch (err) {
-                console.error(
-                  "search: D1 FTS5 query failed:",
-                  err instanceof Error ? err.message : String(err),
-                );
+                retrievalIncomplete = true;
+                console.error("search: D1 FTS5 query failed:");
                 return [];
               }
             })();
@@ -910,10 +750,7 @@ export function createRagMcpServer(env: Env): McpServer {
           } catch (err) {
             // Backfill is best-effort: a D1 failure must not take the search
             // down. We fall through with whatever content we already have.
-            console.error(
-              "search: rerank content backfill failed:",
-              err instanceof Error ? err.message : String(err),
-            );
+            console.error("search: rerank content backfill failed:");
           }
         }
 
@@ -1097,6 +934,7 @@ export function createRagMcpServer(env: Env): McpServer {
                   const or = resolveRow(payload.get(o.vectorId));
                   return {
                     vector_id: o.vectorId,
+                    repo: or.repo, number: or.number, doc_path: or.docPath, wiki_path: or.wikiPath, file_path: or.filePath, tag_name: or.tagName, comment_id: or.commentId, review_id: or.reviewId,
                     type: or.type,
                     url: buildResultUrl(or),
                     updated_at: or.updatedAt,
@@ -1241,13 +1079,14 @@ export function createRagMcpServer(env: Env): McpServer {
       }
 
       // ── Optional graph expansion (opt-in; default off leaves everything
-      // above byte-identical). Seeds from the final result set, traverses the
+      // above unchanged in ranking). Seeds from the final result set, traverses the
       // Decision-Structure mention graph, and returns related wiki pages as a
       // SEPARATE axis (issue #234) — never mixed into `results`. Best-effort:
       // any failure returns the keyword axis unchanged with an empty graph
       // axis. `queryNeighbors` already orders by hop ascending and the skip
       // below only removes rows, so the axis stays hop-ordered.
       const graphItems: GraphItem[] = [];
+      let memoryIncomplete = retrievalIncomplete;
       if (graphExpand && filtered.length > 0) {
         try {
           const seedIds = filtered.map((f) => f.vectorId);
@@ -1255,9 +1094,14 @@ export function createRagMcpServer(env: Env): McpServer {
           const neighbors = await queryNeighbors(env.DB_FTS, seedIds, {
             hops: graphHops,
             repo,
-            limit: Math.min(requestedTopK * 2, 30),
+            limit: use_memory ? 200 : Math.min(requestedTopK * 2, 30),
           });
-          const fresh = neighbors.filter((n) => !seedSet.has(n.vectorId));
+          if (use_memory) {
+            const strengths: number[] = await memoryCall(env, "strengths", neighbors.map(n => n.path ?? []));
+            neighbors.forEach((n, i) => Object.assign(n, { learnedStrength: strengths[i] }));
+            neighbors.sort((a, b) => a.hop - b.hop || Number((b as any).learnedStrength) - Number((a as any).learnedStrength));
+          }
+          const fresh = neighbors.filter((n) => !seedSet.has(n.vectorId)).slice(0, Math.min(requestedTopK * 2, 30));
           if (fresh.length > 0) {
             const enrich = await getDocsByVectorIds(
               env.DB_FTS,
@@ -1271,15 +1115,13 @@ export function createRagMcpServer(env: Env): McpServer {
               const row = enrich.get(n.vectorId);
               if (!row) continue; // dangling edge (target not indexed) — skip
               graphItems.push(
-                buildGraphItem(n, row, slugOf(n.fromVectorId), includeContent),
+                { ...buildGraphItem(n, row, slugOf(n.fromVectorId), includeContent), ...(use_memory ? { learned_strength: Number((n as any).learnedStrength) } : {}) },
               );
             }
           }
         } catch (graphErr) {
-          console.error(
-            "graph_expand failed (returning organic results):",
-            graphErr instanceof Error ? graphErr.message : String(graphErr),
-          );
+          memoryIncomplete = true;
+          console.error("graph_expand failed (returning organic results):");
         }
       }
 
@@ -1288,10 +1130,11 @@ export function createRagMcpServer(env: Env): McpServer {
           {
             type: "text" as const,
             text: JSON.stringify(
-              {
+              await remember({
                 // Keyword-axis count only (issue #234). Relationship-axis
                 // rows are counted by `graph_neighbors` and returned in
                 // `graph_results`.
+                memory_incomplete: memoryIncomplete,
                 count: items.length,
                 mode: "search",
                 fusion: fusionMode,
@@ -1324,17 +1167,20 @@ export function createRagMcpServer(env: Env): McpServer {
                 results: items,
                 // Relationship axis (issue #234). Present only when
                 // `graph_expand: true`, so the default response stays
-                // byte-identical to the pre-#234 shape. Ordered by
+                // free of the graph_results field. Ordered by
                 // `graph_hop` ascending; carries no ranker score because the
                 // axis has none to report.
                 ...(graphExpand ? { graph_results: graphItems } : {}),
-              },
+              }),
               null,
               2,
             ),
           },
         ],
       };
+      })(args);
+      if (result.isError) return result;
+      return { ...result, structuredContent: JSON.parse(result.content[0].text) };
     },
   );
 

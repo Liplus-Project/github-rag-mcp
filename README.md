@@ -95,7 +95,13 @@ See:
 
 ## MCP Tools
 
-This MCP server exposes a single consolidated tool. All retrieval modes — semantic search, time-ordered activity scan, inline doc content fetch, and stored-content fetch by `vector_id` — are reached through `search` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
+This MCP server exposes `search` and three private feedback tools. All retrieval modes — semantic search, time-ordered activity scan, inline doc content fetch, and stored-content fetch by `vector_id` — are reached through `search` via its parameter set. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters below.
+
+### Private feedback tools
+
+Successful retrieval writes a UTC trace by default, returning version-specific `source_id` and current activation. `memory_history` reads history, stages and reversal audit; `record_source_use` records selected→validated→used; `record_outcome` confirms a saved path or corrects/rolls back one named receipt. Retrieval alone is never usage or confirmation. Memory failure emits no usable trace. Half-life is 3600 seconds, each activation channel caps at 10 (total 20), and relation strength caps at 5. Successful retrieval adds a DO request and storage cost.
+
+See the [specification, migration and synthetic lifecycle](docs/2-feedback-memory.md). Apply 0008 before Worker deployment and include the new schema JSON in bridge artifacts. Retrieval quality improvement has not been evaluated.
 
 ### `search`
 
@@ -134,8 +140,9 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `until` | ISO 8601 string | Keep only results with `updated_at < until`. |
 | `include_content` | boolean | Inline raw content on top doc results (default `false`). |
 | `vector_ids` | string[] | Stored-content fetch. The `vector_id` values of the rows to read back, max 50 per call. Takes precedence over the other modes: `query`, `sort` and every filter are ignored when present. See [Stored-content fetch](#stored-content-fetch). |
-| `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages come back in a separate `graph_results` array tagged `graph_hop` / `graph_from` — see Retrieval axes below. Default `false` = byte-identical to standard hybrid retrieval (no graph read). |
+| `graph_expand` | boolean | Opt-in GraphRAG expansion (search mode only). When `true`, after fusion the top results seed a traversal of the Decision-Structure mention graph (D1 `doc_edges`); related wiki pages come back in a separate `graph_results` array tagged `graph_hop` / `graph_from` — see Retrieval axes below. Default `false` preserves standard hybrid ranking (no graph read); trace metadata is added. |
 | `graph_hops` | number | Graph traversal depth for `graph_expand` (1 or 2, default 1). Ignored when `graph_expand` is `false`. |
+| `use_memory` | boolean | Default false. True orders up to 200 graph candidates by learned strength within equal hops before the output cap. Keyword scores/ranks are preserved. |
 
 #### `type` values
 

@@ -103,7 +103,7 @@ Delete these files to force a fresh authorization flow.
 
 ## Tools exposed
 
-A single consolidated tool, `search`, covers every retrieval mode. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters of `search`.
+`search` covers every retrieval mode, alongside private `memory_history`, `record_source_use`, and `record_outcome` tools. Earlier builds split these across `get_issue_context`, `get_doc_content`, and `list_recent_activity`; those tools have been removed and their use cases now fold into the parameters of `search`.
 
 | Tool | Description |
 |---|---|
@@ -111,7 +111,7 @@ A single consolidated tool, `search`, covers every retrieval mode. Earlier build
 
 The `type` filter accepts: `issue`, `pull_request`, `release`, `doc`, `wiki_doc`, `diff`, `issue_comment`, `pr_review`, `pr_review_comment`, or `all` (default).
 
-`search` is read-only. For the full parameter reference and examples, see the [main repository README](https://github.com/Liplus-Project/github-rag-mcp#search).
+`search` writes private retrieval history and has `readOnlyHint:false`. The three feedback tools provide bounded history, explicit selected/validated/used records, and confirmed path reinforcement with receipt-based correction/rollback. `use_memory` defaults false and only changes same-hop graph ordering. Include `server/search-schema.json` and `server/memory-tools.json` in shipped artifacts. See the [memory specification](https://github.com/Liplus-Project/github-rag-mcp/blob/main/docs/2-feedback-memory.md) for bounds, costs, migration 0008-before-deployment and the synthetic lifecycle. For the full parameter reference and examples, see the [main repository README](https://github.com/Liplus-Project/github-rag-mcp#search).
 
 ## Authentication flow
 

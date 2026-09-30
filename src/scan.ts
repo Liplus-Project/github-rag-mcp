@@ -93,6 +93,7 @@ export interface ScanParams {
 }
 
 export interface ScanOutcome {
+  incomplete?: boolean;
   rows: ScanRow[];
   /** Window floor actually applied (the caller's `since`, or the default). */
   since: string;
@@ -155,6 +156,7 @@ export async function runScan(
   const rows: ScanRow[] = [];
   let truncated = false;
 
+  let incomplete = false;
   const collect = async <T>(
     path: string,
     map: (record: T) => ScanRow | null,
@@ -164,7 +166,7 @@ export async function runScan(
       const res = await store.fetch(
         new Request(`http://store/${path}?${buildParams(pathPrefix).toString()}`),
       );
-      if (!res.ok) return;
+      if (!res.ok) throw new Error("Scan source unavailable");
       const records = (await res.json()) as T[];
       // A full page means the cap, not the window, ended the read.
       if (records.length >= storeLimit) truncated = true;
@@ -173,6 +175,7 @@ export async function runScan(
         if (row) rows.push(row);
       }
     } catch {
+      incomplete = true;
       // Non-critical; continue with the other sources.
     }
   };
@@ -365,5 +368,5 @@ export async function runScan(
 
   if (filtered.length > topK) truncated = true;
 
-  return { rows: filtered.slice(0, topK), since, truncated };
+  return { rows: filtered.slice(0, topK), since, truncated, incomplete };
 }

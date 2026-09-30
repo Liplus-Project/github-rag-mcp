@@ -69,6 +69,8 @@ export interface FetchItem {
    * a prefix as whole.
    */
   content_truncated: boolean;
+  comment_id?: number;
+  review_id?: number;
   tag_name?: string;
   doc_path?: string;
   wiki_path?: string;
@@ -124,6 +126,8 @@ export function buildFetchItem(
     content_chars: content.length,
     content_truncated: content.length >= MAX_EMBEDDING_INPUT_CHARS,
   };
+  if (type === "issue_comment" || type === "pr_review_comment") item.comment_id = Number(row.comment_id ?? 0);
+  if (type === "pr_review") item.review_id = Number(row.review_id ?? 0);
   if (type === "release") item.tag_name = String(row.tag_name ?? "");
   if (type === "doc") item.doc_path = path;
   if (type === "wiki_doc") item.wiki_path = path;

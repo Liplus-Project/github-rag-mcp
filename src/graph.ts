@@ -30,6 +30,7 @@ export interface GraphNeighbor {
   vectorId: string;
   hop: number;
   fromVectorId: string;
+  path?: import("./memory.js").SavedEdge[];
 }
 
 /** Escape a string for safe inclusion in a RegExp. */
@@ -165,23 +166,24 @@ export async function queryNeighbors(
   const limit = Math.max(1, Math.min(200, opts.limit ?? 50));
 
   // Anchor: each seed at depth 0 with itself as origin.
-  const seedValues = seeds.map(() => "(?, 0, ?)").join(", ");
+  const seedValues = seeds.map(() => "(?, 0, ?, json_array())").join(", ");
   const repoFilter = opts.repo ? "AND e.repo = ?" : "";
 
   const sql = `
-    WITH RECURSIVE reach(id, depth, origin) AS (
+    WITH RECURSIVE reach(id, depth, origin, path) AS (
       SELECT * FROM (VALUES ${seedValues})
       UNION
       SELECT CASE WHEN e.src_vector_id = r.id THEN e.dst_vector_id
                   ELSE e.src_vector_id END,
              r.depth + 1,
-             r.origin
+             r.origin,
+             json_insert(r.path, '$[#]', json_object('repo', e.repo, 'src', e.src_slug, 'dst', e.dst_slug, 'kind', e.edge_kind))
         FROM doc_edges e
         JOIN reach r
           ON (e.src_vector_id = r.id OR e.dst_vector_id = r.id)
        WHERE r.depth < ? ${repoFilter}
     )
-    SELECT id, MIN(depth) AS hop, origin
+    SELECT id, MIN(depth) AS hop, origin, path
       FROM reach
      WHERE depth > 0
      GROUP BY id
@@ -198,7 +200,7 @@ export async function queryNeighbors(
   const res = await db
     .prepare(sql)
     .bind(...binds)
-    .all<{ id: string; hop: number; origin: string }>();
+    .all<{ id: string; hop: number; origin: string; path: string }>();
 
   const seedSet = new Set(seeds);
   return (res.results ?? [])
@@ -206,6 +208,7 @@ export async function queryNeighbors(
       vectorId: String(r.id ?? ""),
       hop: Number(r.hop ?? 0),
       fromVectorId: String(r.origin ?? ""),
+      path: JSON.parse(r.path),
     }))
     .filter((n) => n.vectorId.length > 0 && !seedSet.has(n.vectorId));
 }
@@ -231,7 +234,7 @@ export async function getDocsByVectorIds(
     .prepare(
       `SELECT vector_id, repo, type, state, labels, milestone, assignees, updated_at,
               number, tag_name, doc_path, commit_sha, file_path, file_status,
-              commit_date, commit_author, tokenizer_kind, content, indexed_at
+              commit_date, commit_author, comment_id, review_id, tokenizer_kind, content, indexed_at
          FROM search_docs
         WHERE vector_id IN (${placeholders})`,
     )

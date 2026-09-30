@@ -83,16 +83,7 @@ Responsibilities:
 - semantic retrieval と structured retrieval の tool を公開する
 - downstream agent がそのまま使える形式で state を返す
 
-スキーマの source of truth は Worker 側の tool 定義。client proxy
-(`mcp-server/server/tools.js`) は `tools/list` を Worker へ転送せず、`search`
-params の静的ミラーから応答する（起動時を auth/network なしに保つため）。ミラーは
-手動保守ゆえ、Worker に param を足して proxy を忘れると、MCP クライアントが
-`additionalProperties: false` で黙って落とし Worker に届かない（gh#157）。
-`scripts/check-schema-drift.mjs` を CI で実行し、proxy の `search` スキーマが Worker
-からズレたら build を失敗させる。両者は同期せずに出荷できない。
-比較する軸は 2 つ、param 名と enum param の値。名前だけの比較では proxy の `type`
-enum から `wiki_doc` が抜けたまま気付けず、Worker は受け付けるのにクライアント側で
-値が弾かれていた（gh#181）。
+Worker の Zod contract を source of truth とし、bridge は生成した静的 JSON で `tools/list` を返す。起動時の auth/network は不要。`scripts/generate-tool-contracts.mjs` で再生成し、`scripts/check-schema-drift.mjs` は全4 tool の実 protocol と nested input/output schema、bounds、defaults、annotations の一致を CI で検査する。名前/enum のみだった旧 guard を拡張する（#259）。
 
 #### プロトコル版 2026-07-28、単レーン
 
@@ -117,7 +108,7 @@ README 注意書きで吸収する。
 - かつて MCP を提供していた Durable Object（`RagMcpAgent` / `RagMcpAgentV2`）は
   経路から外れた。過去の migration が名指しするクラスはスクリプト内に存在せねば
   ならないという Cloudflare の制約のため、退役スタブとして export だけ残す。撤去には
-  `deleted_classes` migration が要る。実データを保持する `IssueStore` は無変更。
+  `deleted_classes` migration が要る。`IssueStore` は実データを保持し、#259 では独立 memory table を追加する。
 
 この版は本 repository の 2 成果物のあいだの私的な契約である。Worker へ到達する経路は
 npx ブリッジ（`mcp-server/`）だけ——`server.json` は stdio トランスポートしか宣言
@@ -668,3 +659,9 @@ embedding が失敗した record は incomplete と分かる形で残し、次�
 - ranking と filtering の改善
 - multi-agent handoff retrieval の改善
 - cross-repository state recovery の改善
+
+## 検索 feedback memory（Issue #259）
+
+検索履歴、selected/validated/used、半減期3600秒の retrieved/usage activation、confirmed-only の実 path 強化と receipt 指定取消しを同じ PR で実装する。認証済み GitHub principal ごとに共有・分離する。成功検索は trace を原子的に保存し、保存失敗や部分取得は trace を発行せず feedback 不可とする。検索は既定で履歴を書き、keyword の順位は維持する。use_memory は graph の同 hop 内だけに影響し、2 hop の実 edge を保存する。
+
+新 API は `memory_history`、`record_source_use`、`record_outcome`。設定値、上限、ID/version、batch/idempotency、ledger、error、0008先行移行、既存行 backfill と artifact の契約は [2-feedback-memory.ja.md](2-feedback-memory.ja.md) に定義する。会話/本文/credential の複製は行わず、品質向上の主張は別評価を必要とする。

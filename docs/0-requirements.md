@@ -83,17 +83,7 @@ Responsibilities:
 - expose semantic and structured retrieval tools
 - return state in a format that downstream agents can consume directly
 
-Schema source of truth: the Worker tool definitions are authoritative. The client
-proxy (`mcp-server/server/tools.js`) answers `tools/list` from a static mirror of
-the `search` params — it does not forward `tools/list` to the Worker, keeping
-startup auth-free and network-free. Because that mirror is hand-maintained, a param
-added to the Worker but forgotten in the proxy is silently dropped by MCP clients
-(`additionalProperties: false`) and never reaches the Worker (gh#157).
-`scripts/check-schema-drift.mjs` runs in CI and fails the build when the proxy
-`search` schema drifts from the Worker, so the two cannot ship out of sync.
-The check compares two axes: param names and, for enum params, their values —
-a name-only comparison let the proxy `type` enum omit `wiki_doc` while the Worker
-accepted it, so clients rejected the value before any request was sent (gh#181).
+Worker Zod contracts are the source of truth. The bridge answers `tools/list` from generated static JSON without startup auth/network. `scripts/generate-tool-contracts.mjs` regenerates those artifacts; `scripts/check-schema-drift.mjs` compares all four tools against their actual served nested input/output schemas, bounds, defaults and annotations in CI. This extends the previous name/enum-only guard (#259).
 
 #### Protocol revision: 2026-07-28, single lane
 
@@ -120,7 +110,7 @@ Consequences of statelessness:
   out of the serving path. Their classes remain exported as retired stubs
   because Cloudflare requires every class named in a past migration to exist in
   the script; removing them needs a `deleted_classes` migration. `IssueStore`,
-  which holds real data, is untouched.
+  which holds real data, gains independent memory tables in #259.
 
 The revision is a private contract between this repository's two artifacts. The
 npx bridge (`mcp-server/`) is the only way to reach the Worker — `server.json`
@@ -674,3 +664,9 @@ If an embedding attempt fails, the state must remain detectable as incomplete so
 - stronger ranking and filtering behavior
 - better multi-agent handoff retrieval
 - better cross-repository state recovery
+
+## Retrieval feedback memory (Issue #259)
+
+Implement retrieval history, selected/validated/used records, retrieved/usage activation with a 3600-second half-life, and confirmed-only real-path reinforcement with receipt-based reversal atomically in one PR. Share and isolate by authenticated GitHub principal. Successful retrieval commits its trace atomically; memory/partial retrieval failures emit no trace and cannot accept feedback. History writes are enabled by default, keyword ranking is preserved, and use_memory changes only same-hop graph ordering. Save actual two-hop edges.
+
+The APIs are `memory_history`, `record_source_use`, and `record_outcome`. [2-feedback-memory.md](2-feedback-memory.md) owns constants, bounds, source version identity, batch/idempotency, ledger, errors, migration 0008-before-deployment, historical backfill and bridge artifacts. Do not duplicate conversations, bodies or credentials. Claims of retrieval quality improvement require separate evaluation.

@@ -215,7 +215,7 @@ describe("fts D1: v1 corruption recovery migration", () => {
       }),
     ).rejects.toThrow(/SQLITE_CORRUPT_VTAB/);
 
-    await applyD1Migrations(env.DB_FTS_MIGRATION, [repairMigration!, segmentMigration!]);
+    await applyD1Migrations(env.DB_FTS_MIGRATION, [repairMigration!, segmentMigration!, env.TEST_MIGRATIONS.find(m => m.name === "0008_source_event_identity.sql")!]);
 
     await env.DB_FTS_MIGRATION
       .prepare(
