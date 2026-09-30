@@ -594,6 +594,21 @@ Requirements:
   OAuth flow で要求する localhost callback URI を全て含む場合だけ再利用し、
   含まない場合は authorization 前に client registration を置き換える
 
+### Bridge OAuth recovery（issue #250）
+
+ローカル bridge は credential を取得するたびに共有 token ファイルを読み、別の
+bridge process が保存した更新も取り込む。401 または refresh 失敗で無効と判明した
+token を、その process がメモリや disk からそのまま再採用してはならない。
+有効な既存 credential は引き続き利用する。同時呼び出しは一つの authorization
+attempt を共有し、pending の呼び出しは速やかに戻る。後続の呼び出しは完了・失敗・
+5 分の timeout を観測でき、未処理 Promise rejection を発生させない。
+callback page の成功表示は token 交換と保存の成功後に出す。error と log は
+token・code・state・verifier・authorization URL を含めない。
+MCP protocol と検索の意味は変更しない。
+新しい token record は発行時の client ID を保持し、別 process が共有 client
+registration を置き換えてもその ID で refresh する。旧 record は共有 registration
+を fallback として使う。token と registration は完成したファイルを atomic に置換する。
+
 ## Storage Rules
 
 ### Canonical memory surfaces

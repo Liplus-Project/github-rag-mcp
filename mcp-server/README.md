@@ -120,21 +120,36 @@ The `type` filter accepts: `issue`, `pull_request`, `release`, `doc`, `wiki_doc`
    is cached for the current localhost callback URIs.
 3. It starts a one-shot localhost HTTP listener on a random port and opens the browser to the Worker's authorization endpoint.
 4. After you approve, the Worker redirects to `http://127.0.0.1:<port>/callback` with an authorization code.
-5. The proxy exchanges the code for tokens (PKCE S256) and saves them.
-6. Subsequent calls reuse the access token and silently refresh when it nears expiry. On `401` from the Worker, the proxy invalidates its cached tokens and re-authenticates.
+5. The proxy exchanges the code for tokens (PKCE S256) and saves them before the
+   browser shows success. Exchange or storage failures show an authorization failure.
+6. Subsequent calls read shared token storage, including another process's updates,
+   and silently refresh when the token nears expiry. A `401` rejects the bearer
+   actually sent, including the transport's final retry. Rejected access tokens and
+   failed refresh credentials are excluded in that process; a fresh token from disk
+   can still be used. New records retain the issuing client ID for refresh; older
+   records use the shared client registration as a fallback.
+
+While authorization is pending, tool calls return an authentication requirement
+after a short wait. Retry after completing the browser flow: the running proxy
+uses the saved tokens. A failed flow or five-minute timeout is reported on a later
+call; retry again to start a new flow. Concurrent calls share one browser attempt.
 
 The browser callback never leaves your machine; the authorization code is delivered directly to the local listener.
 
 ## Troubleshooting
 
-- **Browser does not open.** The proxy logs the authorization URL to stderr; copy it into a browser manually.
+- **Browser does not open.** Check that your system has a working default browser.
+  The proxy does not log authorization URLs or credentials.
 - **`redirect_uri is not associated with this application`.** Upgrade the
   proxy. Current versions replace cached client registrations whose redirect
   URI set does not cover the callback port selected for this authorization.
-- **`OAuth callback timed out after 5 minutes`.** Re-invoke any tool to restart the flow.
+- **`OAuth callback timed out after 5 minutes`.** Retry the tool to start a new flow.
 - **`Failed to reach worker`.** Check that `RAG_WORKER_URL` is correct and reachable from your machine.
 - **`Unsupported protocol version`, or a tool that answers with a protocol error instead of results.** The proxy predates the 2026-07-28 flip. Quit Claude Desktop fully and reopen so `npx` fetches the current version; if your config pins a version, move the pin forward first.
-- **Stale credentials.** Remove `~/.github-rag-mcp/oauth-tokens.json` (and optionally `oauth-client.json`) and retry.
+- **Authentication required after authorizing.** Retry the tool after the browser
+  confirms success. The running proxy reads the newly saved token; restarting or
+  deleting credentials is not required for this recovery. A browser failure page
+  means exchange or storage did not complete successfully.
 
 ## Links
 

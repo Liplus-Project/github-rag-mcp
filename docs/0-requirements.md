@@ -600,6 +600,21 @@ Requirements:
   URI set covers every localhost callback URI requested for the current OAuth
   flow; otherwise register a replacement client before authorization
 
+### Bridge OAuth recovery (issue #250)
+
+The local bridge reads shared token storage on each credential request, including
+updates made by another bridge process. A token rejected with 401 or a failed
+refresh must not be reused unchanged from memory or disk in that process. Valid
+existing credentials remain usable. Concurrent calls share one authorization
+attempt; a pending call returns promptly and a later call observes completion,
+failure, or the five-minute timeout without an unhandled promise rejection.
+The callback page reports success only after token exchange and storage succeed.
+Errors and logs must not expose tokens, codes, state, verifiers, or authorization
+URLs. This changes neither MCP protocols nor search semantics.
+New token records retain their issuing client ID for refresh even when another
+process replaces shared client registration; legacy records use that registration
+as a fallback. Token and registration writes replace complete files atomically.
+
 ## Storage Rules
 
 ### Canonical memory surfaces
