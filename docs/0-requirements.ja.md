@@ -665,3 +665,5 @@ embedding が失敗した record は incomplete と分かる形で残し、次�
 検索履歴、selected/validated/used、半減期3600秒の retrieved/usage activation、confirmed-only の実 path 強化と receipt 指定取消しを同じ PR で実装する。認証済み GitHub principal ごとに共有・分離する。成功検索は trace を原子的に保存し、保存失敗や部分取得は trace を発行せず feedback 不可とする。検索は既定で履歴を書き、keyword の順位は維持する。use_memory は graph の同 hop 内だけに影響し、2 hop の実 edge を保存する。
 
 新 API は `memory_history`、`record_source_use`、`record_outcome`。設定値、上限、ID/version、batch/idempotency、ledger、error、0008先行移行、既存行 backfill と artifact の契約は [2-feedback-memory.ja.md](2-feedback-memory.ja.md) に定義する。会話/本文/credential の複製は行わず、品質向上の主張は別評価を必要とする。
+
+#259 の版契約: live inline doc/wiki は返した本文の SHA-256 を version とし、index snapshot と provenance を分ける。同じ索引 timestamp でも live 本文更新は別 source_id にする。本文を memory に複製しない。

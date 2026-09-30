@@ -101,6 +101,8 @@ GitHub webhooks + GitHub API
 
 成功検索は既定で UTC trace を保存し、資料の版を指す `source_id` と現在 activation を返します。`memory_history` で履歴・利用段階・取消し audit を読み、`record_source_use` で selected→validated→used、`record_outcome` で confirmed または receipt を指定した corrected/rolled_back を記録します。検索だけでは used/confirmed になりません。保存不可の結果には trace がなく feedback 不可です。半減期3600秒、activation は各 channel 上限10（total20）、graph strength 上限5です。成功検索に DO request と保存コストが加わります。
 
+live inline doc/wiki 本文は返した本文の SHA-256 で版を識別し、`github_live` provenance を持ちます。stored fetch と graph 本文は index snapshot の版で、索引 timestamp が同じでも live 本文の変更は別 source_id になります。
+
 [仕様・移行・合成実演](docs/2-feedback-memory.ja.md) を参照してください。0008 を Worker deploy より先に適用し、新 schema JSON を bridge artifact に同梱します。検索品質向上は未評価です。
 
 ### `search`

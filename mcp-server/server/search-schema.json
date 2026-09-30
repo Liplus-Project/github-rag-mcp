@@ -107,7 +107,7 @@
       },
       "include_content": {
         "default": false,
-        "description": "When true and a result row is type=\"doc\", fetch the file content from the GitHub contents API and inline it as a \"content\" field on that row. Capped at the first 5 doc rows in the result set to bound API fan-out. Non-doc rows are unaffected.",
+        "description": "When true, inline live doc bodies from the GitHub contents API and wiki_doc bodies from raw wiki URLs. Successful live bodies carry content_source=github_live and content_version=SHA-256 of the returned text; their source_id identifies this live version, separately from the indexed snapshot. Capped at 5 rows of each type. Non-doc rows are unaffected. Graph-axis bodies remain the indexed copy, marked content_source=index.",
         "type": "boolean"
       },
       "vector_ids": {

@@ -161,3 +161,5 @@ The browser callback never leaves your machine; the authorization code is delive
 ## License
 
 Apache-2.0. See the [LICENSE](https://github.com/Liplus-Project/github-rag-mcp/blob/main/LICENSE) and [NOTICE](https://github.com/Liplus-Project/github-rag-mcp/blob/main/NOTICE) files in the main repository.
+
+Live inline doc/wiki bodies carry `github_live` provenance and a SHA-256 content version; stored fetch and graph bodies retain indexed-snapshot provenance. The source IDs distinguish those versions without archiving the live body.

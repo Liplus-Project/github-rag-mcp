@@ -123,10 +123,11 @@ export const searchInputSchema = z.object({
           .optional()
           .default(false)
           .describe(
-            "When true and a result row is type=\"doc\", fetch the file content from the GitHub " +
-              "contents API and inline it as a \"content\" field on that row. Capped at the first " +
-              `${INCLUDE_CONTENT_MAX_DOCS} doc rows in the result set to bound API fan-out. ` +
-              "Non-doc rows are unaffected.",
+            "When true, inline live doc bodies from the GitHub contents API and wiki_doc bodies from raw wiki URLs. " +
+              "Successful live bodies carry content_source=github_live and content_version=SHA-256 of the returned text; " +
+              "their source_id identifies this live version, separately from the indexed snapshot. " +
+              `Capped at ${INCLUDE_CONTENT_MAX_DOCS} rows of each type. Non-doc rows are unaffected. ` +
+              "Graph-axis bodies remain the indexed copy, marked content_source=index."
           ),
         vector_ids: z
           .array(z.string().max(256)).max(50)

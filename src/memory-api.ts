@@ -22,6 +22,7 @@ export function registerMemoryTools(server: McpServer, env: Env) {
   }
 }
 async function digest(s: string) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))), x => x.toString(16).padStart(2, '0')).join(''); }
+export async function hashReturnedContent(content: string): Promise<string> { return 'sha256:' + await digest(content); }
 export async function identifySource(row: Record<string, any>, axis: string): Promise<SavedSource> {
   const repo = String(row.repo ?? ''); const type = String(row.type ?? '');
   const path = type === 'wiki_doc' ? (row.wiki_path || row.doc_path || '') : type === 'doc' ? (row.doc_path || '') : (row.file_path || '');
@@ -29,8 +30,11 @@ export async function identifySource(row: Record<string, any>, axis: string): Pr
   if (!repo || !type || !row.updated_at || (event !== null && !event)) throw new Error('Canonical source identity unavailable');
   const identity = ['doc', 'wiki_doc'].includes(type) ? path : type === 'diff' ? [row.commit_sha, path] : type === 'release' ? row.tag_name : event ?? row.number;
   if (!identity || (Array.isArray(identity) && identity.some(x => !x))) throw new Error('Canonical source identity unavailable');
-  const provenance = { repo, type, identity, version: row.updated_at };
-  return { source_id: 's:' + await digest(JSON.stringify(provenance)), provenance, axes: [axis], path: row.graph_path ?? [] };
+  const live = row.content_source === 'github_live';
+  if (live && (!['doc', 'wiki_doc'].includes(type) || !/^sha256:[0-9a-f]{64}$/.test(row.content_version ?? ''))) throw new Error('Live source version unavailable');
+  const canonical = { repo, type, identity, version: live ? row.content_version : row.updated_at, content_source: live ? 'github_live' : 'index' };
+  const provenance = { ...canonical, ...(live ? { index_updated_at: row.updated_at } : {}) };
+  return { source_id: 's:' + await digest(JSON.stringify(canonical)), provenance, axes: [axis], path: row.graph_path ?? [] };
 }
 /** Commit a successful result before emitting its trace. No body, title, handle, or auth props is stored. */
 export async function rememberResult(env: Env, payload: any, request: unknown) {

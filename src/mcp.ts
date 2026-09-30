@@ -32,7 +32,7 @@
  * `retired-do.ts` so this module imports nothing from `cloudflare:workers`.
  */
 
-import { registerMemoryTools, rememberResult, memoryCall, MEMORY_INSTRUCTIONS } from "./memory-api.js";
+import { registerMemoryTools, rememberResult, memoryCall, hashReturnedContent, MEMORY_INSTRUCTIONS } from "./memory-api.js";
 import { getMcpAuthContext } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { searchInputSchema, searchOutputSchema, INCLUDE_CONTENT_MAX_DOCS } from "./search-contract.js";
@@ -238,6 +238,7 @@ export type GraphItem = {
   wiki_path?: string;
   doc_path?: string;
   content?: string;
+  content_source?: string;
   graph_hop: number;
   graph_from: string;
   graph_path?: import("./memory.js").SavedEdge[];
@@ -282,6 +283,7 @@ export function buildGraphItem(
   if (type === "doc") item.doc_path = path;
   if (includeContent && typeof row.content === "string") {
     item.content = row.content;
+    item.content_source = "index";
   }
   return item;
 }
@@ -1210,6 +1212,8 @@ async function inlineDocContent<
     wiki_path?: string;
     wiki_extension?: string;
     content?: string;
+    content_source?: string;
+    content_version?: string;
   },
 >(rows: T[], fallbackRepo?: string): Promise<void> {
   const docRows = rows.filter((r) => r.type === "doc");
@@ -1235,10 +1239,12 @@ async function inlineDocContent<
           content?: string;
           encoding?: string;
         };
-        if (!data.content) return;
+        if (typeof data.content !== "string" || data.encoding !== "base64") return;
         const binary = atob(data.content.replace(/\n/g, ""));
         const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-        row.content = new TextDecoder().decode(bytes);
+        const content = new TextDecoder().decode(bytes);
+        const content_version = await hashReturnedContent(content);
+        Object.assign(row, { content, content_source: "github_live", content_version });
       } catch {
         // Best-effort inline; a failed fetch leaves `content` unset.
       }
@@ -1254,7 +1260,9 @@ async function inlineDocContent<
           headers: { "User-Agent": "github-rag-mcp/0.1.0" },
         });
         if (!res.ok) return;
-        row.content = await res.text();
+        const content = await res.text();
+        const content_version = await hashReturnedContent(content);
+        Object.assign(row, { content, content_source: "github_live", content_version });
       } catch {
         // Best-effort inline; a failed fetch leaves `content` unset.
       }

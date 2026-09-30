@@ -101,6 +101,8 @@ This MCP server exposes `search` and three private feedback tools. All retrieval
 
 Successful retrieval writes a UTC trace by default, returning version-specific `source_id` and current activation. `memory_history` reads history, stages and reversal audit; `record_source_use` records selected→validated→used; `record_outcome` confirms a saved path or corrects/rolls back one named receipt. Retrieval alone is never usage or confirmation. Memory failure emits no usable trace. Half-life is 3600 seconds, each activation channel caps at 10 (total 20), and relation strength caps at 5. Successful retrieval adds a DO request and storage cost.
 
+Live inline doc/wiki bodies use the returned-text SHA-256 version and `github_live` provenance. Stored fetch and graph bodies refer to the index snapshot; changed live text has another source ID even with the same index timestamp.
+
 See the [specification, migration and synthetic lifecycle](docs/2-feedback-memory.md). Apply 0008 before Worker deployment and include the new schema JSON in bridge artifacts. Retrieval quality improvement has not been evaluated.
 
 ### `search`

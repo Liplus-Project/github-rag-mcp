@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { env, applyD1Migrations } from 'cloudflare:test';
 import { createMcpHandler } from 'agents/mcp/server';
 import { createRagMcpServer } from './mcp.js';
@@ -159,6 +159,47 @@ describe('synthetic in-process MCP lifecycle with real DO/D1', () => {
     const page2 = await backfillSourceIdentities(env.DB_FTS, stub, { repo, limit:2, cursor:page1.next_cursor! }); expect(page2).toEqual({ scanned:1, updated:1, next_cursor:null, done:true });
     expect((await backfillSourceIdentities(env.DB_FTS, stub, { repo, limit:2 })).updated).toBe(0);
     expect((await queryFts(env.DB_FTS, 'historical', 10, {repo})).map(r=>r.commentId).sort()).toEqual([1,2,3]);
+  });
+
+  it('live inline doc/wiki body revisions get separate source IDs while index timestamp and keyword ranks stay fixed', async () => {
+    const repo = 'synthetic/live-version';
+    await seed(repo, 'live-doc', 'docs/live.md', 'liveneedle indexed original', 'doc');
+    await seed(repo, 'live-wiki', 'live-page', 'liveneedle indexed original');
+    let liveText = 'synthetic live body version one';
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.startsWith('https://api.github.com/repos/synthetic/live-version/contents/')) return Response.json({ encoding:'base64', content:btoa(liveText) });
+      if (url.startsWith('https://raw.githubusercontent.com/wiki/synthetic/live-version/')) return new Response(liveText);
+      throw new Error('Unexpected synthetic fixture request');
+    });
+    const c = await client(9109);
+    try {
+      const args = { query:'liveneedle', repo, fusion:'sparse_only', rerank:false };
+      const indexed = (await c.call('search', args)).payload;
+      const first = (await c.call('search', { ...args, include_content:true })).payload;
+      const retry = (await c.call('search', { ...args, include_content:true })).payload;
+      expect(first.results).toHaveLength(2); expect(first.feedback_available).toBe(true);
+      expect(first.results.map((r: any) => [r.vector_id,r.score,r.sparse_rank])).toEqual(indexed.results.map((r: any) => [r.vector_id,r.score,r.sparse_rank]));
+      expect(retry.results.map((r: any) => r.source_id)).toEqual(first.results.map((r: any) => r.source_id));
+      liveText = 'synthetic live body version two';
+      const second = (await c.call('search', { ...args, include_content:true })).payload;
+      for (const initial of first.results) {
+        const changed = second.results.find((r: any) => r.vector_id === initial.vector_id);
+        const snapshot = indexed.results.find((r: any) => r.vector_id === initial.vector_id);
+        expect(changed.updated_at).toBe(initial.updated_at); expect(initial.updated_at).toBe(timestamp);
+        expect(changed.source_id).not.toBe(initial.source_id); expect(initial.source_id).not.toBe(snapshot.source_id);
+        expect(initial.content_source).toBe('github_live'); expect(initial.content_version).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(initial.provenance.version).toBe(initial.content_version); expect(initial.provenance.index_updated_at).toBe(timestamp);
+        expect(snapshot.provenance.content_source).toBe('index'); expect(changed.provenance.content_source).toBe('github_live');
+      }
+      const fetched = (await c.call('search', { vector_ids:['live-doc','live-wiki'] })).payload;
+      expect(fetched.results.map((r: any) => r.source_id)).toEqual(['live-doc','live-wiki'].map(id => indexed.results.find((r: any) => r.vector_id === id).source_id));
+      const h = (await c.call('memory_history', { trace_id:first.trace_id })).payload.data;
+      expect(h.sources.every((s: any) => s.provenance.content_source === 'github_live')).toBe(true);
+      expect(JSON.stringify(h)).not.toContain('synthetic live body version one');
+      await c.call('record_source_use', { trace_id:first.trace_id, idempotency_key:'live-used', uses:uses(first.results[0].source_id) });
+      expect((await c.call('memory_history', { trace_id:second.trace_id })).payload.data.sources.every((s: any) => s.stage === 'retrieved')).toBe(true);
+    } finally { vi.unstubAllGlobals(); await c.reset(); }
   });
 
 });

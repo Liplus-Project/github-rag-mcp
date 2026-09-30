@@ -8,7 +8,7 @@ Issue #259 の4機能である検索履歴、資料の明示的利用、時間�
 
 成功した `search`（search / scan / stored-content fetch / 0件）は UTC trace を保存してから `trace_id`、`timestamp`、`feedback_available:true` を返す。資料と `same_entity.others` には `source_id`、`provenance`、現在の `activation` を追加する。request は query/filter/control、settings は mode、有効な scan 窓、fusion/rerank 実施結果と両軸を保存する。
 
-provenance は `{repo,type,identity,version}`。identity は issue/PR number、release tag、doc/wiki path、diff の `[commit_sha,file_path]`、GitHub comment/review ID。version は取得した `updated_at`（doc/wiki は索引 snapshot の timestamp）。mode、vector handle、任意の補足 field は ID の hash に含めない。
+provenance は `{repo,type,identity,version,content_source}`。identity は issue/PR number、release tag、doc/wiki path、diff の `[commit_sha,file_path]`、GitHub comment/review ID。`content_source:"index"` の version は取得した `updated_at`（doc/wiki は索引 snapshot の timestamp）。live inline doc/wiki 本文は `content_source:"github_live"` と `content_version:"sha256:<返した UTF-8 本文の hash>"` を持ち、この hash を provenance の version と source ID に使う。`index_updated_at` は索引 timestamp を補足 audit として保存し、live 版は定義しない。同じ live 本文は索引 timestamp が変わっても同じ版、本文が変われば索引 timestamp が固定でも別 source_id。stored-content fetch と graph 本文は索引コピーで、index provenance を維持する。memory に保存するのは hash/provenance のみで、live 本文は複製しない。mode、vector handle、任意の補足 field は ID の hash に含めない。
 
 `source_id` は実体の特定版を識別する。同じ実体・同じ取得版は vector ID が移行しても同じ ID、更新版は別 ID になる。activation は版単位。mention strength は `[repo,src_slug,dst_slug,edge_kind]` 単位で、vector ID や資料版から独立している。reindex は principal 別の学習状態を消さず、元の mention topology を保持する。消えた mention は探索できず、過去 trace の path は監査と取消しのため残る。
 
@@ -80,6 +80,6 @@ bridge には `server/search-schema.json` と `server/memory-tools.json` を同�
 
 `npx vitest run --config vitest.workers.config.ts src/memory-e2e.workers.test.ts src/memory.workers.test.ts` で、synthetic principal と local in-process SQLite/D1 のみを使う。
 
-実演は `syntheticneedle` 検索 → path `a->b->c` → `c` の selected/validated/used → 2 edge に各0.25の confirmed → corrected で両寄与 inactive。独立 trace の固定時刻テストでは半減期後に次の確認を加えると path strength=0.75、最初の寄与を取り消すと次の寄与0.50が残る。正しさの検証であり、検索品質向上の評価ではない。
+実演は `syntheticneedle` 検索 → path `a->b->c` → `c` の selected/validated/used → 2 edge に各0.25の confirmed → corrected で両寄与 inactive。独立 trace の固定時刻テストでは半減期後に次の確認を加えると path strength=0.75、最初の寄与を取り消すと次の寄与0.50が残る。実 MCP の live 本文回帰では索引 timestamp と keyword 順位を固定し、doc/wiki の inline 本文のみ変更する。同じ本文の retry は同 ID、変更本文は別 ID、stored fetch は index ID を保ち、旧 live 版の usage は新しい版に引き継がれない。正しさの検証であり、検索品質向上の評価ではない。
 
 成功検索には DO request を一つと、有界な source hash / activation 処理が加わる。学習 opt-in は最大200 path、各最大2 edge を追加で読む。storage は trace/receipt とともに増え、自動 retention deletion は実装しない。global DO が書込を直列化する。feedback に Python 常駐、モデル配布、追加 embedding、mention topology の書換えは不要。
