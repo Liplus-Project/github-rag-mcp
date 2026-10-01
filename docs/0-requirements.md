@@ -672,3 +672,9 @@ Implement retrieval history, selected/validated/used records, retrieved/usage ac
 The APIs are `memory_history`, `record_source_use`, and `record_outcome`. [2-feedback-memory.md](2-feedback-memory.md) owns constants, bounds, source version identity, batch/idempotency, ledger, errors, migration 0008-before-deployment, historical backfill and bridge artifacts. Do not duplicate conversations, bodies or credentials. Claims of retrieval quality improvement require separate evaluation.
 
 Issue #259 version contract: live inline doc/wiki uses the returned-text SHA-256 version and provenance separate from the index snapshot. Changed live text gets a different source ID even at the same index timestamp. Do not duplicate the body in memory.
+
+## Release metadata consistency (Issue #261)
+
+Both CD packaging jobs must derive the bridge package, lock root, MCP Bundle manifest and MCP registry npm versions from the same validated release tag and assert agreement before packing or publishing. Preserve dependency versions, schemas, runtime constraints and Worker behavior. [Versioning and published artifacts](installation.md#versioning-and-published-artifacts) owns the affected fields and validation command. Committed versions remain placeholders; trusted publishing is a separate change.
+
+The source `docs/_Sidebar.md` must link the existing Feedback Memory EN/JA pages so release wiki navigation includes them.
