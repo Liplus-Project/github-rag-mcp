@@ -462,25 +462,28 @@ Operational notes:
 
 ## Versioning and published artifacts
 
-The version of every published artifact comes from the **GitHub Release tag**. No `version` field committed in this repository is the source.
+Published bridge versions come from a **GitHub Release tag**, using `v` followed by canonical SemVer (for example `v0.12.0` or `v1.2.3-rc.1`). Committed versions are placeholders.
 
-`.github/workflows/cd.yml` runs on `release: published` and rewrites the version from the tag before it packs or publishes:
+Both isolated packaging jobs in `.github/workflows/cd.yml` run the same command from `mcp-server/` before packing or publishing:
 
-- npm — `npm version "${TAG_NAME#v}" --no-git-tag-version --allow-same-version` in `mcp-server/`
-- `.mcpb` bundle — `jq --arg v "${TAG_NAME#v}" '.version = $v' manifest.json` in `mcp-server/`
+```sh
+node ../scripts/sync-release-version.mjs "$TAG_NAME"
+```
 
-So the `version` values sitting in the working tree never reach a published artifact:
+The script validates the entire tag and all four metadata files before writing. It synchronizes only these fields, then re-reads the files and asserts that every field equals the tag without its `v` prefix:
 
-| Location | Role |
+| Location | Fields rewritten |
 |---|---|
-| `package.json` (root) | worker build only, `private: true`, never published |
-| `mcp-server/package.json` | placeholder, overwritten from the tag at publish time |
-| `mcp-server/manifest.json` | placeholder, overwritten from the tag at publish time |
-| `mcp-server/server.json` | MCP registry metadata carried in the npm tarball; the release workflow neither reads nor rewrites it |
+| `mcp-server/package.json` | `version`, also used by runtime MCP serverInfo and remote clientInfo |
+| `mcp-server/package-lock.json` | `version` and `packages[""].version` |
+| `mcp-server/manifest.json` | `version` |
+| `mcp-server/server.json` | `version` and every `registryType: "npm"` package entry's `version` |
 
-These values are expected to lag behind the published version. That divergence is the designed state, not a defect, and it is not something to repair by hand: the next release overwrites them from its own tag regardless, so a manual edit only leaves the impression that the file is authoritative.
+Dependency versions, schema identifiers, Node requirements and non-npm registry entries are preserved. The private root package's Worker version is outside this contract. Invalid tags, unreadable/malformed metadata, missing version fields or mismatched on-disk output fail the job before its pack/publish step. Existing npm authentication and release asset upload remain unchanged.
 
-To read the version that is actually published, look at the release tag (`gh release list`) or the registry (`npm view github-rag-mcp version`).
+Add `--check` to verify already-generated metadata without writing. Local fixture regression coverage runs with `node --test scripts/sync-release-version.test.mjs` and in CI; it checks multiple versions, rejection before writes, field preservation, replay and the actual CD relative command.
+
+Working-tree placeholders may lag behind a release. Metadata **inside each published artifact** must agree with the tag; updating one file alone is insufficient. To inspect the published version, use the release tag or npm registry. This synchronization does not publish, create tags or deploy the Worker.
 
 ## Troubleshooting
 

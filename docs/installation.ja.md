@@ -462,25 +462,28 @@ POST /admin/backfill-issue-index?repo=owner/repo
 
 ## Versioning and published artifacts
 
-公開される成果物の版数は **GitHub Release の tag** から来る。リポジトリにコミットされている `version` フィールドはどれもソースではない。
+公開 bridge の版は **GitHub Release tag** から生成する。tag は `v` に canonical SemVer を続けた形（例 `v0.12.0`、`v1.2.3-rc.1`）。commit 済みの版は placeholder とする。
 
-`.github/workflows/cd.yml` は `release: published` を契機に走り、pack / publish の前に tag から版数を振り直す。
+`.github/workflows/cd.yml` の独立した両 packaging job は、pack / publish 前に `mcp-server/` から同じ command を呼ぶ。
 
-- npm — `mcp-server/` で `npm version "${TAG_NAME#v}" --no-git-tag-version --allow-same-version`
-- `.mcpb` bundle — `mcp-server/` で `jq --arg v "${TAG_NAME#v}" '.version = $v' manifest.json`
+```sh
+node ../scripts/sync-release-version.mjs "$TAG_NAME"
+```
 
-したがって作業ツリー上の `version` 値は公開成果物に一切届かない。
+script は tag 全体と metadata 4 ファイルを検証してから書き込み、次の field だけを同期する。書き込み後に読み直し、全項目が tag の `v` を除いた版に一致することを assert する。
 
-| 場所 | 役割 |
+| 場所 | 更新する field |
 |---|---|
-| `package.json`（root） | worker の build 用のみ。`private: true` で公開されない |
-| `mcp-server/package.json` | placeholder。公開時に tag から上書きされる |
-| `mcp-server/manifest.json` | placeholder。公開時に tag から上書きされる |
-| `mcp-server/server.json` | npm tarball に同梱される MCP registry metadata。release workflow は読みも書き換えもしない |
+| `mcp-server/package.json` | `version`。実行時 MCP serverInfo / remote clientInfo もこの版を使う |
+| `mcp-server/package-lock.json` | `version` と `packages[""].version` |
+| `mcp-server/manifest.json` | `version` |
+| `mcp-server/server.json` | `version` と全 `registryType: "npm"` package entry の `version` |
 
-これらの値が公開版数より遅れているのは設計どおりの状態であって、不整合ではない。手で合わせる対象でもない — 次のリリースがどのみち自身の tag から上書きするので、手編集は「このファイルが権威である」という誤った印象を残すだけになる。
+依存版、schema 識別子、Node 条件、非 npm registry entry は保持する。private な root package の Worker 版は対象外。不正 tag、読取不可・不正 JSON、version field 欠落、書込後の不一致は pack / publish step より前に job を止める。既存の npm 認証と release asset upload は維持する。
 
-実際に公開されている版数を見るには、release tag（`gh release list`）か registry（`npm view github-rag-mcp version`）を参照する。
+`--check` を付けると生成済み metadata の一致だけを検証し、書き込まない。`node --test scripts/sync-release-version.test.mjs` と CI で、複数版、書込前の拒否、対象外 field 保持、retry、CD と同じ相対 command を検証する。
+
+作業ツリーの placeholder が公開版より遅れていてもよいが、**各公開 artifact 内の metadata は tag と一致する必要がある**。一つのファイルだけの同期では足りない。公開版の確認には release tag または npm registry を使う。この同期処理自体は publish / tag 作成 / Worker deploy を行わない。
 
 ## Troubleshooting
 

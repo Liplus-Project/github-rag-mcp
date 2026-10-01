@@ -667,3 +667,9 @@ embedding が失敗した record は incomplete と分かる形で残し、次�
 新 API は `memory_history`、`record_source_use`、`record_outcome`。設定値、上限、ID/version、batch/idempotency、ledger、error、0008先行移行、既存行 backfill と artifact の契約は [2-feedback-memory.ja.md](2-feedback-memory.ja.md) に定義する。会話/本文/credential の複製は行わず、品質向上の主張は別評価を必要とする。
 
 #259 の版契約: live inline doc/wiki は返した本文の SHA-256 を version とし、index snapshot と provenance を分ける。同じ索引 timestamp でも live 本文更新は別 source_id にする。本文を memory に複製しない。
+
+## リリース metadata の一致（Issue #261）
+
+両 CD packaging job は bridge package、lock root、MCP Bundle manifest、MCP registry の npm version を同じ検証済み release tag から同期し、pack / publish 前に一致を assert する。依存版、schema、runtime 条件、Worker の挙動を保持する。対象 field と検証 command は [版数と公開成果物](installation.ja.md#versioning-and-published-artifacts) に定義する。commit 済み版は placeholder のままとし、trusted publishing は別変更とする。
+
+source の `docs/_Sidebar.md` は既存 Feedback Memory EN/JA ページを参照し、release 後の Wiki navigation に含める。

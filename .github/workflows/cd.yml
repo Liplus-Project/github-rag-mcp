@@ -16,11 +16,11 @@ jobs:
           node-version: "24"
       - run: npm ci
         working-directory: mcp-server
-      - name: Sync manifest.json version from release tag
+      - name: Sync and verify all release metadata from tag
         working-directory: mcp-server
         env:
           TAG_NAME: ${{ github.event.release.tag_name }}
-        run: jq --arg v "${TAG_NAME#v}" '.version = $v' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+        run: node ../scripts/sync-release-version.mjs "$TAG_NAME"
       - run: npx mcpb pack
         working-directory: mcp-server
       - uses: actions/upload-artifact@v7
@@ -59,9 +59,9 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
         working-directory: mcp-server
-      - name: Sync version from release tag
+      - name: Sync and verify all release metadata from tag
         working-directory: mcp-server
-        run: npm version "${TAG_NAME#v}" --no-git-tag-version --allow-same-version
+        run: node ../scripts/sync-release-version.mjs "$TAG_NAME"
         env:
           TAG_NAME: ${{ github.event.release.tag_name }}
       - name: Publish to npm
