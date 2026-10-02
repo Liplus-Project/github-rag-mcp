@@ -18,7 +18,17 @@ principal は検証済み MCP OAuth props の numeric GitHub user ID からサ�
 
 limit は1..50、trace の資料 snapshot は300件、保存入力は300,000文字、query は4096文字、metadata string は256文字、usage batch は100 entry、reason/key は1000/128文字まで。SQL は owner/cursor index と有界 page を使う。全履歴をまとめて読む API はない。
 
-未成立・失敗を成功 trace として保存しない。一部 scan source、sparse retrieval、graph expansion の失敗、canonical identity 未解決、memory の原子的書込失敗では検索結果を返せるが、`memory_unavailable:true`、`feedback_available:false` とし、**trace_id を発行しない**。この結果への feedback は不可。拒否 error は段階違反、key conflict、confirmation 等の安全な code を返し、query/handle を error や log へ転記しない。検索の error log は固定文言にする。
+未成立・失敗を成功 trace として保存しない。一部 scan source、sparse retrieval、graph expansion の失敗と memory の原子的書込失敗では検索結果を返せるが、`memory_unavailable:true`、`feedback_available:false` とし、**trace_id を発行しない**。`memory_error` はそれぞれ `retrieval_incomplete` / `memory_save_failed`。拒否 error は段階違反、key conflict、confirmation 等の安全な code を返し、query/handle を error や log へ転記しない。検索の error log は固定文言にする。
+
+### 資料単位の部分記録（Issue #263）
+
+canonical identity または live version が未解決の資料は、検索結果・順序・本文を維持して、その資料だけ保存から除外する。正常資料があれば既存 transaction で原子的に保存し `trace_id` と全体の `feedback_available:true` を返す。未解決 row は `feedback_available:false`、`memory_exclusion_reason:canonical_identity_unavailable` または `live_version_unavailable` を持ち、source_id/provenance/activation を付けない。`results`、`graph_results`、両軸の `same_entity.others` に適用する。
+
+応答の `memory_recording` は `status:complete|partial|unresolved`、`recorded_sources`（保存した distinct source 数）、`excluded_sources`（除外した返却 row 数）、`exclusions:[{location,reason}]` を返す。同じ未解決資料が複数箇所にあれば各 row を数える。location は `results[0].same_entity.others[1]` 等の返却位置のみ。本文・タイトル・vector ID を除外記録へコピーしない。同じ object を `settings.memory_recording` として保存し、history 一覧・詳細の両方で再読できる。古い trace の settings にこの field が無い場合は従来の記録。
+
+全資料未解決は `status:unresolved`、`memory_error:all_sources_unresolved`、memory_unavailable/feedback不可、trace無し。正常な0件検索は `status:complete`、件数0の空 trace を保存する。識別以外の例外とDB書込失敗は資料単位の除外として扱わない。
+
+graph path の起点・中間・終点は実際に探索した vector ID 列から索引 metadata を読む。返却枠外・dangling・identity 未解決の中間も検証し、repo と directional mention の両端 slug を照合する。確認不可の path は保存 snapshot で `path:[]` とし、返却 graph_path は維持する。終点自体が正常なら利用段階は記録可能だが `graph_feedback_available:false` と `graph_feedback_exclusion_reason:unverifiable_graph_path` を返し、confirmed は `no_graph_path` で非適用。`excluded_graph_paths` / `graph_exclusions` を memory_recording に保存する。確認できた他の path の強化・receipt・取消しは継続する。内部 node snapshot は返却・settings・history に含めない。graph metadata 読取は返却 path 当たり最大3 node の集合に限定し、保存形式の移行は不要。
 
 ## 利用段階と retry
 
@@ -72,7 +82,7 @@ npx wrangler d1 execute github-rag-fts --remote --command "SELECT type,COUNT(*) 
 
 deploy 後の認可された `POST /admin/backfill-source-identities?repo=owner/repo&limit=50[&cursor=TYPE:ID]` は、既存 DO の canonical event ID から過去の unchanged 行を補修する。既存管理 credential は非公開 header で渡し、URL / artifact / shell history に token を載せない。next_cursor を渡して done:true まで進める。limit は1..100、1 page は最大3つの有界 DO read と一つの原子的 D1 batch。再開・再実行は安全で、embedding / GitHub 本文再取得 / index reset は不要。
 
-通常の unchanged ingest も hash skip の前に ID を補修する。DO に canonical event が無い行は未解決のままなので、別の再取り込み前に欠損を調べる。未解決 source を含む検索は memory を fail-closed にする。backfill は private trace/credit を変更しない。
+通常の unchanged ingest も hash skip の前に ID を補修する。DO に canonical event が無い行は未解決のままなので、別の再取り込み前に欠損を調べる。未解決 source 自体は feedback 不可とし、正常 source は上記の部分記録を適用する。backfill は private trace/credit を変更しない。旧ID欠落と残存1件の調査、再現した削除経路の修正は [調査記録](3-unresolved-source-investigation.ja.md) を参照。
 
 bridge には `server/search-schema.json` と `server/memory-tools.json` を同梱する。`node scripts/generate-tool-contracts.mjs` で Worker Zod contract から生成し、`node scripts/check-schema-drift.mjs` が全 tool の実 protocol と nested 入出力 schema / bounds / defaults / annotations の完全一致を確認する。npm / mcpb の両 artifact にこの JSON が必要。stdio client の tool discovery には更新 bridge の公開が必要。公開 version と publication は後続の運用段階で決める。
 

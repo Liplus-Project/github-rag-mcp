@@ -193,6 +193,89 @@
       "memory_unavailable": {
         "type": "boolean"
       },
+      "memory_error": {
+        "type": "string",
+        "enum": [
+          "retrieval_incomplete",
+          "memory_save_failed",
+          "all_sources_unresolved"
+        ]
+      },
+      "memory_recording": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "partial",
+              "unresolved"
+            ]
+          },
+          "recorded_sources": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "excluded_sources": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "exclusions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "location": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "location",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "excluded_graph_paths": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "graph_exclusions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "location": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "location",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "status",
+          "recorded_sources",
+          "excluded_sources",
+          "exclusions",
+          "excluded_graph_paths",
+          "graph_exclusions"
+        ],
+        "additionalProperties": false
+      },
       "feedback_available": {
         "type": "boolean"
       }

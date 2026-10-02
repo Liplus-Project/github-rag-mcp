@@ -31,6 +31,7 @@ export interface GraphNeighbor {
   hop: number;
   fromVectorId: string;
   path?: import("./memory.js").SavedEdge[];
+  pathNodes?: string[];
 }
 
 /** Escape a string for safe inclusion in a RegExp. */
@@ -166,24 +167,25 @@ export async function queryNeighbors(
   const limit = Math.max(1, Math.min(200, opts.limit ?? 50));
 
   // Anchor: each seed at depth 0 with itself as origin.
-  const seedValues = seeds.map(() => "(?, 0, ?, json_array())").join(", ");
+  const seedValues = seeds.map(() => "(?, 0, ?, json_array(), json_array(?))").join(", ");
   const repoFilter = opts.repo ? "AND e.repo = ?" : "";
 
   const sql = `
-    WITH RECURSIVE reach(id, depth, origin, path) AS (
+    WITH RECURSIVE reach(id, depth, origin, path, nodes) AS (
       SELECT * FROM (VALUES ${seedValues})
       UNION
       SELECT CASE WHEN e.src_vector_id = r.id THEN e.dst_vector_id
                   ELSE e.src_vector_id END,
              r.depth + 1,
              r.origin,
-             json_insert(r.path, '$[#]', json_object('repo', e.repo, 'src', e.src_slug, 'dst', e.dst_slug, 'kind', e.edge_kind))
+             json_insert(r.path, '$[#]', json_object('repo', e.repo, 'src', e.src_slug, 'dst', e.dst_slug, 'kind', e.edge_kind)),
+             json_insert(r.nodes, '$[#]', CASE WHEN e.src_vector_id = r.id THEN e.dst_vector_id ELSE e.src_vector_id END)
         FROM doc_edges e
         JOIN reach r
           ON (e.src_vector_id = r.id OR e.dst_vector_id = r.id)
        WHERE r.depth < ? ${repoFilter}
     )
-    SELECT id, MIN(depth) AS hop, origin, path
+    SELECT id, MIN(depth) AS hop, origin, path, nodes
       FROM reach
      WHERE depth > 0
      GROUP BY id
@@ -192,7 +194,7 @@ export async function queryNeighbors(
   `;
 
   const binds: (string | number)[] = [];
-  for (const s of seeds) binds.push(s, s); // (id, origin) per seed VALUES row
+  for (const s of seeds) binds.push(s, s, s); // (id, origin, first node)
   binds.push(hops);
   if (opts.repo) binds.push(opts.repo);
   binds.push(limit);
@@ -200,7 +202,7 @@ export async function queryNeighbors(
   const res = await db
     .prepare(sql)
     .bind(...binds)
-    .all<{ id: string; hop: number; origin: string; path: string }>();
+    .all<{ id: string; hop: number; origin: string; path: string; nodes: string }>();
 
   const seedSet = new Set(seeds);
   return (res.results ?? [])
@@ -209,6 +211,7 @@ export async function queryNeighbors(
       hop: Number(r.hop ?? 0),
       fromVectorId: String(r.origin ?? ""),
       path: JSON.parse(r.path),
+      pathNodes: JSON.parse(r.nodes),
     }))
     .filter((n) => n.vectorId.length > 0 && !seedSet.has(n.vectorId));
 }

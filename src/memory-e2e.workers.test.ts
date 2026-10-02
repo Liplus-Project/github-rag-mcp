@@ -27,6 +27,80 @@ async function client(principal = 9101, failMemory = false, failScan = false) {
 }
 const uses = (source_id: string) => ['selected', 'validated', 'used'].map(stage => ({ source_id, stage }));
 describe('synthetic in-process MCP lifecycle with real DO/D1', () => {
+  it('preserves mixed fetch rows and saves only resolved sources with durable partial status', async () => {
+    const repo = 'synthetic/partial-fetch';
+    await seed(repo, 'partial-good', 'good', 'resolved');
+    await upsertFtsRow(env.DB_FTS, { vectorId:'partial-bad', repo, type:'issue_comment', state:'active', labels:'', milestone:'', assignees:'', updatedAt:timestamp, number:1428, content:'unresolved' });
+    const c = await client(9110);
+    const found = (await c.call('search', { vector_ids:['partial-bad','partial-good'] })).payload;
+    expect(found.results.map((r: any) => r.vector_id)).toEqual(['partial-bad','partial-good']);
+    expect(found.feedback_available).toBe(true); expect(found.trace_id).toBeTruthy();
+    expect(found.memory_recording).toMatchObject({ status:'partial', recorded_sources:1, excluded_sources:1, exclusions:[{location:'results[0]', reason:'canonical_identity_unavailable'}] });
+    expect(found.results[0]).toMatchObject({ feedback_available:false, memory_exclusion_reason:'canonical_identity_unavailable' });
+    expect(found.results[0].source_id).toBeUndefined(); expect(found.results[0].activation).toBeUndefined();
+    const history = (await c.call('memory_history', { trace_id:found.trace_id })).payload.data;
+    expect(history.sources.map((s: any) => s.source_id)).toEqual([found.results[1].source_id]);
+    expect(history.settings.memory_recording).toEqual(found.memory_recording);
+    expect((await c.call('memory_history', {})).payload.data.traces[0].settings.memory_recording).toEqual(found.memory_recording);
+    await c.call('record_source_use', { trace_id:found.trace_id, idempotency_key:'partial-used', uses:uses(found.results[1].source_id) });
+    expect((await c.call('memory_history', { trace_id:found.trace_id })).payload.data.sources[0].stage).toBe('used');
+    expect((await c.call('record_source_use', { trace_id:found.trace_id, idempotency_key:'missing-source', uses:uses('unresolved') })).payload.error).toBe('unknown_source');
+    const unresolved = (await c.call('search', { vector_ids:['partial-bad'] })).payload;
+    expect(unresolved.memory_recording.status).toBe('unresolved'); expect(unresolved.memory_error).toBe('all_sources_unresolved'); expect(unresolved.trace_id).toBeUndefined();
+    const empty = (await c.call('search', { vector_ids:['partial-absent'] })).payload;
+    expect(empty.memory_recording).toMatchObject({status:'complete', recorded_sources:0, excluded_sources:0}); expect(empty.trace_id).toBeTruthy();
+    const broken = await client(9111, true);
+    const failed = (await broken.call('search', {vector_ids:['partial-bad','partial-good']})).payload;
+    expect(failed.memory_error).toBe('memory_save_failed'); expect(failed.trace_id).toBeUndefined(); expect(failed.results[1].source_id).toBeUndefined();
+    await c.reset(); await broken.reset();
+  });
+  it('keeps valid folded rows when a same_entity member lacks canonical identity', async () => {
+    const repo = 'synthetic/partial-fold';
+    await seed(repo, 'partial-doc', 'docs/a.md', 'partialfoldneedle', 'doc');
+    await upsertFtsRow(env.DB_FTS, {vectorId:'partial-diff',repo,type:'diff',state:'active',labels:'',milestone:'',assignees:'',updatedAt:timestamp,filePath:'docs/a.md',content:'partialfoldneedle'});
+    const c = await client(9112);
+    const found = (await c.call('search', {query:'partialfoldneedle',repo,fusion:'sparse_only',rerank:false})).payload;
+    expect(found.results).toHaveLength(1); expect(found.results[0].same_entity.others).toHaveLength(1);
+    expect(found.memory_recording).toMatchObject({status:'partial',recorded_sources:1,excluded_sources:1});
+    const rows = [found.results[0], ...found.results[0].same_entity.others];
+    expect(rows.filter(r => r.source_id)).toHaveLength(1); expect(rows.filter(r => r.feedback_available === false)).toHaveLength(1);
+    await c.reset();
+  });
+  it('excludes unresolved graph intermediates and their paths but preserves safe credits and reversal', async () => {
+    const repo = 'synthetic/partial-graph';
+    await seed(repo,'partial-root','root','partialgraphneedle');
+    await seed(repo,'partial-middle','middle','middle');
+    await env.DB_FTS.prepare('UPDATE search_docs SET updated_at=? WHERE vector_id=?').bind('', 'partial-middle').run();
+    await seed(repo,'partial-terminal','terminal','terminal'); await seed(repo,'partial-safe','safe','safe');
+    await upsertEdges(env.DB_FTS,'partial-root',repo,'root',[{dstVectorId:'partial-middle',dstSlug:'middle',edgeKind:'mention'},{dstVectorId:'partial-safe',dstSlug:'safe',edgeKind:'mention'}]);
+    await upsertEdges(env.DB_FTS,'partial-middle',repo,'middle',[{dstVectorId:'partial-terminal',dstSlug:'terminal',edgeKind:'mention'}]);
+    const c = await client(9113);
+    const found = (await c.call('search',{query:'partialgraphneedle',repo,fusion:'sparse_only',rerank:false,graph_expand:true,graph_hops:2})).payload;
+    expect(found.memory_recording).toMatchObject({status:'partial',excluded_sources:1,excluded_graph_paths:1});
+    const middle = found.graph_results.find((r: any) => r.wiki_path === 'middle'); const terminal = found.graph_results.find((r: any) => r.wiki_path === 'terminal'); const safe = found.graph_results.find((r: any) => r.wiki_path === 'safe');
+    expect(middle.source_id).toBeUndefined(); expect(terminal.graph_feedback_available).toBe(false); expect(terminal.graph_path).toHaveLength(2);
+    expect(JSON.stringify(found)).not.toContain('memory_graph_nodes');
+    let history = (await c.call('memory_history',{trace_id:found.trace_id})).payload.data;
+    expect(history.sources.find((s: any) => s.source_id === terminal.source_id).path).toEqual([]);
+    for (const source_id of [terminal.source_id,safe.source_id]) await c.call('record_source_use',{trace_id:found.trace_id,idempotency_key:'used-'+source_id,uses:uses(source_id)});
+    const denied = (await c.call('record_outcome',{trace_id:found.trace_id,idempotency_key:'unsafe-confirm',outcome:'confirmed',source_ids:[terminal.source_id],reason:'Synthetic terminal verified'})).payload.data;
+    expect(denied.changes).toEqual([]); expect(denied.non_applied_reason).toBe('no_graph_path');
+    const confirmed = (await c.call('record_outcome',{trace_id:found.trace_id,idempotency_key:'safe-confirm',outcome:'confirmed',source_ids:[safe.source_id],reason:'Synthetic safe path verified'})).payload.data;
+    expect(confirmed.changes).toHaveLength(1);
+    const reversal = (await c.call('record_outcome',{trace_id:found.trace_id,idempotency_key:'safe-reverse',outcome:'rolled_back',confirmation_id:confirmed.receipt_id,reason:'Synthetic rollback'})).payload.data;
+    expect(reversal.changes).toHaveLength(1);
+    history = (await c.call('memory_history',{trace_id:found.trace_id})).payload.data;
+    expect(history.settings.memory_recording).toEqual(found.memory_recording);
+    expect(history.audit.find((r: any) => r.receipt_id === confirmed.receipt_id).active_credits[0].active).toBe(0);
+    // A dangling intermediate remains traversable but is omitted from output.
+    await env.DB_FTS.prepare('DELETE FROM search_docs WHERE vector_id=?').bind('partial-middle').run();
+    const dangling = (await c.call('search',{query:'partialgraphneedle',repo,fusion:'sparse_only',rerank:false,graph_expand:true,graph_hops:2})).payload;
+    expect(dangling.graph_results.some((r: any) => r.wiki_path === 'middle')).toBe(false);
+    const danglingTerminal = dangling.graph_results.find((r: any) => r.wiki_path === 'terminal');
+    expect(danglingTerminal.graph_feedback_available).toBe(false);
+    expect((await c.call('memory_history',{trace_id:dangling.trace_id})).payload.data.sources.find((s: any) => s.source_id === danglingTerminal.source_id).path).toEqual([]);
+    await c.reset();
+  });
   it('search -> explicit used -> confirmed two-hop path -> corrected; source versions survive vector migration', async () => {
     const repo = 'synthetic/e2e-path';
     await seed(repo, 'e2e-a', 'a', 'syntheticneedle'); await seed(repo, 'e2e-b', 'b', 'middle page'); await seed(repo, 'e2e-c', 'c', 'terminal page');

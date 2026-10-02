@@ -591,34 +591,33 @@ async function handleIssueCommentEvent(
   // Deletion: drop from Vectorize + FTS5 + store
   if (action === "deleted") {
     const vid = await issueCommentVectorId(repo, commentId);
+    let indexDeletionFailed = false;
     try {
       await env.VECTORIZE.deleteByIds([vid]);
     } catch (err) {
-      console.error(
-        `Failed to delete comment vector ${vid}:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      indexDeletionFailed = true;
+      console.error(`Failed to delete comment vector ${vid} (${repo}#${commentId}):`, err instanceof Error ? err.message : 'binding_error');
     }
     try {
       await deleteFtsRow(env.DB_FTS, vid);
     } catch (err) {
-      console.error(
-        `Failed to delete FTS5 row ${vid}:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      indexDeletionFailed = true;
+      console.error(`Failed to delete comment FTS5 row ${vid} (${repo}#${commentId}):`, err instanceof Error ? err.message : 'binding_error');
     }
+    // Keep canonical identity until both index surfaces are removed. A failed
+    // delivery can be explicitly redelivered; this does not schedule a retry.
+    if (indexDeletionFailed) return jsonResponse(503, { received:true, event:'issue_comment', action, result:'partial_delete', canonical_retained:true });
     try {
-      await storeStub.fetch(
+      const response = await storeStub.fetch(
         new Request(
           `http://store/comment?repo=${encodeURIComponent(repo)}&comment_id=${commentId}`,
           { method: "DELETE" },
         ),
       );
+      if (!response.ok) throw new Error(`Store deletion failed (status ${response.status})`);
     } catch (err) {
-      console.error(
-        `Failed to delete comment record ${repo}#${commentId}:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      console.error(`Failed to delete comment record ${repo}#${commentId}:`, err instanceof Error ? err.message : 'binding_error');
+      return jsonResponse(503, { received:true, event:'issue_comment', action, result:'partial_delete' });
     }
     return jsonResponse(202, {
       received: true,
