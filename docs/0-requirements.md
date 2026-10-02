@@ -671,6 +671,10 @@ Implement retrieval history, selected/validated/used records, retrieved/usage ac
 
 The APIs are `memory_history`, `record_source_use`, and `record_outcome`. [2-feedback-memory.md](2-feedback-memory.md) owns constants, bounds, source version identity, batch/idempotency, ledger, errors, migration 0008-before-deployment, historical backfill and bridge artifacts. Do not duplicate conversations, bodies or credentials. Claims of retrieval quality improvement require separate evaluation.
 
+Issue #263: exclude canonical identity failures per source and pass valid sources to the existing atomic save. Preserve retrieval rows and order; return and persist partial-recording status, exclusion counts and reasons in settings. Distinguish all-unresolved from a genuine zero-hit search. Unresolved rows receive no source_id and cannot accept feedback. Exclude graph paths from reinforcement unless the origin, intermediates and terminal can be verified. Storage failures and incomplete retrieval continue to emit no trace.
+
+Issue #263 investigation reproduces partial issue_comment.deleted teardown: retain DO canonical identity until both Vectorize and FTS deletions succeed. Index or DO deletion failure returns 503; no automatic retry is added. Causality for the remaining production row is unverified; [investigation](3-unresolved-source-investigation.ja.md) separates evidence from hypotheses. Production DB mutation, bulk repair, version updates and releases are outside this fix.
+
 Issue #259 version contract: live inline doc/wiki uses the returned-text SHA-256 version and provenance separate from the index snapshot. Changed live text gets a different source ID even at the same index timestamp. Do not duplicate the body in memory.
 
 ## Release metadata consistency (Issue #261)

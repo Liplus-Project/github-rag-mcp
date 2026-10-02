@@ -666,6 +666,10 @@ embedding が失敗した record は incomplete と分かる形で残し、次�
 
 新 API は `memory_history`、`record_source_use`、`record_outcome`。設定値、上限、ID/version、batch/idempotency、ledger、error、0008先行移行、既存行 backfill と artifact の契約は [2-feedback-memory.ja.md](2-feedback-memory.ja.md) に定義する。会話/本文/credential の複製は行わず、品質向上の主張は別評価を必要とする。
 
+Issue #263: canonical identity の失敗は資料単位で除外し、正常資料は既存の原子的保存に渡す。検索結果と順序は維持し、部分記録の状態・除外件数・理由を応答と保存 settings に残す。全資料未解決は正常な0件検索と区別する。未解決資料に source_id を発行せず、feedback を不可とする。経路の起点・中間・終点を確認できない graph path は強化対象から除外する。保存失敗と実際の部分取得は引き続き trace を発行しない。
+
+Issue #263 の調査で再現した issue_comment.deleted の部分削除: Vectorize とFTSの両方が削除成功するまでDO canonicalを保持し、片側失敗とDO削除失敗は503を返す。自動再試行は追加しない。対象の残存1件との因果は未確認であり、[調査記録](3-unresolved-source-investigation.ja.md) に事実と仮説を分けて保存する。本番DB変更・一括補修・版番号更新・releaseはこの修正に含めない。
+
 #259 の版契約: live inline doc/wiki は返した本文の SHA-256 を version とし、index snapshot と provenance を分ける。同じ索引 timestamp でも live 本文更新は別 source_id にする。本文を memory に複製しない。
 
 ## リリース metadata の一致（Issue #261）

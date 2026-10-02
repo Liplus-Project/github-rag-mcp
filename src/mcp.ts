@@ -1107,7 +1107,7 @@ export function createRagMcpServer(env: Env): McpServer {
           if (fresh.length > 0) {
             const enrich = await getDocsByVectorIds(
               env.DB_FTS,
-              fresh.map((n) => n.vectorId),
+              fresh.flatMap((n) => n.pathNodes ?? [n.vectorId]),
             );
             const slugOf = (vid: string): string => {
               const p = payload.get(vid);
@@ -1117,7 +1117,8 @@ export function createRagMcpServer(env: Env): McpServer {
               const row = enrich.get(n.vectorId);
               if (!row) continue; // dangling edge (target not indexed) — skip
               graphItems.push(
-                { ...buildGraphItem(n, row, slugOf(n.fromVectorId), includeContent), ...(use_memory ? { learned_strength: Number((n as any).learnedStrength) } : {}) },
+                Object.assign({ ...buildGraphItem(n, row, slugOf(n.fromVectorId), includeContent), ...(use_memory ? { learned_strength: Number((n as any).learnedStrength) } : {}) },
+                  { memory_graph_nodes: (n.pathNodes ?? []).map(id => enrich.get(id) ?? null) }),
               );
             }
           }
