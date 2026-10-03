@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { entityKey, groupByEntity, type EntityRow } from "./aggregate.js";
+import { entityKey, groupByEntity, markRecency, type EntityRow } from "./aggregate.js";
 
 /**
  * Binding-independent unit tests for entity aggregation (node pool).
@@ -241,5 +241,34 @@ describe("duplicate rate regression (issue #189 measurements, 2026-08-01)", () =
     // Negative controls: the pairs that must NOT be one entity.
     expect(entityKey(pool[0])).not.toBe(entityKey(pool[1])); // one commit, two files
     expect(entityKey(pool[2])).not.toBe(entityKey(pool[3])); // issue #1317 vs PR #1318
+  });
+});
+
+describe("markRecency (issue #267)", () => {
+  it("marks older rows superseded and newest latest", () => {
+    const m = markRecency([
+      { id: "old", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "new", updatedAt: "2026-09-29T00:00:00Z" },
+      { id: "mid", updatedAt: "2026-09-23T00:00:00Z" },
+    ]);
+    expect(m.get("old")).toBe("superseded");
+    expect(m.get("mid")).toBe("superseded");
+    expect(m.get("new")).toBe("latest");
+  });
+  it("marks nothing for a single row or equal timestamps", () => {
+    expect(markRecency([{ id: "a", updatedAt: "2026-09-15T00:00:00Z" }]).size).toBe(0);
+    expect(markRecency([
+      { id: "a", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "b", updatedAt: "2026-09-15T00:00:00Z" },
+    ]).size).toBe(0);
+  });
+  it("leaves unparsable timestamps unmarked", () => {
+    const m = markRecency([
+      { id: "a", updatedAt: "" },
+      { id: "b", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "c", updatedAt: "2026-09-16T00:00:00Z" },
+    ]);
+    expect(m.has("a")).toBe(false);
+    expect(m.get("c")).toBe("latest");
   });
 });

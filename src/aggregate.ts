@@ -127,3 +127,24 @@ export function groupByEntity<T>(
   }
   return ordered;
 }
+
+/** Recency marker for one row of an entity group (issue #267). */
+export type Recency = "latest" | "superseded";
+
+/**
+ * Compare `updated_at` across the representative and its folded rows and
+ * mark each one: "superseded" when another row in the group is newer,
+ * "latest" for the newest. Returns an empty map when the group holds fewer
+ * than two distinct timestamps — the pool proves nothing about recency then.
+ * Rows with an unparsable timestamp are left unmarked.
+ */
+export function markRecency(rows: Array<{ id: string; updatedAt: string | null | undefined }>): Map<string, Recency> {
+  const out = new Map<string, Recency>();
+  const times = rows
+    .map((r) => ({ id: r.id, t: r.updatedAt ? Date.parse(r.updatedAt) : NaN }))
+    .filter((r) => !Number.isNaN(r.t));
+  if (new Set(times.map((r) => r.t)).size < 2) return out;
+  const max = Math.max(...times.map((r) => r.t));
+  for (const r of times) out.set(r.id, r.t === max ? "latest" : "superseded");
+  return out;
+}
