@@ -337,7 +337,10 @@ export function createRagMcpServer(env: Env): McpServer {
         "(Master's feedback, AI responses, self-review now/later/accepted classifications).\n" +
         "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
         "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
-        "and a result that absorbed others carries same_entity { count, others[] } with links to them.\n" +
+        "and a result that absorbed others carries same_entity { count, others[] } with links to them. " +
+        "When those rows hold more than one distinct updated_at, the representative and each others entry carry recency: " +
+        "\"superseded\" = a newer row of the same entity is in the pool, \"latest\" = the newest row in the pool. " +
+        "Absent recency is not a claim of being latest, and recency never affects ranking or scores.\n" +
         "Every result row — and every same_entity.others entry — carries vector_id, the handle mode 4 takes. " +
         "It is a handle for reaching a row you just found, not a durable identifier: the id scheme has been " +
         "migrated before and may be again, so do not store one for later use.\n" +
