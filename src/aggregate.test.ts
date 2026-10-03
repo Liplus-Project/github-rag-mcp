@@ -245,28 +245,46 @@ describe("duplicate rate regression (issue #189 measurements, 2026-08-01)", () =
 });
 
 describe("markRecency (issue #267)", () => {
+  it("marks nothing for an issue and its comments (issue #269)", () => {
+    const m = markRecency([
+      { id: "issue", type: "issue", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "c1", type: "issue_comment", updatedAt: "2026-09-20T00:00:00Z" },
+      { id: "c2", type: "issue_comment", updatedAt: "2026-09-29T00:00:00Z" },
+    ]);
+    expect(m.size).toBe(0);
+  });
+  it("compares only diff/doc rows in a mixed group (issue #269)", () => {
+    const m = markRecency([
+      { id: "doc", type: "doc", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "diff", type: "diff", updatedAt: "2026-09-20T00:00:00Z" },
+      { id: "other", type: "issue", updatedAt: "2026-09-29T00:00:00Z" },
+    ]);
+    expect(m.get("doc")).toBe("superseded");
+    expect(m.get("diff")).toBe("latest");
+    expect(m.has("other")).toBe(false);
+  });
   it("marks older rows superseded and newest latest", () => {
     const m = markRecency([
-      { id: "old", updatedAt: "2026-09-15T00:00:00Z" },
-      { id: "new", updatedAt: "2026-09-29T00:00:00Z" },
-      { id: "mid", updatedAt: "2026-09-23T00:00:00Z" },
+      { id: "old", type: "diff", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "new", type: "diff", updatedAt: "2026-09-29T00:00:00Z" },
+      { id: "mid", type: "diff", updatedAt: "2026-09-23T00:00:00Z" },
     ]);
     expect(m.get("old")).toBe("superseded");
     expect(m.get("mid")).toBe("superseded");
     expect(m.get("new")).toBe("latest");
   });
   it("marks nothing for a single row or equal timestamps", () => {
-    expect(markRecency([{ id: "a", updatedAt: "2026-09-15T00:00:00Z" }]).size).toBe(0);
+    expect(markRecency([{ id: "a", type: "diff", updatedAt: "2026-09-15T00:00:00Z" }]).size).toBe(0);
     expect(markRecency([
-      { id: "a", updatedAt: "2026-09-15T00:00:00Z" },
-      { id: "b", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "a", type: "diff", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "b", type: "diff", updatedAt: "2026-09-15T00:00:00Z" },
     ]).size).toBe(0);
   });
   it("leaves unparsable timestamps unmarked", () => {
     const m = markRecency([
-      { id: "a", updatedAt: "" },
-      { id: "b", updatedAt: "2026-09-15T00:00:00Z" },
-      { id: "c", updatedAt: "2026-09-16T00:00:00Z" },
+      { id: "a", type: "diff", updatedAt: "" },
+      { id: "b", type: "diff", updatedAt: "2026-09-15T00:00:00Z" },
+      { id: "c", type: "diff", updatedAt: "2026-09-16T00:00:00Z" },
     ]);
     expect(m.has("a")).toBe(false);
     expect(m.get("c")).toBe("latest");
