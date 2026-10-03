@@ -59,7 +59,7 @@ import {
   FETCH_CONTENT_MAX_CHARS,
   FETCH_MAX_VECTOR_IDS,
 } from "./fetch.js";
-import { entityKey, groupByEntity } from "./aggregate.js";
+import { entityKey, groupByEntity, markRecency } from "./aggregate.js";
 import { pathPrefixRange, validateDocPathPrefix } from "./path-prefix.js";
 
 const GITHUB_API = "https://api.github.com";
@@ -917,8 +917,19 @@ export function createRagMcpServer(env: Env): McpServer {
             updated_at: string;
             score: number;
             commit_sha?: string;
+            /** See ResultItem.recency (issue #267). */
+            recency?: "latest" | "superseded";
           }>;
         };
+        /**
+         * Additive recency marker (issue #267), set only when the
+         * representative and its same_entity.others hold more than one
+         * distinct updated_at: "superseded" = a newer row of the same entity
+         * is in the pool, "latest" = newest row in the pool. Never affects
+         * ranking or scores. Absent = no newer version in the pool, which is
+         * not a claim of being latest.
+         */
+        recency?: "latest" | "superseded";
       };
 
       const items: ResultItem[] = filtered.map((f) => {
@@ -928,6 +939,10 @@ export function createRagMcpServer(env: Env): McpServer {
         // Rows folded into this representative. Kept as references (never
         // dropped) so the caller can still reach every version / comment.
         const folded = collapsedInto.get(f.vectorId) ?? [];
+        const recency = markRecency([
+          { id: f.vectorId, updatedAt: r.updatedAt },
+          ...folded.map((o) => ({ id: o.vectorId, updatedAt: resolveRow(payload.get(o.vectorId)).updatedAt })),
+        ]);
         const sameEntity =
           folded.length > 0
             ? {
@@ -942,6 +957,7 @@ export function createRagMcpServer(env: Env): McpServer {
                     updated_at: or.updatedAt,
                     score: o.fusedScore,
                     ...(or.type === "diff" ? { commit_sha: or.commitSha } : {}),
+                    ...(recency.has(o.vectorId) ? { recency: recency.get(o.vectorId) } : {}),
                   };
                 }),
               }
@@ -1008,6 +1024,7 @@ export function createRagMcpServer(env: Env): McpServer {
               }
             : {}),
           ...(sameEntity ? { same_entity: sameEntity } : {}),
+          ...(recency.has(f.vectorId) ? { recency: recency.get(f.vectorId) } : {}),
         };
       });
 
