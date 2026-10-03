@@ -137,10 +137,14 @@ export type Recency = "latest" | "superseded";
  * "latest" for the newest. Returns an empty map when the group holds fewer
  * than two distinct timestamps — the pool proves nothing about recency then.
  * Rows with an unparsable timestamp are left unmarked.
+ * Only `diff` and `doc` rows take part (issue #269): an issue's comments are
+ * separate events, not versions of the issue, so other types are never
+ * marked and never enter the comparison.
  */
-export function markRecency(rows: Array<{ id: string; updatedAt: string | null | undefined }>): Map<string, Recency> {
+export function markRecency(rows: Array<{ id: string; type: string; updatedAt: string | null | undefined }>): Map<string, Recency> {
   const out = new Map<string, Recency>();
   const times = rows
+    .filter((r) => r.type === "diff" || r.type === "doc")
     .map((r) => ({ id: r.id, t: r.updatedAt ? Date.parse(r.updatedAt) : NaN }))
     .filter((r) => !Number.isNaN(r.t));
   if (new Set(times.map((r) => r.t)).size < 2) return out;
