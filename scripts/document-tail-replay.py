@@ -6,7 +6,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True, type=Path)
     args = parser.parse_args()
-    R = args.out.resolve()
+    # Keep the leaf unresolved: mkdir must reject existing dangling symlinks too.
+    R = args.out.absolute()
     R.mkdir(parents=True, exist_ok=False)
     scripts = Path(__file__).resolve().parent
     fixture_dir = scripts.parent / 'experiments' / 'document-tail'

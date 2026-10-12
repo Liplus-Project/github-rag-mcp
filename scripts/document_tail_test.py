@@ -50,6 +50,18 @@ class DocumentTailContract(unittest.TestCase):
         self.assertEqual(marker.read_text(), 'keep')
         self.assertEqual((self.out / 'results.json').read_bytes(), digest)
 
+    def test_dangling_output_symlink_does_not_create_target(self):
+        link = self.root / 'dangling-output'
+        target = self.root / 'must-not-be-created'
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest('Symlink creation unavailable: ' + str(error))
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'document-tail-replay.py'), '--out', str(link)], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(target.exists())
+
     def test_targets_do_not_affect_ranking(self):
         prepared = json.loads((self.out / 'prepared.json').read_text(encoding='utf8'))
         changed = self.root / 'changed-labels'

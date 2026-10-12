@@ -1,4 +1,4 @@
 # Hash-pinned experiment inputs must survive Windows checkout byte-exactly.
-experiments/document-tail/fixture.json -text
-experiments/document-tail/provenance.json -text
-experiments/document-tail/source-* -text
+experiments/document-tail/fixture.json -text whitespace=cr-at-eol
+experiments/document-tail/provenance.json -text whitespace=cr-at-eol
+experiments/document-tail/source-* -text whitespace=cr-at-eol
