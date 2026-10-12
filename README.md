@@ -129,7 +129,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | Name | Type | Description |
 |------|------|-------------|
 | `query` | string (optional) | Natural-language query. Omit or empty = scan mode. |
-| `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search mode reports that as `"repo"` in the response's `filters_unmatched`. |
+| `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search mode reports that as `"repo"` in the response's `filters_unmatched`. Pass it whenever the question is about a known repository — without it, a near-duplicate from another repository can rank first; leave it unset only when the question spans repositories. |
 | `path_prefix` | string | Filter docs by repository-relative directory prefix. Requires `type: "doc"`, a trailing `/`, and at most 64 UTF-8 bytes. |
 | `state` | `"open"` \| `"closed"` \| `"all"` | Filter by state (default `all`). |
 | `labels` | string[] | Filter by label names (AND). |
