@@ -1,0 +1,41 @@
+{
+  "scope": "Isolated offline development candidate-discovery pilot, 11 public document fixtures / 7 previously declared queries; not holdout or frozen evaluation",
+  "queries_origin": "Fixed public fixture.json; seven predeclared queries and target labels retained from the 2026-10-13 pilot",
+  "source_sha": "da23db3f077a2975e11fc4ab16cfab1556098045",
+  "algorithm": {
+    "prefix": "Exact current prepareEmbeddingInput: (path + two newline characters + body).slice(0,8000), JavaScript UTF16 units",
+    "full": "Same path + two newlines + body, no clipping",
+    "chunks": "Same full sequence, fixed nonoverlap <=8000 UTF16 units, boundary moved back one unit when it bisects a surrogate pair; path only in first chunk, no overlap/no repeated title",
+    "segmentation": "Byte-exact pinned source-src-segment.ts, imported using Node TypeScript stripping; escapeFtsQuery extracted from pinned source with TypeScript annotations removed",
+    "tokenizer": "porter unicode61 remove_diacritics 2, external-content single natural FTS5 column; no code rows",
+    "rank": "Strict AND tier0 before relaxed OR tier1, bm25 ascending; exhaust branches, dedup document entity using best row, top3 scoring; deterministic rowid tie break",
+    "label_use": "Target paths used only after ranking; retrieval uses query text and optional exact repository filter",
+    "timing": "One warm query then31 repeated local queries; median includes snippet/highlight window extraction, sorting and dedup; DB build includes insertion/commit but excludes integrity check; preparation separate",
+    "negative": "Only literal absence from this fixture, never production unanswerability"
+  },
+  "variations_from_production": [
+    "Local SQLite/Python and Node ICU are not Cloudflare D1/workerd parity proof",
+    "Exhaustive branch collection instead of production per-branch topK/outer cap to prevent chunk rows consuming entity slots; prefix/full cap-equivalence audit separately",
+    "Added rowid tie break; production equal-score ordering unspecified",
+    "No dense, graph, RRF, crossencoder, abstention or end-to-end packet assessment"
+  ],
+  "unknowns": [
+    "Broader corpus/false-positive relevance annotation",
+    "Phrase/token split at chunk boundaries, no overlap",
+    "Deletion/replacement/provenance contracts and unchanged-hash backfill",
+    "Full sparse source vs embedding prefix vs rerank evidence slice/API fetch-source semantics",
+    "D1 size/statement/CPU constraints and runtime segmentation compatibility",
+    "Chunk source offsets, stable IDs/entity dedup and rerank/return window provenance"
+  ],
+  "fixture_sha256": "b6c44c1d505e1c3a5235495c20f071d0c49f2c93204deda07b31a952a817fea3",
+  "source_hashes": {
+    "source-migrations-0006_fts5_segmented_nat_index.sql": "3e2b53ffc1e947e1987141bd8feb7fcd9adbcf508244bc31d91d0ab636f38d59",
+    "source-src-fts.ts": "fd54209ecb0e3b6875a663dcb8eafb351f3d88b7305dc095ffcf6c5cffe3a0c7",
+    "source-src-pipeline-embed-doc.ts": "f1f8ec2a1efd4bb44921551801168c75aa359dcb75a75380d2a8a1836ff45947",
+    "source-src-pipeline-embedding.ts": "0e717d0bc0a457f298a00402cd379b977ff3276a84e04595ea0bb22a52471cf3",
+    "source-src-pipeline-hash.ts": "ab8595fa440f7c2a86ecac0e8684116a378e3a41722e90d7529d81a25e629956",
+    "source-src-rerank.ts": "e9693945311759e896fec6f6ce7d5eb575d77135546987366bdd1044aefc8148",
+    "source-src-segment.ts": "e5268f5d338d933ba0818d02b38648b848548ca1925266381f26bb3b5c33592a"
+  },
+  "provenance_sha256": "29c2f7b9c712dd02794790e1c9af3c7af889f0dad8b112a4943527518c4c78f8"
+}

@@ -679,3 +679,7 @@ Issue #263 の調査で再現した issue_comment.deleted の部分削除: Vecto
 両 CD packaging job は bridge package、lock root、MCP Bundle manifest、MCP registry の npm version を同じ検証済み release tag から同期し、pack / publish 前に一致を assert する。依存版、schema、runtime 条件、Worker の挙動を保持する。対象 field と検証 command は [版数と公開成果物](installation.ja.md#versioning-and-published-artifacts) に定義する。commit 済み版は placeholder のままとし、trusted publishing は別変更とする。
 
 source の `docs/_Sidebar.md` は既存 Feedback Memory EN/JA ページを参照し、release 後の Wiki navigation に含める。
+
+### Offline document-tail comparison (#279)
+
+固定公開文書の後半発見を検討する opt-in sparse-only 実験は [Document Tail Replay](5-document-tail-replay.ja.md) の契約に従う。prefix8000 / fullbody / nonoverlap8000 の比較、入力・source hash、named target と exact literal source の別採点、静的rerank予算、節長分布を記録する。既定の検索・embedding・reranker・live索引は変更しない。
