@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "abstention-replay/v1",
+  "description": "Fixture or annotation; CLI additionally checks finite numbers, identities and full annotation coverage.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "scope",
+        "source_commit",
+        "queries"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "query",
+              "category",
+              "language",
+              "retrieval",
+              "sparse",
+              "dense",
+              "rerank_pool_complete",
+              "candidates",
+              "graph_entities"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1
+              },
+              "category": {
+                "type": "string",
+                "minLength": 1
+              },
+              "language": {
+                "type": "string",
+                "minLength": 1
+              },
+              "retrieval": {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "unknown"
+                ]
+              },
+              "sparse": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "count",
+                  "scope"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "complete",
+                      "failed",
+                      "not_run",
+                      "unknown"
+                    ]
+                  },
+                  "count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "scope": {
+                    "enum": [
+                      "filtered_pool",
+                      "pre_filter"
+                    ]
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "complete"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "count": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "count": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "dense": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pool_complete",
+                  "max"
+                ],
+                "properties": {
+                  "pool_complete": {
+                    "type": "boolean"
+                  },
+                  "max": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "pool_complete": {
+                          "const": true
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "max": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "rerank_pool_complete": {
+                "type": "boolean"
+              },
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "entity",
+                    "url",
+                    "rerank"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "entity": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "url": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "rerank": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "value"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "model",
+                            "synthetic",
+                            "missing"
+                          ]
+                        },
+                        "value": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      },
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "kind": {
+                                "const": "model"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "if": {
+                            "properties": {
+                              "kind": {
+                                "const": "missing"
+                              }
+                            }
+                          },
+                          "then": {
+                            "properties": {
+                              "value": {
+                                "type": "null"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "graph_entities": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "entries"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "query_id",
+              "candidate_id",
+              "label",
+              "citation",
+              "conditions"
+            ],
+            "properties": {
+              "query_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "candidate_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "enum": [
+                  "support",
+                  "contradiction",
+                  "partial",
+                  "irrelevant",
+                  "unknown"
+                ]
+              },
+              "citation": {
+                "type": "string"
+              },
+              "conditions": {
+                "type": "string"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "label": {
+                      "not": {
+                        "const": "unknown"
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "citation": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "conditions": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

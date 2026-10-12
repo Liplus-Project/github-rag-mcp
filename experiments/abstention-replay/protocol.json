@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "grid": [
+    0,
+    0.001,
+    0.005,
+    0.01,
+    0.05,
+    0.1,
+    0.2,
+    0.5,
+    0.9
+  ],
+  "comparison": "signal < tau",
+  "policies": [
+    "baseline",
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "rejection_scope": "whole keyword candidate packet; graph untouched",
+  "unknown_policy": "retain and report indeterminate",
+  "threshold_selection": "none",
+  "downstream_answer_quality": "unmeasured"
+}
