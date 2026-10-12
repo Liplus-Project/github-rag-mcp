@@ -656,6 +656,8 @@ embedding が失敗した record は incomplete と分かる形で残し、次�
 
 ## Future Scope
 
+Issue #275 の既定変更を伴わない固定capture比較は [Offline Abstention Replay](4-abstention-replay.ja.md) に入力契約・指標・残るreader評価を定義する。
+
 - ranking と filtering の改善
 - multi-agent handoff retrieval の改善
 - cross-repository state recovery の改善

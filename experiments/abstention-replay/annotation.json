@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "query_id": "positive_en",
+      "candidate_id": "candidate-1",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_en",
+      "candidate_id": "candidate-2",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_en",
+      "candidate_id": "candidate-3",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_ja",
+      "candidate_id": "candidate-1",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_ja",
+      "candidate_id": "candidate-2",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_ja",
+      "candidate_id": "candidate-3",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_literal",
+      "candidate_id": "candidate-1",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_literal",
+      "candidate_id": "candidate-2",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "positive_literal",
+      "candidate_id": "candidate-3",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_near",
+      "candidate_id": "candidate-1",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_near",
+      "candidate_id": "candidate-2",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_near",
+      "candidate_id": "candidate-3",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_en",
+      "candidate_id": "candidate-1",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_en",
+      "candidate_id": "candidate-2",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_en",
+      "candidate_id": "candidate-3",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_far",
+      "candidate_id": "candidate-1",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_far",
+      "candidate_id": "candidate-2",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    },
+    {
+      "query_id": "negative_far",
+      "candidate_id": "candidate-3",
+      "label": "unknown",
+      "citation": "",
+      "conditions": "captureには根拠本文がなく、資料ごとの引用と適用条件の監査は未完了。"
+    }
+  ]
+}

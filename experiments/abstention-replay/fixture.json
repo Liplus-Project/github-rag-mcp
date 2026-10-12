@@ -1,0 +1,289 @@
+{
+  "version": 1,
+  "scope": "observed development captures; returned top-k only; running code/index unpinned; not holdout",
+  "source_commit": "ca34e9fba9f0be528f9ec3f3ddba8d0be44f2671",
+  "queries": [
+    {
+      "id": "positive_en",
+      "query": "low confidence rejection",
+      "category": "exploration",
+      "language": "en",
+      "retrieval": "complete",
+      "sparse": {
+        "state": "complete",
+        "count": 4,
+        "scope": "pre_filter"
+      },
+      "dense": {
+        "pool_complete": false,
+        "max": null
+      },
+      "rerank_pool_complete": false,
+      "candidates": [
+        {
+          "id": "candidate-1",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "rerank": {
+            "kind": "model",
+            "value": 0.15911681950092316
+          }
+        },
+        {
+          "id": "candidate-2",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/55",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/55",
+          "rerank": {
+            "kind": "model",
+            "value": 0.00013490268611349165
+          }
+        },
+        {
+          "id": "candidate-3",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/250",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/250",
+          "rerank": {
+            "kind": "model",
+            "value": 8.887678268365562e-05
+          }
+        }
+      ],
+      "graph_entities": []
+    },
+    {
+      "id": "positive_ja",
+      "query": "検索結果の確信が低いときに返さない方式の候補と測定方法",
+      "category": "exploration",
+      "language": "ja",
+      "retrieval": "complete",
+      "sparse": {
+        "state": "complete",
+        "count": 15,
+        "scope": "pre_filter"
+      },
+      "dense": {
+        "pool_complete": false,
+        "max": null
+      },
+      "rerank_pool_complete": false,
+      "candidates": [
+        {
+          "id": "candidate-1",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "rerank": {
+            "kind": "model",
+            "value": 0.9950687885284424
+          }
+        },
+        {
+          "id": "candidate-2",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/274",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/274",
+          "rerank": {
+            "kind": "model",
+            "value": 0.2663256824016571
+          }
+        },
+        {
+          "id": "candidate-3",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/180",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/180",
+          "rerank": {
+            "kind": "model",
+            "value": 0.17134550213813782
+          }
+        }
+      ],
+      "graph_entities": []
+    },
+    {
+      "id": "positive_literal",
+      "query": "abstain when top results fall below a confidence threshold",
+      "category": "exploration",
+      "language": "en",
+      "retrieval": "complete",
+      "sparse": {
+        "state": "complete",
+        "count": 15,
+        "scope": "pre_filter"
+      },
+      "dense": {
+        "pool_complete": false,
+        "max": null
+      },
+      "rerank_pool_complete": false,
+      "candidates": [
+        {
+          "id": "candidate-1",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "rerank": {
+            "kind": "model",
+            "value": 0.9998563528060913
+          }
+        },
+        {
+          "id": "candidate-2",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/216",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/216",
+          "rerank": {
+            "kind": "model",
+            "value": 0.0003844273160211742
+          }
+        },
+        {
+          "id": "candidate-3",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/180",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/180",
+          "rerank": {
+            "kind": "model",
+            "value": 0.0002501934359315783
+          }
+        }
+      ],
+      "graph_entities": []
+    },
+    {
+      "id": "negative_near",
+      "query": "#275で本番採用済みの拒否閾値と精度の実測値は何ですか",
+      "category": "premise_correction",
+      "language": "ja",
+      "retrieval": "complete",
+      "sparse": {
+        "state": "complete",
+        "count": 15,
+        "scope": "pre_filter"
+      },
+      "dense": {
+        "pool_complete": false,
+        "max": null
+      },
+      "rerank_pool_complete": false,
+      "candidates": [
+        {
+          "id": "candidate-1",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "rerank": {
+            "kind": "model",
+            "value": 0.0072461459785699844
+          }
+        },
+        {
+          "id": "candidate-2",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/194",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/194",
+          "rerank": {
+            "kind": "model",
+            "value": 0.0005015164497308433
+          }
+        },
+        {
+          "id": "candidate-3",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/246",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/246",
+          "rerank": {
+            "kind": "model",
+            "value": 0.00045164264156483114
+          }
+        }
+      ],
+      "graph_entities": []
+    },
+    {
+      "id": "negative_en",
+      "query": "What production threshold and measured precision were adopted in issue 275?",
+      "category": "premise_correction",
+      "language": "en",
+      "retrieval": "complete",
+      "sparse": {
+        "state": "complete",
+        "count": 15,
+        "scope": "pre_filter"
+      },
+      "dense": {
+        "pool_complete": false,
+        "max": null
+      },
+      "rerank_pool_complete": false,
+      "candidates": [
+        {
+          "id": "candidate-1",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+          "rerank": {
+            "kind": "model",
+            "value": 0.001410078490152955
+          }
+        },
+        {
+          "id": "candidate-2",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/256",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/256",
+          "rerank": {
+            "kind": "model",
+            "value": 0.0004076574696227908
+          }
+        },
+        {
+          "id": "candidate-3",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/85",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/85",
+          "rerank": {
+            "kind": "model",
+            "value": 0.00032310301321558654
+          }
+        }
+      ],
+      "graph_entities": []
+    },
+    {
+      "id": "negative_far",
+      "query": "月面温室で栽培した紫色トマトの糖度の実測値",
+      "category": "unrelated_probe",
+      "language": "ja",
+      "retrieval": "complete",
+      "sparse": {
+        "state": "complete",
+        "count": 15,
+        "scope": "pre_filter"
+      },
+      "dense": {
+        "pool_complete": false,
+        "max": null
+      },
+      "rerank_pool_complete": false,
+      "candidates": [
+        {
+          "id": "candidate-1",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/244",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/244",
+          "rerank": {
+            "kind": "model",
+            "value": 5.4423777328338474e-05
+          }
+        },
+        {
+          "id": "candidate-2",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/222",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/222",
+          "rerank": {
+            "kind": "model",
+            "value": 3.7444449844770133e-05
+          }
+        },
+        {
+          "id": "candidate-3",
+          "entity": "https://github.com/Liplus-Project/github-rag-mcp/issues/106",
+          "url": "https://github.com/Liplus-Project/github-rag-mcp/issues/106",
+          "rerank": {
+            "kind": "model",
+            "value": 3.743777779163793e-05
+          }
+        }
+      ],
+      "graph_entities": []
+    }
+  ]
+}

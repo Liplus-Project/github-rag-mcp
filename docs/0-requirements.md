@@ -661,6 +661,8 @@ If an embedding attempt fails, the state must remain detectable as incomplete so
 
 ## Future Scope
 
+Issue #275 の固定capture比較の契約は [Offline Abstention Replay (JA)](4-abstention-replay.ja.md) を参照する。既定検索の変更とreader効果の採用判断は含まない。
+
 - stronger ranking and filtering behavior
 - better multi-agent handoff retrieval
 - better cross-repository state recovery

@@ -15,6 +15,7 @@ jobs:
         with:
           node-version: "22"
       - run: node --test scripts/sync-release-version.test.mjs
+      - run: node --test scripts/abstention-replay.test.mjs
       - run: npm ci
       - run: npm ci
         working-directory: mcp-server
