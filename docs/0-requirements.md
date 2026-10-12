@@ -684,3 +684,7 @@ Issue #259 version contract: live inline doc/wiki uses the returned-text SHA-256
 Both CD packaging jobs must derive the bridge package, lock root, MCP Bundle manifest and MCP registry npm versions from the same validated release tag and assert agreement before packing or publishing. Preserve dependency versions, schemas, runtime constraints and Worker behavior. [Versioning and published artifacts](installation.md#versioning-and-published-artifacts) owns the affected fields and validation command. Committed versions remain placeholders; trusted publishing is a separate change.
 
 The source `docs/_Sidebar.md` must link the existing Feedback Memory EN/JA pages so release wiki navigation includes them.
+
+### Offline document-tail comparison (#279)
+
+固定公開文書の後半発見を検討する opt-in sparse-only 実験は [Document Tail Replay](5-document-tail-replay.ja.md) の契約に従う。prefix8000 / fullbody / nonoverlap8000 の比較、入力・source hash、named target と exact literal source の別採点、静的rerank予算、節長分布を記録する。既定の検索・embedding・reranker・live索引は変更しない。

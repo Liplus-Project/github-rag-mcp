@@ -2,3 +2,7 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+
+# Offline experiment databases / Python caches
+*.sqlite
+__pycache__/
