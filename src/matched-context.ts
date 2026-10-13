@@ -84,7 +84,9 @@ export async function queryMatchedFts(db:D1Database, query:string, topK:number, 
     results.forEach((r,i)=>{ const rows=r.results ?? []; arms.push({tier:Math.floor(i/2),rows});
       if(i%2===0) for(const row of rows) if(!sources.has(String(row.vector_id))) sources.set(String(row.vector_id),row);
     });
-    return { hits:mergeSparseTiers(arms,topK).map(hit), sources, coverage };
+    const merged=mergeSparseTiers(arms,topK);
+    merged.forEach((row,i)=>{const source=sources.get(String(row.vector_id));if(source) source.keyword_rank=i+1;});
+    return { hits:merged.map(hit), sources, coverage };
   } catch {
     // Include all legacy prefix owners on failure, including prepared ones.
     return { hits:denseOnly?[]:await queryFts(db,query,topK,filter), sources:new Map(), coverage:unavailableCoverage() };
@@ -162,7 +164,8 @@ export async function resolveMatchedContexts(db:D1Database,ids:string[],sources:
   }
   let remaining=RAW_REQUEST_BUDGET;
   const admitted:string[]=[];
-  for(const id of selected) {
+  const budgetOrder=[...selected].sort((a,b)=>Number(sources.get(a)?.keyword_rank ?? Infinity)-Number(sources.get(b)?.keyword_rank ?? Infinity) || (a<b?-1:a>b?1:0));
+  for(const id of budgetOrder) {
     const s=sources.get(id);
     if(!s) { fallback(id,unavailable?'full_index_unavailable':noPosition.get(id) ?? 'missing_source'); continue; }
     const raw=Number(s.raw_bytes), segmented=Number(s.segmented_bytes), owner=Number(s.row_bytes);

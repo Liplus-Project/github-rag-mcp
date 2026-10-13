@@ -126,11 +126,23 @@ describe('matched D1 retrieval and ownership',()=>{
     const model=ai.mock.calls[0] as unknown as [string,{contexts:{text:string}[]}];
     expect(model[1].contexts.some(v=>v.text===r.results.find((x:any)=>x.vector_id==='wiki-full').matched_context.text)).toBe(true);
     expect(r.results.find((x:any)=>x.vector_id==='wiki-prefix').matched_context_fallback).toBe('unprepared');
-    for(const args of [{query:'x',type:'all'},{type:'doc'},{query:'x',type:'doc',vector_ids:['wiki-full']}]) expect((await c.call({...args,doc_context:'matched'})).error).toBe(true);
+    for(const args of [{query:'x',type:'all'},{type:'doc'},{query:'x',type:'doc',vector_ids:[]},{query:'x',type:'doc',vector_ids:['wiki-full']}]) expect((await c.call({...args,doc_context:'matched'})).error).toBe(true);
     await c.reset();
     const denseAi=vi.fn(async()=>({data:[[0.1]]}));
     const dense=await client(denseAi,[{id:'wiki-full',score:0.9,metadata:{repo:'matched/wiki',type:'wiki_doc',state:'active',wiki_path:'Home',updated_at:'2026-10-01'}}]);
     const d=(await dense.call({query:'wikitailneedle',repo:'matched/wiki',type:'wiki_doc',fusion:'dense_only',rerank:false,doc_context:'matched'})).data;
     expect(d.results[0].matched_context_fallback).toBe('no_full_sparse_position');expect(d.doc_context_coverage.full).toBe(1);await dense.reset();
+  });
+  it('allocates raw by sparse keyword rank and vector ties after the fusion candidate cap',async()=>{
+    const sources=new Map<string,Record<string,unknown>>();
+    for(const [id,rank] of [['dense-first',5],['tie-z',2],['tie-a',2],['sparse-first',1],['third',3]] as const)
+      sources.set(id,{keyword_rank:rank,raw_bytes:262144,segmented_bytes:262144,row_bytes:524544,
+        raw_hash:'synthetic',owner_version:'synthetic',prefix_revision:0});
+    const readIds:string[]=[];
+    const db={prepare:()=>({bind:(...params:unknown[])=>{readIds.push(String(params[0]));return {};}}),
+      batch:async(statements:unknown[])=>statements.map(()=>({results:[]}))} as unknown as D1Database;
+    const out=await resolveMatchedContexts(db,['dense-first','tie-z','third','tie-a','sparse-first'],sources);
+    expect(readIds).toEqual(['sparse-first','tie-a','tie-z','third']);
+    expect(out.get('dense-first')?.matched_context_fallback).toBe('request_budget');
   });
 });

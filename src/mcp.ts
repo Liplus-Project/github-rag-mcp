@@ -381,7 +381,7 @@ export function createRagMcpServer(env: Env): McpServer {
       const memoryRequest = { query, repo, path_prefix, state, labels, milestone, assignee, type, top_k, fusion, rerank, ...(doc_context === 'matched' ? { doc_context } : {}), sort, since, until, include_content, vector_ids, graph_expand, graph_hops, use_memory };
       const remember = (payload: unknown) => rememberResult(env, payload, memoryRequest);
       const matched = doc_context === 'matched';
-      if (matched && (!(query ?? '').trim() || (vector_ids?.length ?? 0) > 0 || (type !== 'doc' && type !== 'wiki_doc'))) {
+      if (matched && (!(query ?? '').trim() || vector_ids !== undefined || (type !== 'doc' && type !== 'wiki_doc'))) {
         return { content: [{ type: 'text' as const, text: 'doc_context=matched requires a nonempty query, type=doc or wiki_doc, and no vector_ids' }], isError: true };
       }
 
