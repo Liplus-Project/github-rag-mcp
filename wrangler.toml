@@ -64,10 +64,7 @@ crons = ["0 * * * *", "15 * * * *", "30 * * * *", "45 * * * *"]
 # Required secrets (set via `wrangler secret put <NAME>`):
 # GITHUB_CLIENT_ID      — GitHub App OAuth client ID
 # GITHUB_CLIENT_SECRET   — GitHub App OAuth client secret
-# GITHUB_TOKEN           — GitHub token for API polling (PAT or installation token)
-# DOC_SPARSE_ADMIN_TOKEN — Dedicated bearer secret for sparse plan/apply/stats only;
-#                         provision after reviewed merge via wrangler secret put,
-#                         never place its value in [vars]. Unset/empty fails closed.
+# GITHUB_TOKEN           — GitHub token for API polling and admin authentication (PAT or installation token)
 
 # Environment variables
 [vars]
