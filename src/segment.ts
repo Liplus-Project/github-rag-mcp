@@ -44,7 +44,7 @@ const UNSPACED_SCRIPT_RE =
  */
 let segmenter: Intl.Segmenter | undefined;
 
-function getSegmenter(): Intl.Segmenter {
+export function getSegmenter(): Intl.Segmenter {
   if (segmenter === undefined) {
     segmenter = new Intl.Segmenter("ja", { granularity: "word" });
   }

@@ -384,6 +384,41 @@ export interface FtsFilter {
   state?: "open" | "closed" | "published" | "active";
   milestone?: string;
   pathPrefix?: string;
+  labels?: string[];
+  assignee?: string;
+  since?: string;
+  until?: string;
+}
+
+/** Shared canonical metadata scope; matched retrieval also pushes postfilters before LIMIT. */
+export function ftsScope(filter?: FtsFilter): { sql: string; params: (string | number)[] } {
+  const clauses: string[] = [];
+  const params: (string | number)[] = [];
+  for (const [key, column] of [['repo', 'repo'], ['type', 'type'], ['state', 'state'], ['milestone', 'milestone']] as const) {
+    if (filter?.[key]) { clauses.push(`d.${column} = ?`); params.push(filter[key]!); }
+  }
+  if (filter?.pathPrefix) {
+    const { lower, upper } = pathPrefixRange(filter.pathPrefix);
+    clauses.push('d.doc_path >= ? AND d.doc_path < ?'); params.push(lower, upper);
+  }
+  for (const label of filter?.labels ?? []) {
+    clauses.push(csvContains('labels'));
+    params.push(label);
+  }
+  if (filter?.assignee) {
+    clauses.push(csvContains('assignees'));
+    params.push(filter.assignee);
+  }
+  if (filter?.since) { clauses.push('d.updated_at >= ?'); params.push(filter.since); }
+  if (filter?.until) { clauses.push('d.updated_at < ?'); params.push(filter.until); }
+  return { sql: clauses.length ? ` AND ${clauses.join(' AND ')}` : '', params };
+}
+
+function csvContains(column: 'labels' | 'assignees'): string {
+  return `EXISTS (WITH RECURSIVE parts(value,rest) AS (
+    SELECT '',d.${column} || ',' UNION ALL
+    SELECT substr(rest,1,instr(rest,',')-1),substr(rest,instr(rest,',')+1) FROM parts WHERE rest<>''
+  ) SELECT 1 FROM parts WHERE trim(value)=?)`;
 }
 
 /**
@@ -421,31 +456,7 @@ export async function queryFts(
 
   // Build dynamic WHERE clause for metadata filters. Shared by both branches; only
   // the leading MATCH parameter differs, so it is bound per branch below.
-  const whereClauses: string[] = [];
-  const params: (string | number)[] = [];
-  if (filter?.repo) {
-    whereClauses.push("d.repo = ?");
-    params.push(filter.repo);
-  }
-  if (filter?.type) {
-    whereClauses.push("d.type = ?");
-    params.push(filter.type);
-  }
-  if (filter?.state) {
-    whereClauses.push("d.state = ?");
-    params.push(filter.state);
-  }
-  if (filter?.milestone) {
-    whereClauses.push("d.milestone = ?");
-    params.push(filter.milestone);
-  }
-  if (filter?.pathPrefix) {
-    const { lower, upper } = pathPrefixRange(filter.pathPrefix);
-    whereClauses.push("d.doc_path >= ? AND d.doc_path < ?");
-    params.push(lower, upper);
-  }
-  const whereSql =
-    whereClauses.length > 0 ? ` AND ${whereClauses.join(" AND ")}` : "";
+  const { sql: whereSql, params } = ftsScope(filter);
 
   // UNION ALL arms so each tokenizer contributes hits. The nat arms read the v3 index
   // created by migration 0006 (external content = the segmented `content_fts` column);

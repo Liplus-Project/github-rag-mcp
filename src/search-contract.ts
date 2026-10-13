@@ -1,6 +1,11 @@
 import { z } from "zod";
 export const INCLUDE_CONTENT_MAX_DOCS = 5;
 export const searchInputSchema = z.object({
+        doc_context: z.enum(['prefix', 'matched']).optional().default('prefix').describe(
+          'Document context. Default prefix preserves existing search. matched requires a nonempty query and type=doc or wiki_doc; scan and vector_ids are rejected. ' +
+          'Searches prepared indexed full sources and returns a verified bounded matched_context separately from live include_content, even with rerank=false. ' +
+          'doc_context_coverage reports the filtered indexed population before term matching; total=0 means an empty metadata scope, distinct from no term matches. Coverage is read before the candidate batch and may differ under concurrent updates. ' +
+          'Unprepared tails cannot be searched. Legacy code-only prefix evidence is retained with code_only_prefix fallback when no full natural-language position exists. Failures retain prefix candidates with explicit fallback reasons.'),
         query: z
           .string().max(4096)
           .optional()

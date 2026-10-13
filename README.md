@@ -131,6 +131,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `query` | string (optional) | Natural-language query. Omit or empty = scan mode. |
 | `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search mode reports that as `"repo"` in the response's `filters_unmatched`. Pass it whenever the question is about a known repository — without it, a near-duplicate from another repository can rank first; leave it unset only when the question spans repositories. |
 | `path_prefix` | string | Filter docs by repository-relative directory prefix. Requires `type: "doc"`, a trailing `/`, and at most 64 UTF-8 bytes. |
+| `doc_context` | `prefix` / `matched` | Default `prefix`. Explicit `matched` requires nonempty query and `type: doc` or `wiki_doc`, rejects scan/vector_ids, and searches prepared indexed full sources. Returns bounded verified `matched_context` even with `rerank: false`. Coverage counts the filtered indexed scope before term matching; unprepared tails remain unsearchable. Live `include_content` stays separate. |
 | `state` | `"open"` \| `"closed"` \| `"all"` | Filter by state (default `all`). |
 | `labels` | string[] | Filter by label names (AND). |
 | `milestone` | string | Filter by milestone title. |

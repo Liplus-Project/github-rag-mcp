@@ -131,6 +131,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `query` | string (省略可) | 自然言語クエリ。省略または空文字で scan モード。 |
 | `repo` | string | repository で絞り込み。フルスラッグ (`owner/repo`) の完全一致。短いリポジトリ名は1件もマッチせず、search モードはそれをレスポンスの `filters_unmatched` に `"repo"` として報告します。 |
 | `path_prefix` | string | repository-relative directory prefix で doc を絞り込み。`type: "doc"`、末尾 `/`、UTF-8で64 byte以内が必須。 |
+| `doc_context` | `prefix` / `matched` | 既定 prefix。matched は非空 query と doc/wiki_doc が必須、scan/vector_ids はエラー。準備済み全文を検索し、rerank:false でも検証済みの有界 matched_context を返す。coverage は語一致前の scope を数え、未準備の後半は検索できない。live include_content は別欄。[契約](docs/7-matched-context.ja.md)。 |
 | `state` | `"open"` / `"closed"` / `"all"` | state で絞り込み (既定 `all`)。 |
 | `labels` | string[] | label 名で AND 絞り込み。 |
 | `milestone` | string | milestone title で絞り込み。 |
