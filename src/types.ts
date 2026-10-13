@@ -226,6 +226,10 @@ export interface Env extends OAuthEnv {
   VECTORIZE: Vectorize;
   /** D1 database for full-text search (sparse side of hybrid retrieval, BM25 via FTS5) */
   DB_FTS: D1Database;
+  /** Full doc/wiki sparse ownership; enabled only by the literal "true", default off. */
+  DOC_SPARSE_CONTEXT_ENABLED?: string;
+  /** Dedicated operator bearer secret for full sparse plan/apply/statistics only. */
+  DOC_SPARSE_ADMIN_TOKEN?: string;
   AI: Ai;
   /** GitHub personal access token or installation token for API access (set via `wrangler secret put`) */
   GITHUB_TOKEN: string;

@@ -1,3 +1,4 @@
+import { docSparseEnabled, gitBlobSha } from "./doc-sparse.js";
 /**
  * GitHub webhook receiver — signature verification, IP allowlist, and event routing.
  *
@@ -472,10 +473,11 @@ export async function handlePushEvent(
     try {
       const content = await fetchFileContent(repo, path, env.GITHUB_TOKEN);
 
-      // Use HEAD commit SHA as blob SHA stand-in. The pipeline's
-      // processAndUpsertDoc always embeds (caller decides freshness),
-      // so any unique-ish value works for the record.
-      const headSha = (payload.head_commit as { id: string } | null)?.id ?? "unknown";
+      // Enabled ownership records the actual Git blob version of the fetched text.
+      // Default-off ingest keeps its existing HEAD commit stand-in.
+      const headSha = docSparseEnabled(env)
+        ? await gitBlobSha(content)
+        : (payload.head_commit as { id: string } | null)?.id ?? "unknown";
       const result = await processAndUpsertDoc(env, storeStub, repo, path, content, headSha);
 
       if (result.embedded) embedded++;
