@@ -68,25 +68,20 @@ export async function processAndUpsertDoc(
     ]);
 
     // Mirror into D1 FTS5 sparse index.
-    try {
-      await upsertFtsRow(env.DB_FTS, {
-        vectorId: dvid,
-        repo,
-        type: "doc",
-        state: "active",
-        labels: "",
-        milestone: "",
-        assignees: "",
-        updatedAt: now,
-        docPath: path,
-        content: embeddingInput,
-      });
-    } catch (ftsErr) {
-      console.error(
-        `Failed to upsert FTS5 row for doc ${repo}/${path}:`,
-        ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
-      );
-    }
+    // Not caught here: a failed FTS write must fail the whole upsert so the store
+    // keeps the old version and the next poll retries the page (issue #282).
+    await upsertFtsRow(env.DB_FTS, {
+      vectorId: dvid,
+      repo,
+      type: "doc",
+      state: "active",
+      labels: "",
+      milestone: "",
+      assignees: "",
+      updatedAt: now,
+      docPath: path,
+      content: embeddingInput,
+    });
 
     // Upsert doc record into store
     const record: DocRecord = {
@@ -172,25 +167,20 @@ export async function processAndUpsertWikiDoc(
     // Mirror into D1 FTS5. We reuse the existing `doc_path` column to store
     // the wiki page slug — semantically the same kind of "where did this come
     // from" field, distinguished by the row's `type='wiki_doc'`.
-    try {
-      await upsertFtsRow(env.DB_FTS, {
-        vectorId: wvid,
-        repo,
-        type: "wiki_doc",
-        state: "active",
-        labels: "",
-        milestone: "",
-        assignees: "",
-        updatedAt: now,
-        docPath: pageName,
-        content: embeddingInput,
-      });
-    } catch (ftsErr) {
-      console.error(
-        `Failed to upsert FTS5 row for wiki ${repo}/${pageName}:`,
-        ftsErr instanceof Error ? ftsErr.message : String(ftsErr),
-      );
-    }
+    // Not caught here: a failed FTS write must fail the whole upsert so the store
+    // keeps the old version and the next poll retries the page (issue #282).
+    await upsertFtsRow(env.DB_FTS, {
+      vectorId: wvid,
+      repo,
+      type: "wiki_doc",
+      state: "active",
+      labels: "",
+      milestone: "",
+      assignees: "",
+      updatedAt: now,
+      docPath: pageName,
+      content: embeddingInput,
+    });
 
     // Extract + index graph "mention" edges to other wiki pages in this repo.
     // Additive: the default retrieval path never reads these. Failures here must

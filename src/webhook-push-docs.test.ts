@@ -102,14 +102,18 @@ describe("webhook: push doc delete fan-out", () => {
     const res = await handlePushEvent(pushPayload(["docs/gone.md"]), env, store.stub);
 
     expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
-    expect(store.deletes).toEqual(["docs/gone.md"]);
+    // The store record stays so the cron reap retries the vector (issue #282).
+    expect(store.deletes).toEqual([]);
     // `deleted` counts docs whose three surfaces all came down, so a partial
     // teardown is visible as `removed > deleted` in the delivery-log body.
     // The cron reap counts attempts instead; see the comment on the loop.
     expect(await docsResult(res)).toMatchObject({ removed: 1, deleted: 0 });
   });
 
-  it("keeps tearing down the store record when the FTS5 delete fails", async () => {
+  it("keeps the store record when the FTS5 delete fails", async () => {
+    // Deletion candidates of the cron reap are read from the store. Dropping
+    // the record here stranded the surviving FTS5 row for good, and the deleted
+    // doc kept answering searches (issue #282).
     const store = makeDocStore();
     const { env, vectorDeletes } = makeDocEnv();
     deleteFtsRowMock.mockRejectedValue(new Error("d1 down"));
@@ -117,7 +121,7 @@ describe("webhook: push doc delete fan-out", () => {
     const res = await handlePushEvent(pushPayload(["docs/gone.md"]), env, store.stub);
 
     expect(vectorDeletes).toHaveLength(1);
-    expect(store.deletes).toEqual(["docs/gone.md"]);
+    expect(store.deletes).toEqual([]);
     expect(await docsResult(res)).toMatchObject({ removed: 1, deleted: 0 });
   });
 
@@ -154,7 +158,7 @@ describe("webhook: push doc delete fan-out", () => {
       store.stub,
     );
 
-    expect(store.deletes).toEqual(["docs/a.md", "docs/b.md"]);
+    expect(store.deletes).toEqual(["docs/b.md"]);
     expect(vectorDeletes).toEqual([await docVectorId(REPO, "docs/b.md")]);
     expect(await docsResult(res)).toMatchObject({ removed: 2, deleted: 1 });
   });

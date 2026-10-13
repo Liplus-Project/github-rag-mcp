@@ -191,11 +191,9 @@ describe("poller: pollDocs delete fan-out", () => {
     expect(store.records.has("docs/keep.md")).toBe(true);
   });
 
-  it("keeps tearing down the later surfaces when Vectorize fails", async () => {
-    // The surfaces are torn down independently. Pre-fix one outer try wrapped
-    // the whole item, so a Vectorize failure skipped the store DELETE and left
-    // the row behind — while the FTS5 row, guarded by its own inner try, was
-    // already gone. The D1 rows are the ones users actually retrieve.
+  it("keeps tearing down the FTS5 row when Vectorize fails", async () => {
+    // The surfaces are torn down independently: a Vectorize failure must not
+    // leave the FTS5 row, the one users actually retrieve, behind.
     stubTree(["docs/keep.md"]);
     const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")]);
     const { env } = makeDocEnv();
@@ -206,19 +204,54 @@ describe("poller: pollDocs delete fan-out", () => {
     await pollDocs(REPO, env, store.stub);
 
     expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
-    expect(store.deletes).toEqual(["docs/gone.md"]);
   });
 
-  it("keeps tearing down the store record when the FTS5 delete fails", async () => {
-    stubTree(["docs/keep.md"]);
-    const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")]);
-    const { env, vectorDeletes } = makeDocEnv();
-    deleteFtsRowMock.mockRejectedValue(new Error("d1 down"));
+  it("keeps the store record when another surface failed to delete", async () => {
+    // Deletion candidates are read from the store. Dropping the record while the
+    // FTS5 row survived stranded that row for good, and the deleted doc kept
+    // answering searches (issue #282).
+    for (const fail of ["vector", "fts"] as const) {
+      stubTree(["docs/keep.md"]);
+      const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")]);
+      const { env } = makeDocEnv();
+      if (fail === "vector") {
+        (env.VECTORIZE.deleteByIds as ReturnType<typeof vi.fn>).mockRejectedValue(
+          new Error("vectorize down"),
+        );
+      } else {
+        deleteFtsRowMock.mockRejectedValueOnce(new Error("d1 down"));
+      }
 
+      await pollDocs(REPO, env, store.stub);
+
+      expect(store.deletes).toEqual([]);
+      expect(store.records.has("docs/gone.md")).toBe(true);
+    }
+  });
+
+  it("retries a half-deleted doc on the next run until every surface is gone", async () => {
+    const PRIOR_ETAG = 'W/"tree-prior"';
+    const store = makeDocStore([stored("docs/keep.md"), stored("docs/gone.md")], PRIOR_ETAG);
+    const { env, vectorDeletes } = makeDocEnv();
+    deleteFtsRowMock.mockRejectedValueOnce(new Error("d1 down"));
+
+    stubTree(["docs/keep.md"]);
     await pollDocs(REPO, env, store.stub);
 
-    expect(vectorDeletes).toHaveLength(1);
+    // The tree ETag is held, or the next run would answer 304 and never reach
+    // the reap at all.
+    expect(store.etag()).toBe(PRIOR_ETAG);
+
+    const second = stubTree(["docs/keep.md"]);
+    await pollDocs(REPO, env, store.stub);
+
+    const goneId = await docVectorId(REPO, "docs/gone.md");
+    expect(second.conditionalHits).toEqual([PRIOR_ETAG]);
+    expect(deleteFtsRowMock).toHaveBeenCalledTimes(2);
+    expect(deleteFtsRowMock.mock.calls[1][1]).toBe(goneId);
+    expect(vectorDeletes).toEqual([goneId, goneId]);
     expect(store.deletes).toEqual(["docs/gone.md"]);
+    expect(store.etag()).toBe('W/"tree-1"');
   });
 
   it("leaves the reap alone when nothing was deleted", async () => {
