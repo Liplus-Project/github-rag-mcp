@@ -1,3 +1,5 @@
+import { docSparseEnabled } from "./doc-sparse.js";
+import { fetchDocBlob } from "./backfill-doc-sparse.js";
 /**
  * Cron Poller — scheduled handler for GitHub issue/PR polling and embedding pipeline.
  *
@@ -1141,7 +1143,9 @@ export async function pollDocs(
     try {
       // Fetch file content
       fetchesIssued++;
-      const content = await fetchFileContent(repo, entry.path, env.GITHUB_TOKEN);
+      const content = docSparseEnabled(env)
+        ? await fetchDocBlob(repo, entry.sha, env.GITHUB_TOKEN)
+        : await fetchFileContent(repo, entry.path, env.GITHUB_TOKEN);
 
       const result = await processAndUpsertDoc(env, storeStub, repo, entry.path, content, entry.sha);
 

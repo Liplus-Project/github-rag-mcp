@@ -683,3 +683,8 @@ source の `docs/_Sidebar.md` は既存 Feedback Memory EN/JA ページを参照
 ### Offline document-tail comparison (#279)
 
 固定公開文書の後半発見を検討する opt-in sparse-only 実験は [Document Tail Replay](5-document-tail-replay.ja.md) の契約に従う。prefix8000 / fullbody / nonoverlap8000 の比較、入力・source hash、named target と exact literal source の別採点、静的rerank予算、節長分布を記録する。既定の検索・embedding・reranker・live索引は変更しない。
+
+
+### Doc/wiki 独立全文 sparse source
+
+#284 は既定 off の保存・operator 基盤を追加する。[全文 sparse source 契約](6-full-sparse-sources.ja.md)に従い prefix corpus、既定検索、graph、vector 数を維持する。matched 検索は #281 の別作業。

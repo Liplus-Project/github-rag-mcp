@@ -298,3 +298,6 @@ wrangler.toml
 
 - [Liplus-Project/github-webhook-mcp](https://github.com/Liplus-Project/github-webhook-mcp)
 - [Liplus-Project/liplus-language](https://github.com/Liplus-Project/liplus-language)
+
+
+Doc/wiki full sparse source preparation is a default-off operator foundation, independent of normal search. See the [storage contract and bounded plan/apply procedure](docs/6-full-sparse-sources.ja.md). Migration 0009 precedes operator preparation and enable; default-off ingest/search remains usable without it.

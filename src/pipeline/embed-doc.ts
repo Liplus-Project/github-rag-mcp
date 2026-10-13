@@ -7,8 +7,9 @@
  * column reuse pattern.
  */
 
+import { docSparseEnabled, prepareSparseSource, sparseSourceStatement } from "../doc-sparse.js";
 import type { Env, DocRecord, WikiDocRecord } from "../types.js";
-import { upsertFtsRow } from "../fts.js";
+import { upsertFtsRow, prepareFtsRow, type FtsUpsertRow } from "../fts.js";
 import { indexWikiEdges } from "../graph.js";
 import { prepareEmbeddingInput, sha256Hex } from "./hash.js";
 import { generateEmbedding } from "./embedding.js";
@@ -70,7 +71,7 @@ export async function processAndUpsertDoc(
     // Mirror into D1 FTS5 sparse index.
     // Not caught here: a failed FTS write must fail the whole upsert so the store
     // keeps the old version and the next poll retries the page (issue #282).
-    await upsertFtsRow(env.DB_FTS, {
+    await writeDocFts(env, {
       vectorId: dvid,
       repo,
       type: "doc",
@@ -81,7 +82,8 @@ export async function processAndUpsertDoc(
       updatedAt: now,
       docPath: path,
       content: embeddingInput,
-    });
+      sourceVersion: blobSha,
+    }, path, content);
 
     // Upsert doc record into store
     const record: DocRecord = {
@@ -138,6 +140,7 @@ export async function processAndUpsertWikiDoc(
   const now = new Date().toISOString();
 
   try {
+    const contentHash = await sha256Hex(content);
     // Generate embedding (use page name as title surrogate, content as body)
     const embeddingInput = prepareEmbeddingInput(pageName, content);
     const embedding = await generateEmbedding(env.AI, embeddingInput);
@@ -169,7 +172,7 @@ export async function processAndUpsertWikiDoc(
     // from" field, distinguished by the row's `type='wiki_doc'`.
     // Not caught here: a failed FTS write must fail the whole upsert so the store
     // keeps the old version and the next poll retries the page (issue #282).
-    await upsertFtsRow(env.DB_FTS, {
+    await writeDocFts(env, {
       vectorId: wvid,
       repo,
       type: "wiki_doc",
@@ -180,7 +183,8 @@ export async function processAndUpsertWikiDoc(
       updatedAt: now,
       docPath: pageName,
       content: embeddingInput,
-    });
+      sourceVersion: contentHash,
+    }, pageName, content);
 
     // Extract + index graph "mention" edges to other wiki pages in this repo.
     // Additive: the default retrieval path never reads these. Failures here must
@@ -194,7 +198,6 @@ export async function processAndUpsertWikiDoc(
       );
     }
 
-    const contentHash = await sha256Hex(content);
     const record: WikiDocRecord = {
       repo,
       pageName,
@@ -219,4 +222,22 @@ export async function processAndUpsertWikiDoc(
     );
     return { embedded: false, skippedUnchanged: false, metadataUpdated: false, failed: true };
   }
+}
+
+async function writeDocFts(env: Env, row: FtsUpsertRow, path: string, body: string): Promise<void> {
+  if (!docSparseEnabled(env)) {
+    // Preserve the pre-0009 SQL shape as well as the default-off request count.
+    await upsertFtsRow(env.DB_FTS, { ...row, sourceVersion: undefined });
+    return;
+  }
+  const indexedAt = new Date().toISOString();
+  const source = await prepareSparseSource(row.vectorId, row.type as 'doc' | 'wiki_doc', path, body, row.sourceVersion!, indexedAt);
+  const result = await env.DB_FTS.batch([
+    prepareFtsRow(env.DB_FTS, row, indexedAt),
+    sparseSourceStatement(env.DB_FTS, source, {
+      vector_id: row.vectorId, repo: row.repo, type: source.type, doc_path: path,
+      source_version: row.sourceVersion!, content: row.content, updated_at: row.updatedAt, indexed_at: indexedAt,
+    }),
+  ]);
+  if (!result[1]?.results?.length) throw new Error('Full sparse owner write did not match prefix');
 }

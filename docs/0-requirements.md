@@ -688,3 +688,8 @@ The source `docs/_Sidebar.md` must link the existing Feedback Memory EN/JA pages
 ### Offline document-tail comparison (#279)
 
 固定公開文書の後半発見を検討する opt-in sparse-only 実験は [Document Tail Replay](5-document-tail-replay.ja.md) の契約に従う。prefix8000 / fullbody / nonoverlap8000 の比較、入力・source hash、named target と exact literal source の別採点、静的rerank予算、節長分布を記録する。既定の検索・embedding・reranker・live索引は変更しない。
+
+
+### Independent full sparse doc/wiki sources
+
+Issue #284 adds a default-off storage/operator foundation; its contract is [Full sparse sources](6-full-sparse-sources.ja.md). It preserves the prefix corpus, default retrieval, graph and vector count. Matched retrieval remains #281.

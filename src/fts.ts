@@ -64,6 +64,7 @@ export interface FtsUpsertRow {
   commitAuthor?: string;
   commentId?: number;
   reviewId?: number;
+  sourceVersion?: string; // doc blob SHA / wiki body SHA-256; never queried by default retrieval
   content: string;     // tokenizable text (title+body or commit msg + path + patch)
 }
 
@@ -114,16 +115,21 @@ export async function upsertFtsRow(
   db: D1Database,
   row: FtsUpsertRow,
 ): Promise<void> {
-  const tokenizerKind: TokenizerKind = tokenizerKindForType(row.type);
-  const now = new Date().toISOString();
+  await prepareFtsRow(db, row).run();
+}
 
-  await db
+export function prepareFtsRow(db: D1Database, row: FtsUpsertRow, now = new Date().toISOString()): D1PreparedStatement {
+  const tokenizerKind: TokenizerKind = tokenizerKindForType(row.type);
+  const versionColumn = row.sourceVersion === undefined ? "" : ", source_version";
+  const versionValue = row.sourceVersion === undefined ? "" : ", ?";
+  const versionUpdate = row.sourceVersion === undefined ? "" : ", source_version = excluded.source_version";
+  return db
     .prepare(
       `INSERT INTO search_docs (
          vector_id, repo, type, state, labels, milestone, assignees, updated_at,
          number, tag_name, doc_path, commit_sha, file_path, file_status,
-         commit_date, commit_author, comment_id, review_id, tokenizer_kind, content, content_fts, indexed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         commit_date, commit_author, comment_id, review_id, tokenizer_kind, content, content_fts, indexed_at${versionColumn}
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${versionValue})
        ON CONFLICT (vector_id) DO UPDATE SET
          repo            = excluded.repo,
          type            = excluded.type,
@@ -145,7 +151,7 @@ export async function upsertFtsRow(
          tokenizer_kind  = excluded.tokenizer_kind,
          content         = excluded.content,
          content_fts     = excluded.content_fts,
-         indexed_at      = excluded.indexed_at`,
+         indexed_at      = excluded.indexed_at${versionUpdate}`,
     )
     .bind(
       row.vectorId,
@@ -170,8 +176,8 @@ export async function upsertFtsRow(
       row.content,
       ftsIndexText(row.content, tokenizerKind),
       now,
-    )
-    .run();
+      ...(row.sourceVersion === undefined ? [] : [row.sourceVersion]),
+    );
 }
 
 /** Outcome of one `backfillNatSegments` batch. */

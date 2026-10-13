@@ -31,6 +31,7 @@
  */
 
 import { backfillSourceIdentities } from "./backfill-source-identities.js";
+import { handleDocSparseAdmin } from "./backfill-doc-sparse.js";
 import type { Env } from "./types.js";
 import {
   createOAuthProvider,
@@ -113,6 +114,10 @@ function getMcpHandler(env: Env): StatelessMcpHandler {
 const innerHandler: ExportedHandler<Env> = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (request.method === "POST" && ["/admin/backfill-doc-sparse", "/admin/doc-sparse-stats"].includes(url.pathname)) {
+      return handleDocSparseAdmin(request, env);
+    }
 
     // -- GitHub webhook receiver (IP allowlist + signature verification) --
     if (request.method === "POST" && url.pathname === "/webhooks/github") {

@@ -26,6 +26,7 @@ export default defineConfig(async () => {
       d1Databases: {
         DB_FTS: "test-fts",
         DB_FTS_MIGRATION: "test-fts-migration",
+        DB_FTS_DOC_LEGACY: "test-fts-doc-legacy",
       },
       durableObjects: {
         ISSUE_STORE: { className: "IssueStore", useSQLite: true },
