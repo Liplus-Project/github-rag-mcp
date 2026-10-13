@@ -3,6 +3,15 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
+      "doc_context": {
+        "default": "prefix",
+        "description": "Document context. Default prefix preserves existing search. matched requires a nonempty query and type=doc or wiki_doc; scan and vector_ids are rejected. Searches prepared indexed full sources and returns a verified bounded matched_context separately from live include_content, even with rerank=false. doc_context_coverage reports the filtered indexed population before term matching; unprepared tails cannot be searched. Failures retain prefix candidates with explicit fallback reasons.",
+        "type": "string",
+        "enum": [
+          "prefix",
+          "matched"
+        ]
+      },
       "query": {
         "description": "Natural language search query. When omitted or empty, the tool switches to metadata-only scan mode and results are ordered by the timestamp implied by sort (default sort=\"updated_desc\" for empty query).",
         "type": "string",

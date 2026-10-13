@@ -1,5 +1,7 @@
 # Doc/wiki 全文 sparse source 基盤
 
+明示的な `doc_context: matched` 読取りは [一致コンテキスト](7-matched-context.ja.md) が所有する。保存フラグ false でも準備済み source を読める。省略/prefix の既定検索は以下の旧経路を維持する。
+
 Issue #284 の保存・運用契約。通常検索への接続は #281 の別作業。
 
 `DOC_SPARSE_CONTEXT_ENABLED` は省略時 false。false では ingest は全文の生成・取得・追加 D1 呼出しを行わない。8000 UTF-16 unit の prefix、通常 nat FTS corpus/IDF、1 資料 1 vector、fetch、graph は維持する。既定 off の ingest と検索は migration 0009 の新 schema にアクセスしない。migration 0009 は operator 経路と enable より先に適用する。検索だけの旧経路は全文テーブルを読まない。

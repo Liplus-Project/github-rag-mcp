@@ -1,6 +1,10 @@
 import { z } from "zod";
 export const INCLUDE_CONTENT_MAX_DOCS = 5;
 export const searchInputSchema = z.object({
+        doc_context: z.enum(['prefix', 'matched']).optional().default('prefix').describe(
+          'Document context. Default prefix preserves existing search. matched requires a nonempty query and type=doc or wiki_doc; scan and vector_ids are rejected. ' +
+          'Searches prepared indexed full sources and returns a verified bounded matched_context separately from live include_content, even with rerank=false. ' +
+          'doc_context_coverage reports the filtered indexed population before term matching; unprepared tails cannot be searched. Failures retain prefix candidates with explicit fallback reasons.'),
         query: z
           .string().max(4096)
           .optional()

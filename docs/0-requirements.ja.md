@@ -690,3 +690,8 @@ source の `docs/_Sidebar.md` は既存 Feedback Memory EN/JA ページを参照
 #284 は既定 off の保存・operator 基盤を追加する。[全文 sparse source 契約](6-full-sparse-sources.ja.md)に従い prefix corpus、既定検索、graph、vector 数を維持する。matched 検索は #281 の別作業。
 
 sparse operator の 2 経路は既存 Worker secret と `GITHUB_TOKEN` ヘッダの完全一致で認証し、secret が未設定・空なら401。専用 token と Authorization bearer は受け入れない。GitHub source 取得は従来の `GITHUB_TOKEN` を使う。既定 off の更新を含め、prefix revision CAS により版修復と owner 保存を同一 D1 batch に結ぶ。
+# 明示的な文書一致コンテキスト (#281)
+
+`doc_context: matched` は非空 query と doc/wiki_doc に限定する。省略および prefix は従来契約を維持する。検索は search_docs の共通 scope 内で、有効な full owner の全文 FTS と、それ以外の prefix FTS を LIMIT 前に分割する。strict を relaxed より先にし、各母集団内の順位を同じ RRF 定数で合成する。同一 vector は一票だけとする。coverage は語との一致前の対象全体を数え、未準備の後半は検索できない。全文読取り失敗時には unavailable を明示し、準備済みを除外しない従来 prefix 候補へ戻る。
+
+抜粋は postfilter と base 本文供給、非空判定後の最大50件に限定する。狭い snippet/版/bytes を先に読み、keyword 順位と vector_id 順で raw 合計1MiB、資料 raw256KiB/segmented512KiB/owner1MiB を割り当てる。raw は最大5件ずつ取得し、位置 map は1件ずつ検証する。原文 path+2改行+body の連続1400 UTF16 units 以下を、版・hash・保存 segmentation 完全一致・一意 fragment・surrogate 境界検証後にモデルと matched_context の両方へ渡す。不成立は資料を残して prefix と理由を返す。indexed 抜粋と live include_content は別欄とする。予算は工学的初期値であり Cloud CPU/heap 限界の証明ではない。取り込みフラグ、保存/backfill、graph と frozen corpus は変更しない。

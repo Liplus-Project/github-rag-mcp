@@ -124,6 +124,7 @@ describe("worker <-> bridge stateless contract", () => {
     expect(Object.keys(props).sort()).toEqual(
       [
         "assignee",
+        "doc_context",
         "fusion",
         "graph_expand",
         "graph_hops",

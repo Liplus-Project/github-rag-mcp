@@ -61,6 +61,7 @@ import {
 } from "./fetch.js";
 import { entityKey, groupByEntity, markRecency } from "./aggregate.js";
 import { pathPrefixRange, validateDocPathPrefix } from "./path-prefix.js";
+import { queryMatchedFts, resolveMatchedContexts, unavailableCoverage, type MatchedSearch, type ContextOutcome } from './matched-context.js';
 
 const GITHUB_API = "https://api.github.com";
 const USER_AGENT = "github-rag-mcp/0.1.0";
@@ -367,6 +368,7 @@ export function createRagMcpServer(env: Env): McpServer {
       top_k,
       fusion,
       rerank,
+      doc_context,
       sort,
       since,
       until,
@@ -376,8 +378,12 @@ export function createRagMcpServer(env: Env): McpServer {
       graph_hops,
       use_memory,
     }) => {
-      const memoryRequest = { query, repo, path_prefix, state, labels, milestone, assignee, type, top_k, fusion, rerank, sort, since, until, include_content, vector_ids, graph_expand, graph_hops, use_memory };
+      const memoryRequest = { query, repo, path_prefix, state, labels, milestone, assignee, type, top_k, fusion, rerank, ...(doc_context === 'matched' ? { doc_context } : {}), sort, since, until, include_content, vector_ids, graph_expand, graph_hops, use_memory };
       const remember = (payload: unknown) => rememberResult(env, payload, memoryRequest);
+      const matched = doc_context === 'matched';
+      if (matched && (!(query ?? '').trim() || (vector_ids?.length ?? 0) > 0 || (type !== 'doc' && type !== 'wiki_doc'))) {
+        return { content: [{ type: 'text' as const, text: 'doc_context=matched requires a nonempty query, type=doc or wiki_doc, and no vector_ids' }], isError: true };
+      }
 
       // ── Fetch mode (vector_ids): stored content for named rows ───
       // First branch on purpose: a fetch call carries no query, so leaving it
@@ -540,8 +546,9 @@ export function createRagMcpServer(env: Env): McpServer {
 
       // ── Sparse path: D1 FTS5 BM25 query ──────────────────────
       let retrievalIncomplete = false;
+      let matchedSearch: MatchedSearch | undefined;
       const sparsePromise: Promise<FtsHit[]> =
-        fusionMode === "dense_only"
+        fusionMode === "dense_only" && !matched
           ? Promise.resolve([])
           : (async () => {
               const ftsFilter: FtsFilter = {};
@@ -554,7 +561,12 @@ export function createRagMcpServer(env: Env): McpServer {
               }
               if (milestone) ftsFilter.milestone = milestone;
               if (path_prefix) ftsFilter.pathPrefix = path_prefix;
+              if (matched) Object.assign(ftsFilter, { labels, assignee, since, until });
               try {
+                if (matched) {
+                  matchedSearch = await queryMatchedFts(env.DB_FTS, trimmedQuery, internalTopK, ftsFilter, fusionMode === 'dense_only');
+                  return matchedSearch.hits;
+                }
                 return await queryFts(env.DB_FTS, trimmedQuery, internalTopK, ftsFilter);
               } catch (err) {
                 retrievalIncomplete = true;
@@ -731,6 +743,24 @@ export function createRagMcpServer(env: Env): McpServer {
       // shape it returns null, in which case we keep the post-filter order.
       const rerankScores = new Map<string, number>();
       let rerankApplied = false;
+      const matchedBase = new Map<string, string>();
+      let matchedOutcomes = new Map<string, ContextOutcome>();
+      if (matched) {
+        filtered = [...filtered].sort((a,b)=>b.fusedScore-a.fusedScore || (a.vectorId<b.vectorId?-1:a.vectorId>b.vectorId?1:0));
+        const missing = filtered.filter(f => !(payload.get(f.vectorId)?.ftsRow?.content ?? '').trim()).map(f => f.vectorId);
+        try {
+          for (const [id, row] of await getDocsByVectorIds(env.DB_FTS, missing)) matchedBase.set(id, String(row.content ?? ''));
+        } catch { /* Preserve candidates when base content is unavailable. */ }
+        for (const f of filtered) {
+          const content=payload.get(f.vectorId)?.ftsRow?.content ?? '';
+          if(content.trim()) matchedBase.set(f.vectorId,content);
+        }
+        const eligible=filtered.filter(f => (matchedBase.get(f.vectorId) ?? '').trim()).slice(0,RERANK_MAX_CANDIDATES);
+        matchedOutcomes=await resolveMatchedContexts(env.DB_FTS, eligible.map(f=>f.vectorId), matchedSearch?.sources ?? new Map(),
+          !matchedSearch || matchedSearch.coverage.status === 'unavailable');
+        for(const f of filtered) if(!matchedOutcomes.has(f.vectorId)) matchedOutcomes.set(f.vectorId,
+          {matched_context_fallback:(matchedBase.get(f.vectorId) ?? '').trim() ? 'candidate_limit' : 'missing_base_content'});
+      }
       if (
         rerankEnabled &&
         effectiveSort === "relevance" &&
@@ -743,7 +773,7 @@ export function createRagMcpServer(env: Env): McpServer {
         // the filter `rerankCandidates` applies, so a whitespace-only FTS row
         // is treated as missing here rather than silently dropped there.
         const missingContentIds = filtered
-          .filter((f) => (payload.get(f.vectorId)?.ftsRow?.content ?? "").trim() === "")
+          .filter((f) => !matched && (payload.get(f.vectorId)?.ftsRow?.content ?? "").trim() === "")
           .map((f) => f.vectorId);
         let backfilled: Map<string, string> = new Map();
         if (missingContentIds.length > 0) {
@@ -765,7 +795,7 @@ export function createRagMcpServer(env: Env): McpServer {
           // dense-only hits (and for whitespace-only sparse rows).
           const content =
             sparseContent.trim() !== "" ? sparseContent : backfilled.get(f.vectorId) ?? "";
-          return { id: f.vectorId, content };
+          return { id: f.vectorId, content: matched ? matchedOutcomes.get(f.vectorId)?.matched_context?.text ?? matchedBase.get(f.vectorId) ?? '' : content };
         });
 
         const reranked = await rerankCandidates(
@@ -988,6 +1018,7 @@ export function createRagMcpServer(env: Env): McpServer {
           // otherwise. `rerank_applied: true` guarantees at least one row in
           // the response carries a non-null score.
           rerank_score: rerankScores.get(f.vectorId) ?? null,
+          ...(matched ? matchedOutcomes.get(f.vectorId) : {}),
           url: buildResultUrl(r),
           updated_at: r.updatedAt,
           repo: r.repo,
@@ -1167,6 +1198,7 @@ export function createRagMcpServer(env: Env): McpServer {
                 sort: effectiveSort,
                 dense_candidates: denseResult.hits.length,
                 sparse_candidates: sparseHits.length,
+                ...(matched ? { doc_context_coverage: matchedSearch?.coverage ?? unavailableCoverage() } : {}),
                 // Filters that matched no row in the index at all (issue #219).
                 // Always present; `[]` means every applied filter matched
                 // something, so `count: 0` is a genuine zero-hit result. A
