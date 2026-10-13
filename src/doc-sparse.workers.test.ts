@@ -287,38 +287,43 @@ describe('bounded operator backfill', () => {
 
   it('requires operator authentication and rejects invalid/broad scopes', async () => {
     const live = { ...runtime(), GITHUB_TOKEN: 'test-github-fetch', DOC_SPARSE_ADMIN_TOKEN: 'test-sparse-operator' } as Env;
-    const endpoint = 'http://test/admin/backfill-doc-sparse?repo=sparse/auth&type=doc';
-    expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST' }), live)).status).toBe(401);
-    const invalidHeaders: Record<string, string>[] = [
-      { GITHUB_TOKEN: 'test-github-fetch' },
-      { Authorization: 'Bearer test-github-fetch' },
-      { Authorization: 'Bearer wrong' },
-      { Authorization: 'test-sparse-operator' },
-      { Authorization: 'bearer test-sparse-operator' },
-    ];
-    for (const headers of invalidHeaders) {
-      expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers }), live)).status).toBe(401);
-    }
-    for (const token of [undefined, '', ' ']) {
-      expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' } }),
-        { ...live, DOC_SPARSE_ADMIN_TOKEN: token })).status).toBe(401);
+    const endpoints = ['backfill-doc-sparse', 'doc-sparse-stats'].map(path => `http://test/admin/${path}?repo=sparse/auth&type=doc`);
+    const endpoint = endpoints[0];
+    for (const endpoint of endpoints) {
+      expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST' }), live)).status).toBe(401);
+      const invalidHeaders: Record<string, string>[] = [
+        { GITHUB_TOKEN: 'wrong' },
+        { Authorization: 'Bearer test-github-fetch' },
+        { Authorization: 'Bearer wrong' },
+        { Authorization: 'Bearer test-sparse-operator' },
+        { GITHUB_TOKEN: 'test-sparse-operator' },
+        { Authorization: 'test-sparse-operator' },
+        { Authorization: 'bearer test-sparse-operator' },
+      ];
+      for (const headers of invalidHeaders) {
+        expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers }), live)).status).toBe(401);
+      }
+      for (const token of [undefined, '', ' ']) {
+        expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' } }),
+          { ...live, GITHUB_TOKEN: token } as unknown as Env)).status).toBe(401);
+      }
     }
     for (const suffix of ['&limit=11', '&max_bytes=1048577', '&cursor=-1', '&apply=yes']) {
-      expect((await handleDocSparseAdmin(new Request(endpoint + suffix, { method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' } }), live)).status).toBe(400);
+      expect((await handleDocSparseAdmin(new Request(endpoint + suffix, { method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' } }), live)).status).toBe(400);
     }
-    const planned = await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' } }), live);
+    const planned = await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' } }), live);
     expect(planned.status).toBe(200); expect(await planned.json()).toMatchObject({ mode: 'plan', scanned: 0 });
     const stats = await handleDocSparseAdmin(new Request('http://test/admin/doc-sparse-stats?repo=sparse/auth&type=doc', {
-      method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' },
+      method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' },
     }), live);
     expect(stats.status).toBe(200);
     expect((await handleDocSparseAdmin(new Request('http://test/admin/doc-sparse-stats?repo=sparse/auth&type=doc', {
-      method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' },
+      method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' },
     }), live)).status).toBe(401);
     const seeded = await seed('sparse/auth-fetch', 'sparse-auth-fetch', 'auth source');
     mockBlob('auth source', seeded.record.blobSha);
     const applied = await handleDocSparseAdmin(new Request('http://test/admin/backfill-doc-sparse?repo=sparse/auth-fetch&type=doc&apply=true', {
-      method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' },
+      method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' },
     }), live);
     expect(applied.status).toBe(200);
     expect(await applied.json()).toMatchObject({ counts: { success: 1 } });

@@ -302,4 +302,4 @@ wrangler.toml
 
 Doc/wiki full sparse source preparation is a default-off operator foundation, independent of normal search. See the [storage contract and bounded plan/apply procedure](docs/6-full-sparse-sources.ja.md). Migration 0009 precedes operator preparation and enable; default-off ingest/search remains usable without it.
 
-The two new sparse operator endpoints require the dedicated `DOC_SPARSE_ADMIN_TOKEN` secret and `Authorization: Bearer <token>`; they fail closed without it and do not accept GitHub credentials. Provision via `wrangler secret put DOC_SPARSE_ADMIN_TOKEN` after reviewed merge.
+The two sparse operator endpoints require the existing Worker `GITHUB_TOKEN` secret in the `GITHUB_TOKEN` header (exact match). Unset or empty secrets return 401; dedicated tokens and Authorization bearer credentials are rejected. No additional secret provisioning is required.

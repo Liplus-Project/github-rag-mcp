@@ -694,4 +694,4 @@ The source `docs/_Sidebar.md` must link the existing Feedback Memory EN/JA pages
 
 Issue #284 adds a default-off storage/operator foundation; its contract is [Full sparse sources](6-full-sparse-sources.ja.md). It preserves the prefix corpus, default retrieval, graph and vector count. Matched retrieval remains #281.
 
-The new sparse operator endpoints require the dedicated `DOC_SPARSE_ADMIN_TOKEN` bearer secret and fail closed without it; GitHub source fetching retains `GITHUB_TOKEN`. Version repair and owner writes share a D1 batch guarded by the prefix revision, including default-off updates.
+The two sparse operator endpoints require an exact match between the `GITHUB_TOKEN` header and the existing Worker `GITHUB_TOKEN` secret, and return 401 when the secret is unset or empty. Dedicated tokens and Authorization bearer credentials are not accepted; GitHub source fetching retains `GITHUB_TOKEN`. Version repair and owner writes share a D1 batch guarded by the prefix revision, including default-off updates.

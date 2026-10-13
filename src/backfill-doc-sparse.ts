@@ -8,8 +8,8 @@ import {
 
 export const MAX_BACKFILL_BYTES = 1024 * 1024;
 export async function handleDocSparseAdmin(request: Request, env: Env): Promise<Response> {
-  if (!env.DOC_SPARSE_ADMIN_TOKEN?.trim()
-    || request.headers.get('Authorization') !== `Bearer ${env.DOC_SPARSE_ADMIN_TOKEN}`) {
+  if (!env.GITHUB_TOKEN?.trim()
+    || request.headers.get('GITHUB_TOKEN') !== env.GITHUB_TOKEN) {
     return new Response('Unauthorized', { status: 401 });
   }
   const url = new URL(request.url);
