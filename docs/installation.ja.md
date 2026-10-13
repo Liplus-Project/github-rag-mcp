@@ -511,3 +511,5 @@ GitHub App の callback URL が worker 側 URL と完全一致していない。
 ## Doc/wiki 全文 sparse 準備
 
 operator 経路と enable より先に migration 0009 を適用し（既定 off の ingest・検索は新 schema 不要）、準備中は `DOC_SPARSE_CONTEXT_ENABLED="false"` を保つ。認証済み `POST /admin/backfill-doc-sparse?repo=owner/repo&type=doc` は plan が既定。計画と Time Travel bookmark と復旧の影響対象を確認した後（2026-10-13 の full export は FTS/virtual table 未対応で失敗、restore 未実行）だけ `apply=true` を指定する。1 回は最大 10 資料・decoded source 1 MiB、返る `next_cursor` を `cursor` に渡し、競合・error を確認する。wiki は `type=wiki_doc` で別処理。`POST /admin/doc-sparse-stats?repo=owner/repo&type=doc` で索引済み prefix owner の coverage を観察する。[完全な契約](6-full-sparse-sources.ja.md)に予算と rollout 境界を固定している。embedding と検索応答は変わらない。
+
+reviewed merge 後、この 2 経路の呼出しより先に `wrangler secret put DOC_SPARSE_ADMIN_TOKEN` で専用 secret を provision し、`Authorization: Bearer <token>` を送る。未設定・空 secret、`GITHUB_TOKEN` ヘッダ、GitHub bearer credential は認証に使わない。source 取得だけは従来の `GITHUB_TOKEN` を使い、既存 admin 経路は変えない。secret の値を設定ファイルや chat に置かない。

@@ -688,3 +688,5 @@ source の `docs/_Sidebar.md` は既存 Feedback Memory EN/JA ページを参照
 ### Doc/wiki 独立全文 sparse source
 
 #284 は既定 off の保存・operator 基盤を追加する。[全文 sparse source 契約](6-full-sparse-sources.ja.md)に従い prefix corpus、既定検索、graph、vector 数を維持する。matched 検索は #281 の別作業。
+
+新しい sparse operator の 2 経路は専用 `DOC_SPARSE_ADMIN_TOKEN` bearer secret で認証し、未設定・空は fail closed。GitHub source 取得は従来の `GITHUB_TOKEN` を使う。既定 off の更新を含め、prefix revision CAS により版修復と owner 保存を同一 D1 batch に結ぶ。

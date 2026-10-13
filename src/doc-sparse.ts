@@ -65,21 +65,32 @@ export async function prepareSparseSource(
 export interface PrefixSnapshot {
   vector_id: string; repo: string; type: SparseSource['type']; doc_path: string;
   source_version: string; content: string; updated_at: string; indexed_at: string;
+  source_revision?: number;
+}
+
+export function prefixSnapshotGuard(prefix: PrefixSnapshot): { sql: string; params: (string | number)[] } {
+  return {
+    sql: `vector_id=? AND repo=? AND type=? AND doc_path=? AND source_version=?
+      AND content=? AND updated_at=? AND indexed_at=?${prefix.source_revision === undefined ? '' : ' AND source_revision=?'}`,
+    params: [prefix.vector_id, prefix.repo, prefix.type, prefix.doc_path, prefix.source_version,
+      prefix.content, prefix.updated_at, prefix.indexed_at, ...(prefix.source_revision === undefined ? [] : [prefix.source_revision])],
+  };
 }
 
 /** INSERT SELECT is the CAS: a deleted/changed canonical owner cannot accept this snapshot. */
-export function sparseSourceStatement(db: D1Database, source: SparseSource, prefix: PrefixSnapshot): D1PreparedStatement {
+export function sparseSourceStatement(db: D1Database, source: SparseSource, prefix: PrefixSnapshot, requirePriorUpdate = false): D1PreparedStatement {
   if (sourceRowBytes(source) > MAX_ROW_BYTES) throw new Error('Sparse owner metadata exceeds row budget');
+  const guard = prefixSnapshotGuard(prefix);
   return db.prepare(`INSERT INTO doc_sparse_sources (
-    vector_id, source_type, source_version, prefix_indexed_at, index_version,
+    vector_id, source_type, source_version, prefix_indexed_at, index_version, prefix_revision,
     source_hash, body_hash, raw_hash, raw, segmented, raw_bytes, segmented_bytes,
     row_bytes, coverage, reason, observed_at)
-    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM search_docs
-    WHERE vector_id=? AND repo=? AND type=? AND doc_path=? AND source_version=?
-      AND content=? AND updated_at=? AND indexed_at=?
+    SELECT ?,?,?,?,?,source_revision,?,?,?,?,?,?,?,?,?,?,? FROM search_docs
+    WHERE ${guard.sql}${requirePriorUpdate ? ' AND changes()=1' : ''}
     ON CONFLICT(vector_id) DO UPDATE SET
       source_type=excluded.source_type, source_version=excluded.source_version,
       prefix_indexed_at=excluded.prefix_indexed_at, index_version=excluded.index_version,
+      prefix_revision=excluded.prefix_revision,
       source_hash=excluded.source_hash, body_hash=excluded.body_hash, raw_hash=excluded.raw_hash,
       raw=excluded.raw, segmented=excluded.segmented, raw_bytes=excluded.raw_bytes,
       segmented_bytes=excluded.segmented_bytes, row_bytes=excluded.row_bytes,
@@ -88,7 +99,6 @@ export function sparseSourceStatement(db: D1Database, source: SparseSource, pref
       source.vectorId, source.type, source.sourceVersion, source.prefixIndexedAt, source.indexVersion,
       source.sourceHash, source.bodyHash, source.rawHash, source.raw, source.segmented,
       source.rawBytes, source.segmentedBytes, source.rowBytes, source.coverage, source.reason, source.observedAt,
-      prefix.vector_id, prefix.repo, prefix.type, prefix.doc_path, prefix.source_version,
-      prefix.content, prefix.updated_at, prefix.indexed_at,
+      ...guard.params,
     );
 }

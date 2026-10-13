@@ -3,11 +3,15 @@ import { prepareEmbeddingInput, sha256Hex } from './pipeline/hash.js';
 import {
   DOC_SPARSE_INDEX_VERSION, gitBlobSha, prepareSparseSource,
   sparseSourceStatement, utf8Bytes, type PrefixSnapshot,
+  prefixSnapshotGuard,
 } from './doc-sparse.js';
 
 export const MAX_BACKFILL_BYTES = 1024 * 1024;
 export async function handleDocSparseAdmin(request: Request, env: Env): Promise<Response> {
-  if (!env.GITHUB_TOKEN || request.headers.get('GITHUB_TOKEN') !== env.GITHUB_TOKEN) return new Response('Unauthorized', { status: 401 });
+  if (!env.DOC_SPARSE_ADMIN_TOKEN?.trim()
+    || request.headers.get('Authorization') !== `Bearer ${env.DOC_SPARSE_ADMIN_TOKEN}`) {
+    return new Response('Unauthorized', { status: 401 });
+  }
   const url = new URL(request.url);
   const opts: SparseBackfillOptions = {
     repo: url.searchParams.get('repo') ?? '', type: url.searchParams.get('type') as SparseBackfillOptions['type'],
@@ -87,7 +91,7 @@ export async function fetchDocBlob(repo: string, sha: string, token: string, max
   return body;
 }
 
-type SnapshotRow = PrefixSnapshot & { rid: number; prepared_version: string | null; prepared_index: string | null; prepared_at: string | null };
+type SnapshotRow = PrefixSnapshot & { rid: number; source_revision: number; prepared_version: string | null; prepared_index: string | null; prepared_at: string | null; prepared_revision: number | null };
 type StoreRecord = DocRecord | WikiDocRecord;
 async function readStore(store: DurableObjectStub, prefix: PrefixSnapshot): Promise<StoreRecord | null> {
   const path = prefix.type === 'doc' ? 'doc' : 'wiki-doc';
@@ -105,13 +109,15 @@ export async function backfillDocSparse(env: Env, opts: SparseBackfillOptions) {
   const maxBytes = opts.maxBytes ?? MAX_BACKFILL_BYTES;
   const store = env.ISSUE_STORE.get(env.ISSUE_STORE.idFromName('global'));
   const rows = (await env.DB_FTS.prepare(`SELECT d.rowid AS rid, d.vector_id, d.repo, d.type,
-    d.doc_path, d.source_version, d.content, d.updated_at, d.indexed_at,
-    s.source_version AS prepared_version, s.index_version AS prepared_index, s.prefix_indexed_at AS prepared_at
+    d.doc_path, d.source_version, d.source_revision, d.content, d.updated_at, d.indexed_at,
+    s.source_version AS prepared_version, s.index_version AS prepared_index, s.prefix_indexed_at AS prepared_at,
+    s.prefix_revision AS prepared_revision
     FROM search_docs d LEFT JOIN doc_sparse_sources s ON s.vector_id=d.vector_id
     WHERE d.repo=? AND d.type=? AND d.rowid>? ORDER BY d.rowid LIMIT ?`)
     .bind(opts.repo, opts.type, cursor, limit).all<SnapshotRow>()).results ?? [];
   const results: { vector_id: string; source_version: string | null; status: string; reason?: string;
-    coverage?: string; raw_bytes?: number | null; segmented_bytes?: number | null; row_bytes?: number }[] = [];
+    coverage?: string; raw_bytes?: number | null; segmented_bytes?: number | null; row_bytes?: number;
+    prefix_version_repair?: boolean; prefix_source_version?: string }[] = [];
   let bytes = 0; let nextCursor = cursor; let stopped = false; let budgetExhausted = false;
   for (const prefix of rows) {
     let version: string | null = null;
@@ -122,12 +128,12 @@ export async function backfillDocSparse(env: Env, opts: SparseBackfillOptions) {
         nextCursor = prefix.rid; continue;
       }
       version = versionOf(record);
-      if (record.updatedAt !== prefix.updated_at || (prefix.source_version && prefix.source_version !== version)) {
+      if (record.updatedAt !== prefix.updated_at) {
         results.push({ vector_id: prefix.vector_id, source_version: version, status: 'conflict', reason: 'store_prefix_version' });
         nextCursor = prefix.rid; continue;
       }
-      if (!opts.force && prefix.prepared_version === version && prefix.prepared_index === DOC_SPARSE_INDEX_VERSION
-        && prefix.prepared_at === prefix.indexed_at) {
+      if (!opts.force && prefix.source_version === version && prefix.prepared_version === version && prefix.prepared_index === DOC_SPARSE_INDEX_VERSION
+        && prefix.prepared_at === prefix.indexed_at && prefix.prepared_revision === prefix.source_revision) {
         results.push({ vector_id: prefix.vector_id, source_version: version, status: 'unchanged' });
         nextCursor = prefix.rid; continue;
       }
@@ -169,13 +175,28 @@ export async function backfillDocSparse(env: Env, opts: SparseBackfillOptions) {
         nextCursor = prefix.rid; continue;
       }
       if (opts.apply) {
-        const written = await sparseSourceStatement(env.DB_FTS, source, prefix).all();
+        const guard = prefixSnapshotGuard(prefix);
+        const reconcile = prefix.source_version !== version;
+        const written = reconcile
+          ? (await env.DB_FTS.batch([
+            env.DB_FTS.prepare(`UPDATE search_docs SET source_version=? WHERE ${guard.sql} RETURNING vector_id`)
+              .bind(version, ...guard.params),
+            sparseSourceStatement(env.DB_FTS, source, { ...prefix, source_version: version, source_revision: prefix.source_revision + 1 }, true),
+          ]))[1]
+          : await sparseSourceStatement(env.DB_FTS, source, prefix).all();
         if (!written.results?.length) {
+          results.push({ vector_id: prefix.vector_id, source_version: version, status: 'conflict', reason: 'prefix_changed' });
+          nextCursor = prefix.rid; continue;
+        }
+      } else {
+        const guard = prefixSnapshotGuard(prefix);
+        if (!await env.DB_FTS.prepare(`SELECT vector_id FROM search_docs WHERE ${guard.sql}`).bind(...guard.params).first()) {
           results.push({ vector_id: prefix.vector_id, source_version: version, status: 'conflict', reason: 'prefix_changed' });
           nextCursor = prefix.rid; continue;
         }
       }
       results.push({ vector_id: prefix.vector_id, source_version: version,
+        prefix_version_repair: prefix.source_version !== version, prefix_source_version: prefix.source_version,
         status: source.coverage === 'full' ? 'success' : 'out_of_range', reason: source.reason,
         coverage: source.coverage, raw_bytes: source.rawBytes, segmented_bytes: source.segmentedBytes, row_bytes: source.rowBytes });
       nextCursor = prefix.rid;
@@ -199,13 +220,14 @@ export async function docSparseStats(db: D1Database, opts: Pick<SparseBackfillOp
   validate(opts);
   const rows = (await db.prepare(`SELECT
     CASE WHEN s.vector_id IS NULL THEN 'unprepared'
-      WHEN (d.source_version<>'' AND d.source_version<>s.source_version) OR d.indexed_at<>s.prefix_indexed_at THEN 'version_mismatch'
+      WHEN (d.source_version<>'' AND d.source_version<>s.source_version) OR d.indexed_at<>s.prefix_indexed_at
+        OR d.source_revision<>s.prefix_revision THEN 'version_mismatch'
       ELSE s.coverage END AS coverage, s.index_version,
     COUNT(*) AS count, SUM(COALESCE(s.raw_bytes,0)) AS raw_bytes,
     SUM(CASE WHEN s.vector_id IS NOT NULL AND d.source_version='' THEN 1 ELSE 0 END) AS legacy_version_unverified,
     SUM(COALESCE(s.segmented_bytes,0)) AS segmented_bytes, SUM(COALESCE(s.row_bytes,0)) AS row_bytes
     FROM search_docs d LEFT JOIN doc_sparse_sources s ON s.vector_id=d.vector_id
-    WHERE d.repo=? AND d.type=? GROUP BY coverage,s.index_version`)
+    WHERE d.repo=? AND d.type=? GROUP BY 1,2`)
     .bind(opts.repo, opts.type).all()).results ?? [];
   return { repo: opts.repo, type: opts.type, observed_at: new Date().toISOString(), population: 'indexed_prefix_owners',
     source_count: rows.reduce((n, row) => n + Number(row.count), 0), rows };

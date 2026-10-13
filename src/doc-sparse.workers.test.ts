@@ -13,7 +13,7 @@ import { docVectorId, wikiDocVectorId } from './pipeline/vector-id.js';
 beforeAll(async () => { await applyD1Migrations(env.DB_FTS, env.TEST_MIGRATIONS); });
 afterEach(() => vi.unstubAllGlobals());
 const prefix = async (id: string) => (await env.DB_FTS.prepare('SELECT * FROM search_docs WHERE vector_id=?').bind(id).first<PrefixSnapshot>())!;
-const owner = (id: string) => env.DB_FTS.prepare('SELECT * FROM doc_sparse_sources WHERE vector_id=?').bind(id).first<{ coverage: string; source_version: string; raw: string; segmented: string; row_bytes: number }>();
+const owner = (id: string) => env.DB_FTS.prepare('SELECT * FROM doc_sparse_sources WHERE vector_id=?').bind(id).first<{ coverage: string; source_version: string; prefix_revision: number; raw: string; segmented: string; row_bytes: number }>();
 const store = () => env.ISSUE_STORE.get(env.ISSUE_STORE.idFromName('global'));
 const runtime = (enabled = true) => ({ ...env, DOC_SPARSE_CONTEXT_ENABLED: enabled ? 'true' : undefined,
   AI: { run: vi.fn(async () => ({ data: [[0.1, 0.2]] })) }, VECTORIZE: { upsert: vi.fn(async () => undefined) },
@@ -180,6 +180,93 @@ describe('independent full sparse D1 index', () => {
 });
 
 describe('bounded operator backfill', () => {
+  for (const type of ['doc', 'wiki_doc'] as const) it(`reconciles prepared A then default-off B before enable for ${type}`, async () => {
+    const repo = `sparse/reconcile-${type}`;
+    const a = 'prefix '.repeat(1400) + 'tail-a';
+    const b = 'prefix '.repeat(1400) + 'tail-b';
+    const live = runtime(); const disabled = { ...live, DOC_SPARSE_CONTEXT_ENABLED: undefined };
+    const path = type === 'doc' ? 'a.md' : 'Home';
+    const id = type === 'doc' ? await docVectorId(repo, path) : await wikiDocVectorId(repo, path);
+    const version = type === 'doc' ? await gitBlobSha(b) : await sha256Hex(b);
+    if (type === 'doc') {
+      await processAndUpsertDoc(live, store(), repo, path, a, await gitBlobSha(a));
+      await processAndUpsertDoc(disabled, store(), repo, path, b, version);
+      mockBlob(b, version);
+    } else {
+      await processAndUpsertWikiDoc(live, store(), repo, path, 'md', a);
+      await processAndUpsertWikiDoc(disabled, store(), repo, path, 'md', b);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(b)));
+    }
+    expect((await prefix(id)).source_version).not.toBe(version);
+    expect(await owner(id)).toBeNull();
+    vi.mocked(live.AI.run).mockClear(); vi.mocked(live.VECTORIZE.upsert).mockClear();
+    const opts = { repo, type };
+    const before = await prefix(id);
+    expect((await backfillDocSparse(disabled, opts)).results[0]).toMatchObject({ status: 'success', prefix_version_repair: true });
+    expect((await prefix(id)).source_version).not.toBe(version);
+    expect((await backfillDocSparse(disabled, { ...opts, apply: true })).results[0]).toMatchObject({ status: 'success', prefix_version_repair: true });
+    expect((await prefix(id)).source_version).toBe(version);
+    expect((await prefix(id)).source_revision).toBe(before.source_revision! + 1);
+    expect((await owner(id))?.source_version).toBe(version);
+    expect((await owner(id))?.prefix_revision).toBe(before.source_revision! + 1);
+    expect((await backfillDocSparse(disabled, { ...opts, apply: true })).results[0].status).toBe('unchanged');
+    expect((await docSparseStats(env.DB_FTS, opts)).rows[0]).toMatchObject({ coverage: 'full', count: 1, legacy_version_unverified: 0 });
+    expect(live.AI.run).not.toHaveBeenCalled(); expect(live.VECTORIZE.upsert).not.toHaveBeenCalled();
+  });
+
+  for (const type of ['doc', 'wiki_doc'] as const) for (const race of ['same-fields-C', 'same-fields-C-plan', 'delete', 'batch-failure']) {
+    it(`refuses/rolls back ${race} during version repair for ${type}`, async () => {
+      const repo = `sparse/repair-${type}-${race}`;
+      const path = type === 'doc' ? 'a.md' : 'Home';
+      const id = type === 'doc' ? await docVectorId(repo, path) : await wikiDocVectorId(repo, path);
+      const a = 'prefix '.repeat(1400) + 'tail-A'; const b = 'prefix '.repeat(1400) + 'tail-B';
+      const version = type === 'doc' ? await gitBlobSha(b) : await sha256Hex(b);
+      const live = runtime(); const disabled = { ...live, DOC_SPARSE_CONTEXT_ENABLED: undefined };
+      if (type === 'doc') {
+        await processAndUpsertDoc(live, store(), repo, path, a, await gitBlobSha(a));
+        await processAndUpsertDoc(disabled, store(), repo, path, b, version);
+      } else {
+        await processAndUpsertWikiDoc(live, store(), repo, path, 'md', a);
+        await processAndUpsertWikiDoc(disabled, store(), repo, path, 'md', b);
+      }
+      const before = await prefix(id);
+      const duringFetch = async () => {
+        if (race === 'delete') await deleteFtsRow(env.DB_FTS, id);
+        if (race.startsWith('same-fields-C')) {
+          // Observe C's prefix write before its DO commit, even when its changed
+          // tail leaves all old text/timestamp/version fields identical.
+          await env.DB_FTS.prepare('UPDATE search_docs SET content=content, updated_at=updated_at, indexed_at=indexed_at WHERE vector_id=?').bind(id).run();
+        }
+      };
+      if (type === 'doc') mockBlob(b, version, duringFetch);
+      else vi.stubGlobal('fetch', vi.fn(async () => { await duringFetch(); return new Response(b); }));
+      let batchResults: D1Result[] = [];
+      const db = { prepare: env.DB_FTS.prepare.bind(env.DB_FTS), batch: async (statements: D1PreparedStatement[]) => {
+        if (race === 'batch-failure') return env.DB_FTS.batch([...statements, env.DB_FTS.prepare('INSERT INTO missing_repair_table VALUES(1)')]);
+        batchResults = await env.DB_FTS.batch(statements); return batchResults;
+      } } as unknown as D1Database;
+      const result = await backfillDocSparse({ ...disabled, DB_FTS: db }, { repo, type, apply: !race.endsWith('-plan') });
+      expect(result.results[0].status).toBe(race === 'batch-failure' ? 'retryable_error' : 'conflict');
+      expect(await owner(id)).toBeNull();
+      if (race === 'delete') expect(await env.DB_FTS.prepare('SELECT vector_id FROM search_docs WHERE vector_id=?').bind(id).first()).toBeNull();
+      else {
+        const after = await prefix(id);
+        expect(after.source_version).toBe(before.source_version);
+        expect(after.content).toBe(before.content); expect(after.indexed_at).toBe(before.indexed_at); expect(after.updated_at).toBe(before.updated_at);
+        expect(after.source_revision).toBe(before.source_revision! + (race.startsWith('same-fields-C') ? 1 : 0));
+      }
+      if (race !== 'batch-failure' && !race.endsWith('-plan')) {
+        expect(batchResults[0].results).toEqual([]); expect(batchResults[1].results).toEqual([]);
+      }
+      await env.DB_FTS.prepare("INSERT INTO doc_sparse_fts_v1(doc_sparse_fts_v1,rank) VALUES('integrity-check',1)").run();
+      if (race === 'batch-failure') {
+        expect(result.next_cursor).toBe(0);
+        expect((await backfillDocSparse(disabled, { repo, type, apply: true })).results[0].status).toBe('success');
+      }
+    });
+  }
+
+
   it('resumes a source deferred by the remaining byte budget rather than skipping it', async () => {
     const first = await seed('sparse/byte-resume', 'sparse-byte-first', 'abcdef', false, 'first.md');
     const second = await seed('sparse/byte-resume', 'sparse-byte-second', 'uvwxyz', false, 'second.md');
@@ -199,14 +286,44 @@ describe('bounded operator backfill', () => {
   });
 
   it('requires operator authentication and rejects invalid/broad scopes', async () => {
-    const live = { ...runtime(), GITHUB_TOKEN: 'test-operator' } as Env;
+    const live = { ...runtime(), GITHUB_TOKEN: 'test-github-fetch', DOC_SPARSE_ADMIN_TOKEN: 'test-sparse-operator' } as Env;
     const endpoint = 'http://test/admin/backfill-doc-sparse?repo=sparse/auth&type=doc';
     expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST' }), live)).status).toBe(401);
-    for (const suffix of ['&limit=11', '&max_bytes=1048577', '&cursor=-1', '&apply=yes']) {
-      expect((await handleDocSparseAdmin(new Request(endpoint + suffix, { method: 'POST', headers: { GITHUB_TOKEN: 'test-operator' } }), live)).status).toBe(400);
+    const invalidHeaders: Record<string, string>[] = [
+      { GITHUB_TOKEN: 'test-github-fetch' },
+      { Authorization: 'Bearer test-github-fetch' },
+      { Authorization: 'Bearer wrong' },
+      { Authorization: 'test-sparse-operator' },
+      { Authorization: 'bearer test-sparse-operator' },
+    ];
+    for (const headers of invalidHeaders) {
+      expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers }), live)).status).toBe(401);
     }
-    const planned = await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { GITHUB_TOKEN: 'test-operator' } }), live);
+    for (const token of [undefined, '', ' ']) {
+      expect((await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' } }),
+        { ...live, DOC_SPARSE_ADMIN_TOKEN: token })).status).toBe(401);
+    }
+    for (const suffix of ['&limit=11', '&max_bytes=1048577', '&cursor=-1', '&apply=yes']) {
+      expect((await handleDocSparseAdmin(new Request(endpoint + suffix, { method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' } }), live)).status).toBe(400);
+    }
+    const planned = await handleDocSparseAdmin(new Request(endpoint, { method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' } }), live);
     expect(planned.status).toBe(200); expect(await planned.json()).toMatchObject({ mode: 'plan', scanned: 0 });
+    const stats = await handleDocSparseAdmin(new Request('http://test/admin/doc-sparse-stats?repo=sparse/auth&type=doc', {
+      method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' },
+    }), live);
+    expect(stats.status).toBe(200);
+    expect((await handleDocSparseAdmin(new Request('http://test/admin/doc-sparse-stats?repo=sparse/auth&type=doc', {
+      method: 'POST', headers: { GITHUB_TOKEN: 'test-github-fetch' },
+    }), live)).status).toBe(401);
+    const seeded = await seed('sparse/auth-fetch', 'sparse-auth-fetch', 'auth source');
+    mockBlob('auth source', seeded.record.blobSha);
+    const applied = await handleDocSparseAdmin(new Request('http://test/admin/backfill-doc-sparse?repo=sparse/auth-fetch&type=doc&apply=true', {
+      method: 'POST', headers: { Authorization: 'Bearer test-sparse-operator' },
+    }), live);
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toMatchObject({ counts: { success: 1 } });
+    const fetchOptions = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    expect((fetchOptions.headers as Record<string, string>).Authorization).toBe('Bearer test-github-fetch');
   });
 
   it('plans without writes, applies a legacy prefix without embedding, and skips a rerun', async () => {
