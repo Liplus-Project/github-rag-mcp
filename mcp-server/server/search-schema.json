@@ -5,7 +5,7 @@
     "properties": {
       "doc_context": {
         "default": "prefix",
-        "description": "Document context. Default prefix preserves existing search. matched requires a nonempty query and type=doc or wiki_doc; scan and vector_ids are rejected. Searches prepared indexed full sources and returns a verified bounded matched_context separately from live include_content, even with rerank=false. doc_context_coverage reports the filtered indexed population before term matching; unprepared tails cannot be searched. Failures retain prefix candidates with explicit fallback reasons.",
+        "description": "Document context. Default prefix preserves existing search. matched requires a nonempty query and type=doc or wiki_doc; scan and vector_ids are rejected. Searches prepared indexed full sources and returns a verified bounded matched_context separately from live include_content, even with rerank=false. doc_context_coverage reports the filtered indexed population before term matching; total=0 means an empty metadata scope, distinct from no term matches. Coverage is read before the candidate batch and may differ under concurrent updates. Unprepared tails cannot be searched. Legacy code-only prefix evidence is retained with code_only_prefix fallback when no full natural-language position exists. Failures retain prefix candidates with explicit fallback reasons.",
         "type": "string",
         "enum": [
           "prefix",

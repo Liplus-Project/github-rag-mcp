@@ -4,6 +4,12 @@
 
 `doc_context_coverage` の total/full/prefix_only/unprepared/out_of_range/stale は query 語との一致前の metadata scope 件数。status は complete/partial/unprepared/unavailable。全文索引読取り失敗時は unavailable とし、準備済みも含む従来 prefix 候補を返す。未準備資料の後半は検索できない。
 
+coverage は候補 batch の直前に別 SELECT で読むため、同時更新時には候補と件数の観測時点が少し異なる。候補の全文/prefix 分割は同一 batch で読み、raw を再読した版は再検証する。
+
+total=0 は metadata scope の対象なし。status=complete は full=total の条件なので、空 scope でも complete になるが全 repo 準備完了の意味ではない。total>0 で結果0件なら対象資料は存在し、語との一致がない状態。件数で区別する。
+
+legacy code/trigram prefix arm は、未準備/準備済み owner のどちらも検索する補助証拠。共通 scope を LIMIT 前に適用し、strict の順位として統合して一資料一票にする。全文 code index は追加しない。全文 nat の位置を得られない code-only prefix hit は `code_only_prefix` と既存本文を返し、matched_context を生成しない。
+
 metadata 正本 search_docs の repo/type/state/milestone/path_prefix/labels/assignee/since/until を共通 SQL で適用する。full owner は版・取得時点・revision・index_version の一致が必要。それ以外を prefix 系統に含める。strict/relaxed 各 tier 内の順位を 1/(60+rank) とし、異なる corpus の BM25 生点数を比較せず、同点は vector_id、同一 vector は一票。全 sparse を internalTopK 最大50へ絞り、既存 dense/sparse 融合へ渡す。
 
 `matched_context.text` は indexed 原文 path+2改行+body の連続 slice。start/end はその UTF16 座標、最大1400 units、source_version と body/source/raw/excerpt hash を伴う。同じ text がモデル入力になる。`include_content` の最新 GitHub 本文とは別欄。graph_results、stored fetch は従来の所有を維持する。

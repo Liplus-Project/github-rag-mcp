@@ -68,7 +68,7 @@ export async function queryMatchedFts(db:D1Database, query:string, topK:number, 
     const scope=ftsScope(filter), text=segmentForFts(query), strict=escapeFtsQuery(text), relaxed=escapeFtsQuery(text,'any');
     const matches=strict===relaxed?[strict]:[strict,relaxed];
     const arms:{tier:number;rows:Row[]}[]=[];
-    // D1 batch reads share a transaction snapshot across both populations and coverage-independent candidates.
+    // Candidate arms share a batch snapshot. Coverage is a separate, earlier SELECT observation.
     const statements=matches.flatMap(match=>[true,false].map(full=>{
       const table=full?'doc_sparse_fts_v1':'search_docs_nat_fts_v3';
       return db.prepare(`SELECT d.*, bm25(${table}) AS score${full ? `,
@@ -80,12 +80,25 @@ export async function queryMatchedFts(db:D1Database, query:string, topK:number, 
         AND ${full?fullOwner:`NOT ${validFullExists}`}
         ORDER BY score ASC,d.vector_id ASC LIMIT ?`).bind(match,...scope.params,topK);
     }));
+    // Legacy code-prefix evidence can exist on either owner population. It supplies
+    // no full-source position and never creates a second vote for an existing vector.
+    const codeArm=statements.length;
+    statements.push(db.prepare(`SELECT d.*,bm25(search_docs_code_fts_v2) AS score
+      FROM search_docs_code_fts_v2 f JOIN search_docs d ON d.rowid=f.rowid
+      WHERE search_docs_code_fts_v2 MATCH ? AND d.type IN ('doc','wiki_doc')${scope.sql}
+      ORDER BY score ASC,d.vector_id ASC LIMIT ?`).bind(escapeFtsQuery(query),...scope.params,topK));
     const results=await db.batch<Row>(statements);
-    results.forEach((r,i)=>{ const rows=r.results ?? []; arms.push({tier:Math.floor(i/2),rows});
+    results.forEach((r,i)=>{ const rows=r.results ?? []; arms.push({tier:i===codeArm?0:Math.floor(i/2),rows});
+      if(i===codeArm) return;
       if(i%2===0) for(const row of rows) if(!sources.has(String(row.vector_id))) sources.set(String(row.vector_id),row);
     });
     const merged=mergeSparseTiers(arms,topK);
-    merged.forEach((row,i)=>{const source=sources.get(String(row.vector_id));if(source) source.keyword_rank=i+1;});
+    const codeIds=new Set((results[codeArm].results ?? []).map(row=>String(row.vector_id)));
+    merged.forEach((row,i)=>{
+      const id=String(row.vector_id);
+      if(!sources.has(id) && codeIds.has(id)) sources.set(id,{position_kind:'code_only_prefix'});
+      const source=sources.get(id);if(source) source.keyword_rank=i+1;
+    });
     return { hits:merged.map(hit), sources, coverage };
   } catch {
     // Include all legacy prefix owners on failure, including prepared ones.
@@ -167,6 +180,7 @@ export async function resolveMatchedContexts(db:D1Database,ids:string[],sources:
   const budgetOrder=[...selected].sort((a,b)=>Number(sources.get(a)?.keyword_rank ?? Infinity)-Number(sources.get(b)?.keyword_rank ?? Infinity) || (a<b?-1:a>b?1:0));
   for(const id of budgetOrder) {
     const s=sources.get(id);
+    if(s?.position_kind==='code_only_prefix') {fallback(id,'code_only_prefix');continue;}
     if(!s) { fallback(id,unavailable?'full_index_unavailable':noPosition.get(id) ?? 'missing_source'); continue; }
     const raw=Number(s.raw_bytes), segmented=Number(s.segmented_bytes), owner=Number(s.row_bytes);
     if(!Number.isSafeInteger(raw)||!Number.isSafeInteger(segmented)||!Number.isSafeInteger(owner)||

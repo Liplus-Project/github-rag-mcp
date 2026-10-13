@@ -58,7 +58,8 @@ describe('matched D1 retrieval and ownership',()=>{
     const r=await queryMatchedFts(env.DB_FTS,'needle alpha',2,filter);
     expect(r.hits.map(h=>h.vectorId)).toEqual(['scope-full','scope-prefix']);
     expect(r.coverage).toEqual({status:'partial',total:3,full:1,prefix_only:2,unprepared:2,out_of_range:0,stale:0});
-    expect(await queryMatchedFts(env.DB_FTS,'needle',1,{...filter,state:'closed'})).toMatchObject({hits:[],coverage:{total:0,full:0}});
+    expect(await queryMatchedFts(env.DB_FTS,'needle',1,{...filter,state:'closed'})).toMatchObject({hits:[],coverage:{total:0,full:0,status:'complete'}});
+    expect(await queryMatchedFts(env.DB_FTS,'unmatchedqueryword',1,filter)).toMatchObject({hits:[],coverage:{total:3,full:1,status:'partial'}});
   });
   it('ranks strict before relaxed across both corpora, with stable ties and one sparse vote',async()=>{
     const repo='matched/tiers';
@@ -66,6 +67,26 @@ describe('matched D1 retrieval and ownership',()=>{
     await seed(repo,'tiers-relaxed','needle',true);
     expect((await queryMatchedFts(env.DB_FTS,'needle alpha',5,{repo,type:'doc'})).hits.map(h=>h.vectorId)).toEqual(['tiers-a','tiers-z','tiers-relaxed']);
     expect(mergeSparseTiers([{tier:0,rows:[{vector_id:'x',score:-100}]},{tier:0,rows:[{vector_id:'x',score:-1}]},{tier:1,rows:[{vector_id:'a'}]}],50).map(r=>r.vector_id)).toEqual(['x','a']);
+  });
+  it('retains legacy trigram prefix evidence for both prepared and unprepared doc owners',async()=>{
+    const repo='matched/legacy-code';
+    await seed(repo,'legacy-code-full','DOC_SPARSE_ADMIN_TOKEN',true,'docs/a.md');
+    await seed(repo,'legacy-code-prefix','DOC_SPARSE_ADMIN_TOKEN',false,'docs/b.md');
+    await seed(repo,'legacy-code-excluded','DOC_SPARSE_ADMIN_TOKEN '.repeat(100),false,'other/c.md');
+    for(const id of ['legacy-code-full','legacy-code-prefix','legacy-code-excluded'])
+      await env.DB_FTS.prepare("UPDATE search_docs SET tokenizer_kind='code' WHERE vector_id=?").bind(id).run();
+    const filter={repo,type:'doc' as const,pathPrefix:'docs/'};
+    const legacy=await queryFts(env.DB_FTS,'SPARSE_ADM',5,filter);
+    expect(new Set(legacy.map(h=>h.vectorId))).toEqual(new Set(['legacy-code-full','legacy-code-prefix']));
+    const matched=await queryMatchedFts(env.DB_FTS,'SPARSE_ADM',5,filter);
+    expect(new Set(matched.hits.map(h=>h.vectorId))).toEqual(new Set(legacy.map(h=>h.vectorId)));
+    expect(matched.coverage).toMatchObject({full:1,prefix_only:1,total:2});
+    expect((await queryMatchedFts(env.DB_FTS,'SPARSE_ADM',1,filter)).hits.map(h=>h.vectorId)).toEqual(['legacy-code-full']);
+    const contexts=await resolveMatchedContexts(env.DB_FTS,matched.hits.map(h=>h.vectorId),matched.sources);
+    for(const id of ['legacy-code-full','legacy-code-prefix']) expect(contexts.get(id)).toEqual({matched_context_fallback:'code_only_prefix'});
+    const both=await queryMatchedFts(env.DB_FTS,'SPARSE',5,filter);
+    expect(both.hits).toHaveLength(2);expect(both.hits.filter(h=>h.vectorId==='legacy-code-full')).toHaveLength(1);
+    expect((await resolveMatchedContexts(env.DB_FTS,['legacy-code-full'],both.sources)).get('legacy-code-full')?.matched_context).toBeDefined();
   });
   it('keeps every prefix owner if full query/schema fails and exposes unavailable',async()=>{
     const repo='matched/unavailable';await seed(repo,'unavailable-full','fallbackneedle',true);await seed(repo,'unavailable-prefix','fallbackneedle',false);
