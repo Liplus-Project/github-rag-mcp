@@ -618,6 +618,35 @@ describe("poller: pollWiki orphan reap", () => {
     await pollWiki(REPO, env, store.stub);
 
     expect(deleteFtsRowMock).toHaveBeenCalledTimes(1);
+    // The store record is the reap's candidate list: it stays until every other
+    // surface is gone, so the next run retries the page (issue #282).
+    expect(store.deletes).toEqual([]);
+
+    deleteByIds.mockResolvedValue(undefined);
+    stubWiki(wiki);
+    await pollWiki(REPO, env, store.stub);
+
+    expect(deleteFtsRowMock).toHaveBeenCalledTimes(2);
+    expect(store.deletes).toEqual(["orphan"]);
+  });
+
+  it("keeps the store record when the FTS5 delete fails, and retries it next run", async () => {
+    const wiki: FakeWiki = {
+      listed: [{ slug: "current" }],
+      files: { current: "c", Home: "h" },
+    };
+    const store = makeWikiStore();
+    const { env } = makeWikiEnv(["orphan"]);
+    deleteFtsRowMock.mockRejectedValueOnce(new Error("d1 down"));
+    stubWiki(wiki);
+
+    await pollWiki(REPO, env, store.stub);
+    expect(store.deletes).toEqual([]);
+
+    stubWiki(wiki);
+    await pollWiki(REPO, env, store.stub);
+
+    expect(deleteFtsRowMock).toHaveBeenCalledTimes(2);
     expect(store.deletes).toEqual(["orphan"]);
   });
 

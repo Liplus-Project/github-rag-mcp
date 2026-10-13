@@ -524,6 +524,10 @@ export async function handlePushEvent(
           ),
       ],
     ] as Array<[string, () => Promise<unknown>]>) {
+      // The store record goes last and only when every other surface is gone.
+      // Keeping it leaves the doc on the cron reap's candidate list, which
+      // retries the surfaces this push could not tear down (issue #282).
+      if (surface === "store record" && !allSurfacesTornDown) continue;
       try {
         await run();
       } catch (err) {

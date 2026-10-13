@@ -1166,6 +1166,7 @@ export async function pollDocs(
   // vector ID is never an edge endpoint. Add the teardown here if that
   // invariant changes (issue #203).
   let removedDocs = 0;
+  let deleteFailed = 0;
   let deleteBudgetExhausted = false;
   for (const doc of deletedDocs) {
     if (removedDocs >= MAX_DOC_DELETIONS_PER_REPO_PER_RUN) {
@@ -1181,6 +1182,7 @@ export async function pollDocs(
     const dvid = await docVectorId(repo, doc.path);
     // Each surface is torn down independently: a Vectorize failure must not
     // strand the D1 rows, which are the ones users actually retrieve.
+    let surfaceFailed = false;
     for (const [surface, run] of [
       ["vector", () => env.VECTORIZE.deleteByIds([dvid])],
       ["FTS5 row", () => deleteFtsRow(env.DB_FTS, dvid)],
@@ -1195,30 +1197,37 @@ export async function pollDocs(
           ),
       ],
     ] as Array<[string, () => Promise<unknown>]>) {
+      // The store record goes last and only when every other surface is gone:
+      // deletion candidates are read from the store, so dropping it while a row
+      // survives elsewhere strands that row for good (issue #282).
+      if (surface === "store record" && surfaceFailed) continue;
       try {
         await run();
       } catch (err) {
+        surfaceFailed = true;
         console.error(
           `Failed to delete ${surface} for doc ${repo}/${doc.path}:`,
           err instanceof Error ? err.message : String(err),
         );
       }
     }
+    if (surfaceFailed) deleteFailed++;
     removedDocs++;
   }
 
   // Update watermark with ETag — but only when the run left no work behind, the
   // same condition the issue / PR and releases surfaces use (issue #215 / #211).
-  // Three ways work is left: changed docs still to embed (fetch cap, issue
-  // #149), deleted docs still to reap (delete cap, issue #203), or a doc whose
+  // Four ways work is left: changed docs still to embed (fetch cap, issue
+  // #149), deleted docs still to reap (delete cap, issue #203), a doc whose
   // embed failed (issue #211 — its store row keeps the old `blobSha`, so it is
-  // still "changed" next run). Persisting the new ETag would cause the next cron
+  // still "changed" next run), or a deleted doc with a surface left behind
+  // (issue #282 — its store record is kept, so it is still "deleted" next run). Persisting the new ETag would cause the next cron
   // to short-circuit on 304 and never see any of them. Holding the prior ETag
   // forces a fresh tree fetch next run so `changedEntries` and `deletedDocs`
   // both repopulate — this run sent that ETag and got 200 back, so the tree
   // already differs from it. lastPolledAt is still bumped so observability sees
   // the run.
-  const holdEtag = fetchBudgetExhausted || deleteBudgetExhausted || failed > 0;
+  const holdEtag = fetchBudgetExhausted || deleteBudgetExhausted || failed > 0 || deleteFailed > 0;
   await storeStub.fetch(
     new Request("http://store/watermark", {
       method: "POST",
@@ -2164,6 +2173,7 @@ export async function pollWiki(
   let failed = 0;
   let inconclusive = 0;
   let removed = 0;
+  let deleteFailed = 0;
   let orphansWithheld = 0;
   let fetches = 0;
   let visited = 0;
@@ -2396,6 +2406,7 @@ export async function pollWiki(
     subrequests += WIKI_SUBREQUESTS_PER_DELETE;
     // Each surface is torn down independently: a Vectorize failure must not
     // strand the D1 rows, which are the ones users actually retrieve.
+    let surfaceFailed = false;
     for (const [surface, run] of [
       ["vector", () => env.VECTORIZE.deleteByIds([wvid])],
       ["FTS5 row", () => deleteFtsRow(env.DB_FTS, wvid)],
@@ -2411,15 +2422,21 @@ export async function pollWiki(
           ),
       ],
     ] as Array<[string, () => Promise<unknown>]>) {
+      // The store record goes last and only when every other surface is gone:
+      // deletion candidates are read from the store, so dropping it while a row
+      // survives elsewhere strands that row for good (issue #282).
+      if (surface === "store record" && surfaceFailed) continue;
       try {
         await run();
       } catch (err) {
+        surfaceFailed = true;
         console.error(
           `Failed to delete ${surface} for wiki ${repo}/${pageName}:`,
           err instanceof Error ? err.message : String(err),
         );
       }
     }
+    if (surfaceFailed) deleteFailed++;
     removed++;
   }
 
@@ -2454,7 +2471,7 @@ export async function pollWiki(
     `${repo} wiki: ${pages.length} pages, ${visited} visited, ${fetches}/${fetchBudget} fetches, ` +
       `${subrequests} subrequests, ` +
       `${embedded} embedded, ${skipped} unchanged, ${failed} failed, ` +
-      `${inconclusive} inconclusive, ${removed} deleted, ` +
+      `${inconclusive} inconclusive, ${removed} deleted (${deleteFailed} kept for retry), ` +
       `${orphansWithheld} reap withheld, ` +
       `cursor ${startCursor || "<head>"} -> ${nextCursor || "<head>"}, ` +
       `lap ${lapAnchor || "<head>"}${wrapped ? " complete" : ` -> ${lapFinalSlug}`}` +
