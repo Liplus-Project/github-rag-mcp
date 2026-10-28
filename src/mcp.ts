@@ -797,7 +797,8 @@ export function createRagMcpServer(env: Env): McpServer {
           // dense-only hits (and for whitespace-only sparse rows).
           const content =
             sparseContent.trim() !== "" ? sparseContent : backfilled.get(f.vectorId) ?? "";
-          return { id: f.vectorId, content: matched ? matchedOutcomes.get(f.vectorId)?.matched_context?.text ?? matchedBase.get(f.vectorId) ?? '' : content };
+          const row = resolveRow(payload.get(f.vectorId));
+          return { id: f.vectorId, type: row.type, filePath: row.filePath, content: matched ? matchedOutcomes.get(f.vectorId)?.matched_context?.text ?? matchedBase.get(f.vectorId) ?? '' : content };
         });
 
         const reranked = await rerankCandidates(

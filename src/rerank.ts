@@ -25,6 +25,7 @@
  */
 
 import type { Env } from "./types.js";
+import { MAX_EMBEDDING_INPUT_CHARS } from "./pipeline/embedding.js";
 
 /**
  * Conservative character budget for one (query + content) pair.
@@ -73,6 +74,38 @@ export interface RerankCandidate {
   id: string;
   /** Tokenizable text used by the cross-encoder. Empty string is allowed but contributes no signal. */
   content: string;
+  /** Existing retrieval metadata; only diff candidates opt into patch prioritization. */
+  type?: string;
+  filePath?: string;
+}
+
+/** Prepare only a verifiable canonical diff; otherwise preserve the raw-prefix contract. */
+function candidateContent(query: string, candidate: RerankCandidate): string {
+  const fallback = truncatePair(query, candidate.content).content;
+  // At the ingestion cap the actual boundary may have been lost, leaving a
+  // path/hunk quotation inside the commit message as a false unique match.
+  if (candidate.content.length >= MAX_EMBEDDING_INPUT_CHARS) return fallback;
+  const path = candidate.filePath;
+  if (candidate.type !== "diff" || !path || /[\r\n]/.test(path)) return fallback;
+
+  const boundary = `\n\n${path}\n\n`;
+  const start = candidate.content.indexOf(boundary);
+  if (start < 0 || candidate.content.indexOf(boundary, start + 1) >= 0) return fallback;
+  const patch = candidate.content.slice(start + boundary.length);
+  // GitHub's stored patches start with a unified hunk. Requiring a complete
+  // header also rejects path mentions followed by prose when the real patch
+  // was lost to ingestion truncation. Do not reconstruct absent patch bytes.
+  if (!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@[^\n]*(?:\n|$)/.test(patch)) return fallback;
+
+  const budget = MAX_PAIR_CHARS - Math.min(query.length, MAX_QUERY_CHARS);
+  const overheadBudget = Math.floor(budget / 2);
+  // Full path plus two separators must fit without consuming the patch half.
+  if (path.length + 4 > overheadBudget) return fallback;
+  const headline = candidate.content.slice(0, start).split("\n", 1)[0]
+    .slice(0, 120);
+  const prefix = `${path}\n\n${headline}\n\n`;
+  if (prefix.length > overheadBudget) return fallback;
+  return prefix + patch.slice(0, budget - prefix.length);
 }
 
 /** Per-candidate reranker output. `score` is the cross-encoder relevance score (higher = better). */
@@ -164,8 +197,7 @@ export async function rerankCandidates(
   const truncatedQuery =
     query.length > MAX_QUERY_CHARS ? query.slice(0, MAX_QUERY_CHARS) : query;
   const contexts = trimmedCandidates.map((c) => {
-    const { content } = truncatePair(truncatedQuery, c.content);
-    return { text: content };
+    return { text: candidateContent(truncatedQuery, c) };
   });
 
   // The AI binding's typing is intentionally loose; we cast through unknown
