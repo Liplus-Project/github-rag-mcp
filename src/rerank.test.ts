@@ -172,3 +172,85 @@ describe("truncatePair", () => {
     expect(content.length).toBe(1500);
   });
 });
+
+
+describe("diff input at the model boundary", () => {
+  const message = "Commit headline\n\n" + "shared explanation ".repeat(300);
+  const patch = "@@ -1 +1 @@\n-old\n+file-specific "+"patch bytes\n".repeat(300);
+  const diff = (id: string, path: string, body = patch): RerankCandidate => ({
+    id, type: "diff", filePath: path, content: `${message}\n\n${path}\n\n${body}`,
+  });
+  async function capture(query: string, candidates: RerankCandidate[]) {
+    let input!: { query: string; contexts: { text: string }[]; top_k: number };
+    const run = vi.fn((_model, value) => {
+      input = value as typeof input;
+      return { response: candidates.filter(c => c.content.trim()).map((_, id) => ({ id, score: 0.5 })) };
+    });
+    const result = await rerankCandidates(mkEnv(run), query, candidates);
+    expect(run).toHaveBeenCalledTimes(1);
+    return { input, result };
+  }
+
+  it.each([0, 42, 500])("reserves patch space using a query of %i characters", async length => {
+    const query = "q".repeat(length);
+    const candidates = [diff("a", "src/first.ts"), diff("b", "docs/second.md", patch.replace("file-specific", "second-specific"))];
+    const { input, result } = await capture(query, candidates);
+    expect(input.query).toBe(query.slice(0, 200));
+    const budget = 1700 - input.query.length;
+    for (const [i, { text }] of input.contexts.entries()) {
+      expect(text.startsWith(candidates[i].filePath! + "\n\nCommit headline\n\n")).toBe(true);
+      const sentPatch = text.slice(text.indexOf("@@"));
+      expect(sentPatch.length).toBeGreaterThanOrEqual(Math.ceil(budget / 2));
+      expect(candidates[i].content).toContain(sentPatch);
+      expect(text.length + input.query.length).toBeLessThanOrEqual(1700);
+    }
+    expect(input.contexts[0].text).toContain("file-specific");
+    expect(input.contexts[1].text).toContain("second-specific");
+    // Equal model scores are valid; caller identity and input order survive.
+    expect(result).toEqual([{ id: "a", score: 0.5 }, { id: "b", score: 0.5 }]);
+  });
+
+  it("keeps all of a short real patch and caps a long headline", async () => {
+    const short = "@@ -1 +1 @@\n-a\n+b";
+    const candidate = diff("a", "a.ts", short);
+    candidate.content = "H".repeat(500) + candidate.content.slice(candidate.content.indexOf("\n"));
+    const { input } = await capture("q", [candidate, diff("b", "b.ts", short)]);
+    expect(input.contexts[0].text).toBe("a.ts\n\n" + "H".repeat(120) + "\n\n" + short);
+  });
+
+  it("uses raw bounded prefixes for unverifiable boundaries and non-diff candidates", async () => {
+    const valid = diff("a", "a.ts");
+    const cases: RerankCandidate[] = [
+      { ...valid, id: "missing-path", filePath: undefined },
+      { ...valid, id: "mismatch", filePath: "other.ts" },
+      { ...valid, id: "missing-boundary", content: message },
+      { ...valid, id: "ambiguous", content: valid.content + "\n\na.ts\n\n" + patch },
+      diff("empty", "a.ts", ""), diff("whitespace", "a.ts", "   "),
+      diff("lost-patch", "a.ts", "commit prose that mentions this path"),
+      diff("partial-header", "a.ts", "@@ -1 +"),
+      diff("long-path", "x".repeat(900)), diff("newline-path", "a\nb.ts"),
+      { ...valid, id: "doc", type: "doc" }, { ...valid, id: "no-type", type: undefined },
+    ];
+    const { input } = await capture("q".repeat(500), cases);
+    expect(input.contexts.map(c => c.text)).toEqual(cases.map(c => c.content.slice(0, 1500)));
+  });
+
+  it("reduces headline overhead for a near-limit path and retains the candidate cap", async () => {
+    const path = "p".repeat(746);
+    const { input, result } = await capture("q".repeat(500),
+      Array.from({ length: 55 }, (_, i) => diff(String(i), path)));
+    expect(input.contexts).toHaveLength(50);
+    expect(input.top_k).toBe(50);
+    expect(result).toHaveLength(50);
+    for (const { text } of input.contexts) {
+      expect(text).toBe(path + "\n\n\n\n" + patch.slice(0, 750));
+      expect(text.length).toBe(1500);
+    }
+  });
+
+  it("preserves IDs when blank candidates are removed before preparing diffs", async () => {
+    const { result, input } = await capture("q", [cand("blank", " "), diff("a", "a.ts"), diff("b", "b.ts")]);
+    expect(input.contexts).toHaveLength(2);
+    expect(result!.map(r => r.id)).toEqual(["a", "b"]);
+  });
+});
