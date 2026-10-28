@@ -219,7 +219,7 @@ Ids come from search-mode results only; scan-mode rows are read from the structu
 
 #### Retrieval axes
 
-Search and scan modes report two axes separately and never fuses them into one ranking.
+Search mode reports two axes separately and never fuses them into one ranking.
 
 | Axis | Field | Ordering | Score |
 |------|-------|----------|-------|
