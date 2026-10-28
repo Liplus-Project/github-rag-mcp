@@ -102,8 +102,9 @@ function candidateContent(query: string, candidate: RerankCandidate): string {
   // Full path plus two separators must fit without consuming the patch half.
   if (path.length + 4 > overheadBudget) return fallback;
   const headline = candidate.content.slice(0, start).split("\n", 1)[0]
-    .slice(0, Math.min(120, overheadBudget - path.length - 4));
+    .slice(0, 120);
   const prefix = `${path}\n\n${headline}\n\n`;
+  if (prefix.length > overheadBudget) return fallback;
   return prefix + patch.slice(0, budget - prefix.length);
 }
 

@@ -230,7 +230,7 @@ describe("diff input at the model boundary", () => {
       diff("empty", "a.ts", ""), diff("whitespace", "a.ts", "   "),
       diff("lost-patch", "a.ts", "commit prose that mentions this path"),
       diff("partial-header", "a.ts", "@@ -1 +"),
-      diff("long-path", "x".repeat(900)), diff("newline-path", "a\nb.ts"),
+      diff("long-path", "x".repeat(900)), diff("no-headline-room", "x".repeat(746)), diff("newline-path", "a\nb.ts"),
       { ...valid, id: "doc", type: "doc" }, { ...valid, id: "no-type", type: undefined },
     ];
     const { input } = await capture("q".repeat(500), cases);
@@ -254,15 +254,15 @@ describe("diff input at the model boundary", () => {
     expect(input.contexts[3].text.startsWith("a.ts\n\nCommit headline\n\n@@")).toBe(true);
   });
 
-  it("reduces headline overhead for a near-limit path and retains the candidate cap", async () => {
-    const path = "p".repeat(746);
+  it("preserves the headline at the path budget boundary and retains the candidate cap", async () => {
+    const path = "p".repeat(731);
     const { input, result } = await capture("q".repeat(500),
       Array.from({ length: 55 }, (_, i) => diff(String(i), path)));
     expect(input.contexts).toHaveLength(50);
     expect(input.top_k).toBe(50);
     expect(result).toHaveLength(50);
     for (const { text } of input.contexts) {
-      expect(text).toBe(path + "\n\n\n\n" + patch.slice(0, 750));
+      expect(text).toBe(path + "\n\nCommit headline\n\n" + patch.slice(0, 750));
       expect(text.length).toBe(1500);
     }
   });
