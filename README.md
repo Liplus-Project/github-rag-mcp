@@ -151,7 +151,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `graph_hops` | number | Graph traversal depth for `graph_expand` (1 or 2, default 1). Ignored when `graph_expand` is `false`. |
 | `use_memory` | boolean | Default false. True orders up to 200 graph candidates by learned strength within equal hops before the output cap. Keyword scores/ranks are preserved. |
 
-Diff rerank input prioritizes the verified stored file path and patch over long commit messages within the existing budget, on both sparse and backfilled candidates. Unverifiable boundaries retain the raw prefix. No reindex or extra model/GitHub calls are required; unequal scores and ranking-quality gains are not guaranteed.
+Diff rerank input prioritizes the verified stored file path and patch over long commit messages within the existing budget, on both sparse and backfilled candidates. Unverifiable boundaries and stored content reaching the 8000-character ingestion cap retain the raw prefix. No reindex or extra model/GitHub calls are required; unequal scores and ranking-quality gains are not guaranteed.
 
 #### `type` values
 

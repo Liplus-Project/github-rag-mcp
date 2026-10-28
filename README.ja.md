@@ -151,7 +151,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `graph_hops` | number | `graph_expand` のグラフ探索深度（1 または 2、既定 1）。`graph_expand` が `false` のときは無視。 |
 | `use_memory` | boolean | 既定 false。true は最大200 graph 候補を同 hop 内で learned strength 順にしてから返却上限へ絞る。keyword の score/rank は維持。 |
 
-diff の rerank 入力は sparse・補完候補の両方で、既存の枠内で検証済みの保存 path と patch を長い commit 説明より優先します。境界を検証できない場合は raw prefix を維持します。再index・追加モデル/GitHub呼び出しは不要で、異なる score や検索品質向上は保証しません。
+diff の rerank 入力は sparse・補完候補の両方で、既存の枠内で検証済みの保存 path と patch を長い commit 説明より優先します。境界を検証できない場合と、保存本文が取り込み上限8000文字に達した場合は raw prefix を維持します。再index・追加モデル/GitHub呼び出しは不要で、異なる score や検索品質向上は保証しません。
 
 #### `type` 値
 

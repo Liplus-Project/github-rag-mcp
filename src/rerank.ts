@@ -25,6 +25,7 @@
  */
 
 import type { Env } from "./types.js";
+import { MAX_EMBEDDING_INPUT_CHARS } from "./pipeline/embedding.js";
 
 /**
  * Conservative character budget for one (query + content) pair.
@@ -81,6 +82,9 @@ export interface RerankCandidate {
 /** Prepare only a verifiable canonical diff; otherwise preserve the raw-prefix contract. */
 function candidateContent(query: string, candidate: RerankCandidate): string {
   const fallback = truncatePair(query, candidate.content).content;
+  // At the ingestion cap the actual boundary may have been lost, leaving a
+  // path/hunk quotation inside the commit message as a false unique match.
+  if (candidate.content.length >= MAX_EMBEDDING_INPUT_CHARS) return fallback;
   const path = candidate.filePath;
   if (candidate.type !== "diff" || !path || /[\r\n]/.test(path)) return fallback;
 

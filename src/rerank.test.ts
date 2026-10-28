@@ -6,6 +6,8 @@ import {
   type RerankCandidate,
 } from "./rerank.js";
 import type { Env } from "./types.js";
+import { prepareDiffEmbeddingInput } from "./pipeline/hash.js";
+import { MAX_EMBEDDING_INPUT_CHARS } from "./pipeline/embedding.js";
 
 /**
  * Binding-independent unit tests for the reranker layer (node pool).
@@ -175,7 +177,7 @@ describe("truncatePair", () => {
 
 
 describe("diff input at the model boundary", () => {
-  const message = "Commit headline\n\n" + "shared explanation ".repeat(300);
+  const message = "Commit headline\n\n" + "shared explanation ".repeat(150);
   const patch = "@@ -1 +1 @@\n-old\n+file-specific "+"patch bytes\n".repeat(300);
   const diff = (id: string, path: string, body = patch): RerankCandidate => ({
     id, type: "diff", filePath: path, content: `${message}\n\n${path}\n\n${body}`,
@@ -233,6 +235,23 @@ describe("diff input at the model boundary", () => {
     ];
     const { input } = await capture("q".repeat(500), cases);
     expect(input.contexts.map(c => c.text)).toEqual(cases.map(c => c.content.slice(0, 1500)));
+  });
+
+  it("falls back at the ingestion cap even when only a quoted path/hunk survived", async () => {
+    const fakeCommit = "Commit headline\n\na.ts\n\n@@ -1 +1 @@\n-fake\n+quoted in commit\n" + "prose ".repeat(1500);
+    const truncated = prepareDiffEmbeddingInput(fakeCommit, "a.ts", "@@ -2 +2 @@\n-real\n+actual patch");
+    expect(truncated.length).toBe(MAX_EMBEDDING_INPUT_CHARS);
+    expect(truncated).not.toContain("actual patch");
+    const candidates = [
+      { id: "lost", type: "diff", filePath: "a.ts", content: truncated },
+      diff("at-cap", "a.ts"), diff("over-cap", "a.ts"), diff("under-cap", "a.ts"),
+    ];
+    for (const [i, length] of [[1, 8000], [2, 8001], [3, 7999]]) {
+      candidates[i].content = candidates[i].content.padEnd(length, "x");
+    }
+    const { input } = await capture("q", candidates);
+    expect(input.contexts.slice(0, 3).map(c => c.text)).toEqual(candidates.slice(0, 3).map(c => c.content.slice(0, 1699)));
+    expect(input.contexts[3].text.startsWith("a.ts\n\nCommit headline\n\n@@")).toBe(true);
   });
 
   it("reduces headline overhead for a near-limit path and retains the candidate cap", async () => {

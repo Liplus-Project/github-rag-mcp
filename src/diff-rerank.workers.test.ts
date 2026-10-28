@@ -24,7 +24,7 @@ async function client(ai: (...args:any[])=>Promise<unknown> = vi.fn(async()=>({r
 describe('diff rerank retrieval parity', () => {
   it('sends the same verified path/patch from sparse and dense backfill without rewriting stored bytes', async () => {
     const repo = 'diff-rerank/parity';
-    const message = 'Shared headline\n\n' + 'budgetneedle shared commit prose '.repeat(150);
+    const message = 'Shared headline\n\n' + 'budgetneedle shared commit prose '.repeat(100);
     const paths = ['src/first.ts', 'docs/second.md'];
     const ids = ['diff-rerank-first', 'diff-rerank-second'];
     const contents = paths.map((path, i) => prepareDiffEmbeddingInput(message, path,
