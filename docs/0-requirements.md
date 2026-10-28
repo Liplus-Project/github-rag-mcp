@@ -360,8 +360,7 @@ Durable Object with SQLite stores structured records for:
 
 This store supports:
 
-- `get_issue_context`
-- `list_recent_activity`
+- time-ordered activity scan through `search` (empty or omitted query)
 - enrichment of semantic search hits
 
 **Recency window.** Every `/recent*` endpoint reads a half-open window `[since, until)` over the surface's own timestamp column (`updated_at`, `published_at`, `commit_date`), newest first, capped at `limit` rows. Both bounds are part of the SQL. Applying `until` to the returned rows instead is what made old windows unreachable: the cap takes the newest rows first and the filter then drops all of them, so a window holding thousands of rows still read as zero (issue #194). The per-endpoint cap stays — it bounds the subrequest / D1 read budget — but it now truncates the window rather than replacing it.
@@ -495,6 +494,14 @@ The retrieval layer is intended to recover working state, not merely keyword mat
 
 ## MCP Tools
 
+The retrieval entry point is `search`. #104 / #105 consolidated the former four tools into `search_issues`, renamed to `search` in #126. Modes are expressed through parameter sets so related retrieval use cases share one tool.
+
+- `list_recent_activity` was absorbed into activity scan: an empty or omitted `query`, `sort` (`updated_desc` / `created_desc`), and `since` / `until`.
+- `get_doc_content` was absorbed into `include_content`, which inlines file content for doc / wiki_doc results.
+- `get_issue_context` live issue / PR aggregation was retired. `search` serves uses that can rely on indexed snapshots; callers needing current GitHub state use `gh` or webhook MCP. `search` does not promise to reproduce live aggregation of linked PRs, branches, CI, sub-issues, or related releases.
+
+These former tools are no longer exposed. The current tool surface also includes `memory_history`, `record_source_use`, and `record_outcome` for feedback; their contracts are defined in [Search Feedback Memory](2-feedback-memory.md).
+
 ### `search`
 
 Purpose:
@@ -504,7 +511,7 @@ Purpose:
 
 Parameters:
 
-- `query` required
+- `query` optional — empty or omitted selects activity scan when `vector_ids` is absent
 - `repo` optional
 - `state` optional
 - `labels` optional
@@ -514,6 +521,8 @@ Parameters:
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
+- `sort` optional — `relevance` / `updated_desc` / `created_desc` (default: `relevance` in search mode, `updated_desc` in scan mode)
+- `include_content` optional — inline live doc / wiki_doc content (default false)
 - `since` / `until` optional — half-open time window `[since, until)`
 - `vector_ids` optional — stored-content fetch; see below
 
@@ -548,34 +557,6 @@ Ids are carried by search-mode results only — scan mode reads the structured s
 `include_content` is a separate axis and stays unchanged: it re-reads whole files from the GitHub contents API (and `raw.githubusercontent.com/wiki`) because a doc needs its full text, and its 5-row cap exists to bound that API fan-out. Fetch mode reads D1 and is bounded by the ids the caller listed (max 50 per call, mirroring the `top_k` ceiling). Same word, different source and different bound — one flag over both would be one guarantee over two behaviors.
 
 Out of scope: the stored text is the embedding input, so one 8000-character limit currently serves both embedding and retention. Giving the FTS side an untruncated body is the root-level shape, but it requires re-indexing existing rows. Fetch mode returns what the index already holds.
-
-### `get_issue_context`
-
-Purpose:
-
-- aggregate the state around one issue or pull request
-
-Returns:
-
-- issue or PR details
-- linked PRs
-- branch information
-- CI status
-- sub-issues when available
-- related releases when inferable
-
-### `list_recent_activity`
-
-Purpose:
-
-- provide a recent activity feed across tracked repositories
-
-Returns:
-
-- created, updated, and closed issue or PR activity
-- release publication activity
-- documentation update activity
-- commit diff indexing activity
 
 ## Authentication
 
