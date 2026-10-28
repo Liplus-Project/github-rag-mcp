@@ -516,7 +516,7 @@ Parameters:
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
-- `sort` optional — `relevance` (default) / `updated_desc` / `created_desc`
+- `sort` optional — `relevance` / `updated_desc` / `created_desc`（省略時は search mode で `relevance`、scan mode で `updated_desc`）
 - `include_content` optional — doc / wiki_doc の live 本文を inline（既定 false）
 - `since` / `until` optional — 半開区間 `[since, until)` の時間窓
 - `vector_ids` optional — 保存済み本文の取得。下記参照

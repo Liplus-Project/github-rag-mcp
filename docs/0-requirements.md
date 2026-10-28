@@ -521,7 +521,7 @@ Parameters:
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
-- `sort` optional — `relevance` (default) / `updated_desc` / `created_desc`
+- `sort` optional — `relevance` / `updated_desc` / `created_desc` (default: `relevance` in search mode, `updated_desc` in scan mode)
 - `include_content` optional — inline live doc / wiki_doc content (default false)
 - `since` / `until` optional — half-open time window `[since, until)`
 - `vector_ids` optional — stored-content fetch; see below
