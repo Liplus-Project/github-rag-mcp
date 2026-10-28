@@ -355,8 +355,7 @@ Durable Object + SQLite は次の structured record を保持する。
 
 この store は次を支える。
 
-- `get_issue_context`
-- `list_recent_activity`
+- `search` の時系列 activity scan（query が空または省略された場合）
 - semantic search hit の enrichment
 
 **recency window.** `/recent*` 系 endpoint は、各 surface 自身の timestamp 列（`updated_at` / `published_at` / `commit_date`）に対する半開区間 `[since, until)` を新しい順・最大 `limit` 件で読む。両端とも SQL の条件である。`until` を返り値側で後置フィルタすると古い窓に到達できない——cap が先に最新側を取り、フィルタがそれを全部落とすため、数千行ある窓でも 0 件に見える（issue #194）。endpoint あたりの cap は subrequest / D1 読み取り予算の境界として維持するが、これは「窓を置き換える」ものではなく「窓の中を打ち切る」ものになった。
@@ -490,6 +489,14 @@ repo 横断の複製（Li+ source が各 user repo の `.claude/` に複製さ�
 
 ## MCP Tools
 
+検索用の entry point は `search`。#104 / #105 で旧 4 tool を `search_issues` に統合し、#126 で `search` に改名した。mode をパラメータ集合で表現し、関連する取得用途を同じ tool から利用できる形にしている。
+
+- `list_recent_activity` は、空または省略した `query` と `sort`（`updated_desc` / `created_desc`）、`since` / `until` による activity scan に吸収した。
+- `get_doc_content` は、doc / wiki_doc 結果へ本文を inline する `include_content` に吸収した。
+- `get_issue_context` の live issue / PR 集約は廃止した。索引済み snapshot で足りる用途は `search` で扱い、最新の GitHub state が必要な場合は `gh` または webhook MCP で補う。linked PR、branch、CI、sub-issue、related release の live 集約を `search` が再現する保証はない。
+
+これらの旧 tool は現在公開していない。現在の tool surface には feedback 用の `memory_history`、`record_source_use`、`record_outcome` もあり、契約は [検索 feedback memory](2-feedback-memory.ja.md) に定義する。
+
 ### `search`
 
 Purpose:
@@ -499,7 +506,7 @@ Purpose:
 
 Parameters:
 
-- `query` required
+- `query` optional — `vector_ids` 未指定で空または省略すると activity scan
 - `repo` optional
 - `state` optional
 - `labels` optional
@@ -509,6 +516,8 @@ Parameters:
 - `top_k` optional
 - `fusion` optional — `rrf` (default) / `dense_only` / `sparse_only`
 - `rerank` optional — `true` (default) / `false`
+- `sort` optional — `relevance` (default) / `updated_desc` / `created_desc`
+- `include_content` optional — doc / wiki_doc の live 本文を inline（既定 false）
 - `since` / `until` optional — 半開区間 `[since, until)` の時間窓
 - `vector_ids` optional — 保存済み本文の取得。下記参照
 
@@ -543,34 +552,6 @@ id が載るのは search mode の結果だけである——scan mode は struc
 `include_content` は別軸であり、既存挙動は変更しない。doc は完全なファイルが必要なので GitHub contents API（および `raw.githubusercontent.com/wiki`）からファイル全体を読み直しており、5 件上限はその API fan-out を抑えるためにある。fetch mode は D1 を読み、上限は呼び出し側が挙げた id の数（1 回あたり最大 50、`top_k` の上限に合わせた）である。同じ「content」でも取得元も上限の根拠も異なる。1 つのフラグに両方を載せることは、1 つの保証で 2 つの挙動を覆うことになる。
 
 非スコープ: 保存されている文字列が embedding input そのものであるため、8000 文字の上限が embedding と保存の双方を兼ねている状態にある。FTS 側に truncate しない本文を持たせるのが根本の形だが、既存行の再 index が必要になる。fetch mode は「既に持っているものを返す」に限定する。
-
-### `get_issue_context`
-
-Purpose:
-
-- 単一 issue または pull request の周辺 state を集約する
-
-Returns:
-
-- issue / PR details
-- linked PRs
-- branch information
-- CI status
-- sub-issues
-- 推定可能な related releases
-
-### `list_recent_activity`
-
-Purpose:
-
-- tracked repository 群の recent activity feed を返す
-
-Returns:
-
-- created / updated / closed issue / PR activity
-- release publication activity
-- documentation update activity
-- commit diff indexing activity
 
 ## Authentication
 
