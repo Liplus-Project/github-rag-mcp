@@ -31,9 +31,10 @@ export const TOOLS = [
       "Structured filters (repo, path_prefix, state, labels, milestone, assignee, type) apply across modes 1-3 " +
       "(mode 4 names its rows, so nothing is filtered there); " +
       "type: \"wiki_doc\" narrows to GitHub Wiki pages only; repo takes the full slug (owner/repo) and matches " +
-      "exactly, so a bare repository name selects nothing. In search mode the response carries " +
-      "filters_unmatched: any filter listed there matched no row in the index at all, which separates a " +
-      "mis-specified filter from a genuine zero-hit result. " +
+      "exactly, so a bare repository name selects nothing. In search and scan modes the response carries " +
+      "filters_unmatched: any filter listed there matched no row in the mode's source population; " +
+      "[] means no mismatch was confirmed, including when a probe fails. " +
+      "Scan probes repo only, across all structured source tables without time or other filters. " +
       "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
       "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
       "and a result that absorbed others carries same_entity { count, others[] } with links to them. " +

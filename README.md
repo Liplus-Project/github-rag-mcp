@@ -120,7 +120,9 @@ Four modes are selected by the parameter set:
 
 Structured filters (`repo`, `path_prefix`, `state`, `labels`, `milestone`, `assignee`, `type`) apply in every mode except stored-content fetch, where the rows are named rather than selected. `path_prefix` is intentionally narrower: it is valid only with `type: "doc"` and selects one repository-relative directory before ranking.
 
-Search mode reports filters that matched nothing at all in `filters_unmatched` (always present, `[]` when every filter matched something). `repo` is an exact match on the full `owner/repo` slug, so a bare repository name selects an empty population and returns a response shaped exactly like a genuine zero-hit search — this field is what separates the two. It matters most in multi-step agentic search, where a zero reads as a normal intermediate result and the mis-specified filter would otherwise never surface.
+Search and scan modes report filters that matched nothing at all in `filters_unmatched` (always present, `[]` when no mismatch was confirmed). `repo` is an exact match on the full `owner/repo` slug, so a bare repository name selects an empty population and returns a response shaped exactly like a genuine zero-hit search — this field is what separates the two. It matters most in multi-step agentic search, where a zero reads as a normal intermediate result and the mis-specified filter would otherwise never surface.
+
+Scan mode checks `repo` against all structured-store source tables only after an empty, complete candidate read, without time or other filters. Existing repositories can have empty windows. Probe failures add no mismatch; `[]` does not prove a match. Scan mode does not probe `path_prefix`.
 
 Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter than 10 characters (trimmed) are filtered out at ingest time so noise such as `LGTM`, `+1`, or CI chatter does not dilute the retrieval surface.
 
@@ -129,7 +131,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | Name | Type | Description |
 |------|------|-------------|
 | `query` | string (optional) | Natural-language query. Omit or empty = scan mode. |
-| `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search mode reports that as `"repo"` in the response's `filters_unmatched`. Pass it whenever the question is about a known repository — without it, a near-duplicate from another repository can rank first; leave it unset only when the question spans repositories. |
+| `repo` | string | Filter by repository — full slug (`owner/repo`), exact match. A bare repository name matches nothing; search and scan modes report that as `"repo"` in the response's `filters_unmatched`. Pass it whenever the question is about a known repository — without it, a near-duplicate from another repository can rank first; leave it unset only when the question spans repositories. |
 | `path_prefix` | string | Filter docs by repository-relative directory prefix. Requires `type: "doc"`, a trailing `/`, and at most 64 UTF-8 bytes. |
 | `doc_context` | `prefix` / `matched` | Default `prefix`. Explicit `matched` requires nonempty query and `type: doc` or `wiki_doc`, rejects scan/vector_ids, and searches prepared indexed full sources. Returns bounded verified `matched_context` even with `rerank: false`. Coverage counts the filtered indexed scope before term matching; unprepared tails remain unsearchable. Live `include_content` stays separate. |
 | `state` | `"open"` \| `"closed"` \| `"all"` | Filter by state (default `all`). |

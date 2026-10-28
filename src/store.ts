@@ -1095,6 +1095,18 @@ export class IssueStore implements DurableObject {
     );
   }
 
+  /** Existence across the same structured surfaces used by scan, without filters. */
+  repoHasScanRows(repo: string): boolean {
+    const tables = [
+      "issues", "releases", "docs", "wiki_docs", "diffs",
+      "issue_comments", "pr_reviews", "pr_review_comments",
+    ];
+    // A failed table read throws; only a complete read can establish absence.
+    return tables.some((table) => this.sql.exec(
+      `SELECT 1 FROM ${table} WHERE repo = ? LIMIT 1`, repo,
+    ).toArray().length > 0);
+  }
+
   // ---- HTTP interface ----
 
   async fetch(request: Request): Promise<Response> {
@@ -1150,6 +1162,12 @@ export class IssueStore implements DurableObject {
     };
 
     try {
+      // GET /scan-repo-exists?repo=... — exact repo, all scan source surfaces.
+      if (request.method === "GET" && path === "/scan-repo-exists") {
+        const repo = url.searchParams.get("repo");
+        if (!repo) return new Response("missing repo", { status: 400 });
+        return Response.json({ exists: this.repoHasScanRows(repo) });
+      }
       // POST /upsert — upsert a single issue record
       if (request.method === "POST" && path === "/upsert") {
         const record = (await request.json()) as IssueRecord;

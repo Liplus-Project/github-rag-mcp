@@ -20,7 +20,7 @@ export const searchInputSchema = z.object({
           .describe(
             "Filter by repository — full slug (owner/repo), exact match. " +
               "A bare repository name (\"my-repo\") matches nothing and yields an empty result set; " +
-              "search mode flags that case as \"repo\" in the response's filters_unmatched. " +
+              "search and scan modes flag that case as \"repo\" in the response's filters_unmatched. " +
               "Pass it whenever the question is about a known repository: without it, a near-duplicate from another repository can rank first. " +
               "Leave it unset only when the question spans repositories.",
           ),

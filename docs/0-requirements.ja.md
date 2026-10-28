@@ -529,7 +529,7 @@ Returns:
 - 同一実体の他の行を吸収した結果には `same_entity`（Entity Aggregation 参照）。`top_k` は行数ではなく実体数で数える
 - top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`、`filters_unmatched`
 
-**フィルタ不成立（`filters_unmatched`）.** `repo` はフルスラッグ（`owner/repo`）の完全一致である——dense 側は Vectorize metadata の `$eq`、sparse 側は `d.repo = ?`。`path_prefix` は repository-relative path が指定 directory prefix で始まる doc 行を選ぶ。短いリポジトリ名や、doc 行を1件も選ばない path prefix を渡すと、返るレスポンスは「本当にヒットが無かった」場合と同じ形になる。`filters_unmatched` がこの2つを分ける: search mode では常に存在し、`[]` は適用した全フィルタが空でない母集合を選べたこと（つまり `count: 0` は真にヒットゼロ）を意味し、名前が載っていればそのフィルタの母集合が空、すなわち誤っているのはクエリではなくフィルタの値である。
+**フィルタ不成立（`filters_unmatched`）.** `repo` はフルスラッグ（`owner/repo`）の完全一致である——dense 側は Vectorize metadata の `$eq`、sparse 側は `d.repo = ?`。`path_prefix` は repository-relative path が指定 directory prefix で始まる doc 行を選ぶ。短いリポジトリ名や、doc 行を1件も選ばない path prefix を渡すと、返るレスポンスは「本当にヒットが無かった」場合と同じ形になる。`filters_unmatched` がこの2つを分ける: search / scan mode では常に存在し、`[]` は確認できた不一致がないことを意味し（プローブ失敗は一致の証明ではない）、名前が載っていればそのフィルタの母集合が空、すなわち誤っているのはクエリではなくフィルタの値である。
 
 区別にフィールドを割く理由は、エージェンティックな多段検索が silent zero のコストを反転させるからである。単発検索ならゼロは呼び出し側が見に行く行き止まりだが、検索ループの中では「この角度には何も無かった」という正常な中間結果として消費されて次へ回る。フィルタ不成立が表に出ないまま、クエリ予算を1回分、偽陰性に使って終わる。
 
@@ -538,6 +538,8 @@ Returns:
 **scan mode（query 空）.** Vectorize / FTS5 / reranker を経由せず、structured store の recency endpoint から集約する。`since` / `until` と文書 `path_prefix` は store 側へ push down されるので、窓に対象行があれば、その窓がどれだけ古くても、prefix 外に新しい文書が何件あっても返る。`since` 省略時の既定は `until` の 7 日前（`until` も省略時は現在の 7 日前）。`until` だけ指定した問い合わせが「下限が上限より新しい空窓」に潰れないための既定である。
 
 **文書 path prefix.** `path_prefix` は `type: "doc"` と組み合わせた場合だけ有効。repository-relative directory を表し、末尾 `/` が必須で、先頭 `/`、backslash、NUL、空 segment、`.` / `..` segment を含めず、Vectorize が string metadata の先頭64 byteだけを索引する制約に合わせUTF-8で64 byte以内とする。dense / sparse は `doc_path` に同じ半開 lexical range を適用し、scan は range を doc store query へ押し下げ、返った行を `startsWith` でも確認する。fetch mode は `vector_ids` が行を直接名指しするため、従来どおり無視する。
+
+scan mode は候補行がゼロで取得元がすべて完了した場合だけ `repo` の存在を確認する。時間・type・path 等の条件を外し、structured store の全8テーブルを確認し、`search_docs` は使わない。窓外や別 type にだけ存在する repo は `filters_unmatched: []` となる。プローブ失敗や不正な応答では不一致を追加しない。scan mode で `path_prefix` の不一致は検出しない。
 
 scan mode は top-level に `truncated` を追加する。窓が応答に載せた以上の行を持つとき true になる（endpoint が cap 一杯まで返した、または merge 後の件数が `top_k` を超えた）。これが「該当なし」と「読み切れていない」を呼び出し側に区別させる: 返った最古の行の時刻を次の `until` にして遡ればよい。両者を区別できない欠損調査ツールは、存在しない欠損を報告し実在する取り込みを見落とす——#178 の再検証で 1 日に 2 度踏んだ誤りがこれである。
 
