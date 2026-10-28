@@ -34,8 +34,7 @@ const PROPS = {
  * `createRagMcpServer` only captures `env`, and nothing below `tools/call`
  * dereferences it.
  */
-function workerHandler() {
-  const env = {} as Env;
+function workerHandler(env = {} as Env) {
   return createMcpHandler(() => createRagMcpServer(env), {
     route: "/mcp",
     legacy: "reject",
@@ -106,6 +105,37 @@ describe("worker <-> bridge stateless contract", () => {
     }
 
     await remote.reset();
+  });
+
+  it("serializes scan filters_unmatched on zero-result responses", async () => {
+    for (const exists of [false, true]) {
+      const env = {
+        ISSUE_STORE: {
+          idFromName: () => "global",
+          get: () => ({
+            fetch: async (request: Request) => new URL(request.url).pathname === "/scan-repo-exists"
+              ? Response.json({ exists }) : Response.json([]),
+          }),
+        },
+      } as unknown as Env;
+      const remote = createRemoteClient({
+        workerUrl: ENDPOINT, clientVersion: "0.0.0-test",
+        fetch: fetchInto(workerHandler(env)),
+      });
+      try {
+        const client = await remote.getClient();
+        const result = await client.callTool({ name: "search", arguments: {
+          repo: "o/r", type: "doc", use_memory: false,
+        } });
+        const content = result.content as Array<{ type: string; text: string }>;
+        const payload = JSON.parse(content[0].text);
+        expect(payload.mode).toBe("scan");
+        expect(payload.count).toBe(0);
+        expect(payload.filters_unmatched).toEqual(exists ? [] : ["repo"]);
+      } finally {
+        await remote.reset();
+      }
+    }
   });
 
   it("publishes the full search schema over the modern wire", async () => {

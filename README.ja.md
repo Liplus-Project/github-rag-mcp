@@ -120,7 +120,9 @@ GitHub の issue / pull request / release / documentation / **GitHub Wiki page**
 
 structured filter (`repo` / `path_prefix` / `state` / `labels` / `milestone` / `assignee` / `type`) は、保存済み本文の取得を除くすべてのモードで有効です。`path_prefix` だけは意図的に狭く、`type: "doc"` と組み合わせて repository-relative directory を ranking 前に選びます。保存済み本文の取得では行をサーバが選ぶのではなく呼び出し側が名指しするため、filter は適用しません。
 
-search モードは「1件もマッチしなかったフィルタ」を `filters_unmatched` に載せます (常に存在し、すべて成立していれば `[]`)。`repo` はフルスラッグ `owner/repo` の完全一致なので、短いリポジトリ名を渡すと母集合が空になり、本当にヒットゼロだった場合と同じ形のレスポンスが返ります。このフィールドがその2つを区別します。効くのは多段のエージェンティック検索で、ゼロが正常な中間結果として読まれてしまい、フィルタ不成立が表に出ないまま終わる場面です。
+search / scan モードは「1件もマッチしなかったフィルタ」を `filters_unmatched` に載せます (常に存在し、確認できた不一致がなければ `[]`)。`repo` はフルスラッグ `owner/repo` の完全一致なので、短いリポジトリ名を渡すと母集合が空になり、本当にヒットゼロだった場合と同じ形のレスポンスが返ります。このフィールドがその2つを区別します。効くのは多段のエージェンティック検索で、ゼロが正常な中間結果として読まれてしまい、フィルタ不成立が表に出ないまま終わる場面です。
+
+scan モードは候補ゼロかつ取得完了時だけ、時間や他の条件を外して structured store の全取得元で `repo` を確認します。存在する repo でも窓が空の場合があります。プローブ失敗では不一致を追加せず、`[]` は一致の証明ではありません。scan モードは `path_prefix` の不一致を検出しません。
 
 bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の body は ingest 時点で除外されます。`LGTM` / `+1` / CI ノイズなどは retrieval 面に残りません。
 
@@ -129,7 +131,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | 名前 | 型 | 説明 |
 |------|----|------|
 | `query` | string (省略可) | 自然言語クエリ。省略または空文字で scan モード。 |
-| `repo` | string | repository で絞り込み。フルスラッグ (`owner/repo`) の完全一致。短いリポジトリ名は1件もマッチせず、search モードはそれをレスポンスの `filters_unmatched` に `"repo"` として報告します。 |
+| `repo` | string | repository で絞り込み。フルスラッグ (`owner/repo`) の完全一致。短いリポジトリ名は1件もマッチせず、search / scan モードはそれをレスポンスの `filters_unmatched` に `"repo"` として報告します。 |
 | `path_prefix` | string | repository-relative directory prefix で doc を絞り込み。`type: "doc"`、末尾 `/`、UTF-8で64 byte以内が必須。 |
 | `doc_context` | `prefix` / `matched` | 既定 prefix。matched は非空 query と doc/wiki_doc が必須、scan/vector_ids はエラー。準備済み全文を検索し、rerank:false でも検証済みの有界 matched_context を返す。coverage は語一致前の scope を数え、未準備の後半は検索できない。live include_content は別欄。[契約](docs/7-matched-context.ja.md)。 |
 | `state` | `"open"` / `"closed"` / `"all"` | state で絞り込み (既定 `all`)。 |

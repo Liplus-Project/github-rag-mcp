@@ -328,8 +328,9 @@ export function createRagMcpServer(env: Env): McpServer {
         "Optional metadata filters (repo, path_prefix, state, labels, milestone, assignee, type) apply across modes 1-3 " +
         "(mode 4 names its rows, so nothing is filtered there); " +
         "repo takes the full slug (owner/repo) and matches exactly, so a bare repository name selects nothing. " +
-        "In search mode the response carries filters_unmatched: any filter listed there matched no row in the " +
-        "index at all, which separates a mis-specified filter from a genuine zero-hit result. " +
+        "In search and scan modes the response carries filters_unmatched: any filter listed there matched no row in the " +
+        "mode's source population; [] means no mismatch was confirmed, including when a probe fails. " +
+        "Scan probes repo only, across all structured source tables without time or other filters. " +
         "Use type: \"doc\" for repository docs (files in /docs/ etc.) and type: \"wiki_doc\" for GitHub Wiki pages — " +
         "both surfaces co-exist and a same-name page in both is returned as two separate hits. " +
         "Use type: \"diff\" to retrieve judgment history preserved in commit diffs — including changes to deleted files " +
@@ -471,6 +472,7 @@ export function createRagMcpServer(env: Env): McpServer {
                   since: scan.since,
                   until: until ?? null,
                   truncated: scan.truncated,
+                  filters_unmatched: scan.filtersUnmatched,
                   results: items,
                   memory_incomplete: scan.incomplete,
                 }),

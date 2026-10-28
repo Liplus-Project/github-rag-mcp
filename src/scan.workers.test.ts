@@ -260,3 +260,53 @@ describe("scan mode: document path prefix", () => {
     expect(out.truncated).toBe(false);
   });
 });
+
+
+describe("scan mode: unmatched repo (#221)", () => {
+  const params = {
+    repo: REPO, type: "doc" as const, topK: 3, sort: "updated_desc" as const,
+    since: "2026-08-01T00:00:00Z", until: "2026-08-02T00:00:00Z",
+  };
+
+  it("distinguishes a missing full slug and a short repo name from an empty window", async () => {
+    const store = await seeded("scan-unmatched");
+    for (const repo of ["missing/repo", "liplus-language"]) {
+      const out = await runScan(store, { ...params, repo });
+      expect(out.rows).toEqual([]);
+      expect(out.filtersUnmatched).toEqual(["repo"]);
+    }
+    const out = await runScan(store, params);
+    expect(out.rows).toEqual([]);
+    expect(out.filtersUnmatched).toEqual([]);
+  });
+
+  const fixtures = [
+    ["issues", "number,type,state,title,created_at,updated_at", "1,'issue','open','title','2020','2020'"],
+    ["releases", "tag_name,created_at,published_at", "'v1','2020','2020'"],
+    ["docs", "path,blob_sha,updated_at", "'a.md','sha','2020'"],
+    ["wiki_docs", "page_name,updated_at", "'Home','2020'"],
+    ["diffs", "commit_sha,file_path,commit_date,indexed_at", "'sha','a.md','2020','2020'"],
+    ["issue_comments", "comment_id,number,created_at,updated_at", "1,1,'2020','2020'"],
+    ["pr_reviews", "review_id,number,submitted_at,updated_at", "1,1,'2020','2020'"],
+    ["pr_review_comments", "comment_id,number,created_at,updated_at", "1,1,'2020','2020'"],
+  ];
+  it.each(fixtures)("includes repo present only in %s", async (table, columns, values) => {
+    const store = env.ISSUE_STORE.get(env.ISSUE_STORE.idFromName(`scan-probe-${table}`));
+    await runInDurableObject(store, (_s: IssueStore, state) => {
+      state.storage.sql.exec(`INSERT INTO ${table} (repo,${columns}) VALUES (?,${values})`, REPO);
+    });
+    const out = await runScan(store, { ...params, pathPrefix: "missing/" });
+    expect(out.rows).toEqual([]);
+    expect(out.filtersUnmatched).toEqual([]);
+  });
+
+  it("does not turn an unavailable structured source into absence", async () => {
+    const store = env.ISSUE_STORE.get(env.ISSUE_STORE.idFromName("scan-probe-table-failure"));
+    await runInDurableObject(store, (_s: IssueStore, state) => {
+      state.storage.sql.exec("DROP TABLE pr_review_comments");
+    });
+    const res = await store.fetch(new Request(`http://store/scan-repo-exists?repo=${REPO}`));
+    expect(res.ok).toBe(false);
+    expect((await runScan(store, params)).filtersUnmatched).toEqual([]);
+  });
+});

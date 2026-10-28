@@ -93,6 +93,7 @@ export interface ScanParams {
 }
 
 export interface ScanOutcome {
+  filtersUnmatched: string[];
   incomplete?: boolean;
   rows: ScanRow[];
   /** Window floor actually applied (the caller's `since`, or the default). */
@@ -154,6 +155,7 @@ export async function runScan(
   };
 
   const rows: ScanRow[] = [];
+  let candidateCount = 0;
   let truncated = false;
 
   let incomplete = false;
@@ -168,6 +170,7 @@ export async function runScan(
       );
       if (!res.ok) throw new Error("Scan source unavailable");
       const records = (await res.json()) as T[];
+      candidateCount += records.length;
       // A full page means the cap, not the window, ended the read.
       if (records.length >= storeLimit) truncated = true;
       for (const record of records) {
@@ -335,6 +338,21 @@ export async function runScan(
     }));
   }
 
+  const filtersUnmatched: string[] = [];
+  // Any collected candidate proves repo existence, even if post-filters drop it.
+  // Partial reads and failed probes must not become evidence of absence.
+  if (params.repo && candidateCount === 0 && !incomplete) {
+    try {
+      const query = new URLSearchParams({ repo: params.repo });
+      const res = await store.fetch(new Request(`http://store/scan-repo-exists?${query}`));
+      if (!res.ok) throw new Error("Scan repo probe unavailable");
+      const result = await res.json() as { exists?: unknown };
+      if (result?.exists === false) filtersUnmatched.push("repo");
+    } catch {
+      // No confirmed mismatch; this does not prove the repo matched.
+    }
+  }
+
   // State / milestone / assignee / label post-filters (best-effort over the
   // metadata we have; assignees / labels are already arrays).
   let filtered = rows;
@@ -368,5 +386,5 @@ export async function runScan(
 
   if (filtered.length > topK) truncated = true;
 
-  return { rows: filtered.slice(0, topK), since, truncated, incomplete };
+  return { rows: filtered.slice(0, topK), since, truncated, incomplete, filtersUnmatched };
 }
