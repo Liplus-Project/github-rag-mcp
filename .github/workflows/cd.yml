@@ -47,6 +47,9 @@ jobs:
           gh release upload "$TAG_NAME" dist/github-rag-mcp.mcpb --clobber --repo "${{ github.repository }}"
 
   npm-publish:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     needs: build-mcpb
     steps:
@@ -57,6 +60,10 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      - name: Install OIDC-capable npm CLI
+        run: |
+          npm install --global npm@11.19.1
+          npm --version
       - run: npm ci
         working-directory: mcp-server
       - name: Sync and verify all release metadata from tag
@@ -67,7 +74,6 @@ jobs:
       - name: Publish to npm
         working-directory: mcp-server
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           TAG="latest"

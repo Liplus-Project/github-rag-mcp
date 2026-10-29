@@ -479,11 +479,20 @@ script は tag 全体と metadata 4 ファイルを検証してから書き込�
 | `mcp-server/manifest.json` | `version` |
 | `mcp-server/server.json` | `version` と全 `registryType: "npm"` package entry の `version` |
 
-依存版、schema 識別子、Node 条件、非 npm registry entry は保持する。private な root package の Worker 版は対象外。不正 tag、読取不可・不正 JSON、version field 欠落、書込後の不一致は pack / publish step より前に job を止める。既存の npm 認証と release asset upload は維持する。
+依存版、schema 識別子、Node 条件、非 npm registry entry は保持する。private な root package の Worker 版は対象外。不正 tag、読取不可・不正 JSON、version field 欠落、書込後の不一致は pack / publish step より前に job を止める。release asset upload は維持し、npm 認証は下記の契約に従う。
 
 `--check` を付けると生成済み metadata の一致だけを検証し、書き込まない。`node --test scripts/sync-release-version.test.mjs` と CI で、複数版、書込前の拒否、対象外 field 保持、retry、CD と同じ相対 command を検証する。
 
 作業ツリーの placeholder が公開版より遅れていてもよいが、**各公開 artifact 内の metadata は tag と一致する必要がある**。一つのファイルだけの同期では足りない。公開版の確認には release tag または npm registry を使う。この同期処理自体は publish / tag 作成 / Worker deploy を行わない。
+
+<a id="npm-publishing-authentication"></a>
+### npm 公開認証
+
+`.github/workflows/cd.yml` は `github-rag-mcp` を `https://registry.npmjs.org` へ [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) で公開する。`contents: read` と `id-token: write` は `npm-publish` だけに与え、MCP Bundle job の権限は維持する。この job は GitHub-hosted `ubuntu-latest` / Node 24 上で npm **11.19.1** を一時 runner に導入する（OIDC の最低条件は npm 11.5.1 / Node 22.14.0）。公開処理に `NODE_AUTH_TOKEN` / `NPM_TOKEN` を渡さない。
+
+npm package の trusted publisher は GitHub Actions / organization `Liplus-Project` / repository `github-rag-mcp` / workflow filename `cd.yml`、environment 名なし、直接の `npm publish` 許可に一致させる。package の repository URL は `git+https://github.com/Liplus-Project/github-rag-mcp.git`。所有者は 2026-10-30 JST に登録済みと報告したが、registry 側との一致は許可された実公開が成功するまで未検証である。
+
+release の `published` event、metadata 同期、public 公開、prerelease の `next` / その他の `latest`、MCP Bundle 添付は維持する。workflow 検証、package dry-run、通常 CI は OIDC 認証を検証せず、package も公開しない。#256 は別途許可された release で OIDC 公開と配布物を確認するまで open（実装 PR merge 後は reopen）で残す。その成功後、他用途がないことを確認して初めて旧 repository secret の削除を検討する。この実装では secret を取得・差替え・削除しない。
 
 ## Troubleshooting
 

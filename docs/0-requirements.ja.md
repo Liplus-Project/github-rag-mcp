@@ -664,7 +664,7 @@ Issue #263 の調査で再現した issue_comment.deleted の部分削除: Vecto
 
 ## リリース metadata の一致（Issue #261）
 
-両 CD packaging job は bridge package、lock root、MCP Bundle manifest、MCP registry の npm version を同じ検証済み release tag から同期し、pack / publish 前に一致を assert する。依存版、schema、runtime 条件、Worker の挙動を保持する。対象 field と検証 command は [版数と公開成果物](installation.ja.md#versioning-and-published-artifacts) に定義する。commit 済み版は placeholder のままとし、trusted publishing は別変更とする。
+両 CD packaging job は bridge package、lock root、MCP Bundle manifest、MCP registry の npm version を同じ検証済み release tag から同期し、pack / publish 前に一致を assert する。依存版、schema、runtime 条件、Worker の挙動を保持する。対象 field と検証 command は [版数と公開成果物](installation.ja.md#versioning-and-published-artifacts) に定義する。commit 済み版は placeholder のままとする。npm 公開 job は job 単位の `contents: read` / `id-token: write` と対応する固定版 npm CLI により Trusted Publishing（OIDC）を使い、npm token 公開経路を持たない。[npm 公開認証](installation.ja.md#npm-publishing-authentication) に publisher identity と検証境界を定義する。
 
 source の `docs/_Sidebar.md` は既存 Feedback Memory EN/JA ページを参照し、release 後の Wiki navigation に含める。
 
