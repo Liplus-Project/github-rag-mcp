@@ -81,8 +81,7 @@
         "maximum": 50
       },
       "fusion": {
-        "default": "rrf",
-        "description": "Fusion strategy. Default: rrf (Reciprocal Rank Fusion over dense + sparse). dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only. Use rrf unless debugging a specific ranker. Ignored in metadata-only scan mode (empty query).",
+        "description": "Fusion strategy. Default: rrf (Reciprocal Rank Fusion over dense + sparse). dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only — the sharp choice for an exact string (#N, a number, a SHA fragment, an identifier). When fusion is omitted and a search-mode query is a single literal token, the response carries hint suggesting sparse_only. Ignored in metadata-only scan mode (empty query).",
         "type": "string",
         "enum": [
           "rrf",
@@ -163,6 +162,37 @@
           "scan",
           "fetch"
         ]
+      },
+      "hint": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "const": "literal_query"
+          },
+          "suggest": {
+            "type": "object",
+            "properties": {
+              "fusion": {
+                "type": "string",
+                "const": "sparse_only"
+              }
+            },
+            "required": [
+              "fusion"
+            ],
+            "additionalProperties": false
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "suggest",
+          "message"
+        ],
+        "additionalProperties": false
       },
       "results": {
         "maxItems": 50,

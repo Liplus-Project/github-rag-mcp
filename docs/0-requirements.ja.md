@@ -481,6 +481,8 @@ repo 横断の複製（Li+ source が各 user repo の `.claude/` に複製さ�
 - `dense_only` — Vectorize のみ（debug、semantic 特化クエリ）
 - `sparse_only` — D1 FTS5 BM25 のみ（debug、exact term / identifier クエリ）
 
+**literal query の案内（`hint`、issue #251）.** `fusion` を省略し、trim 後の search mode の query が literal トークン1個のとき、応答に `hint: { reason: "literal_query", suggest: { fusion: "sparse_only" }, message }` を付ける。literal トークンは次のいずれか1つに完全一致するもの: `#N`（`#` の後に ASCII 数字）、ASCII 数字のみ、数字を1文字以上含む 7〜40 文字の16進文字列（大文字小文字不問）。それ以外——複数トークン、前後に語が付いたトークン、`defaced` のような16進英字だけの単語——には付けない。`fusion` を明示した呼び出し（`rrf` を含む）、scan mode、stored-content fetch には付けない。このフィールドは案内だけで、件数・順位・スコア・既定の融合は `fusion: "rrf"` を明示した呼び出しと同じである。既定の rrf 呼び出しは literal query に対して最悪の見え方をする: 正解が sparse rank 1 にいても、トークンを含まない dense 側の近傍が同じ結果集合に混ざり、呼び出し側が正解を素通りする。同じ query に `sparse_only` を与えると正解と残りの差が桁違いに開く。tool description には対応する用途→パラメータの1行（exact な文字列 -> `fusion: "sparse_only"`）を載せる。`fusion` の入力 schema は `default` を宣言しない。省略と明示の `rrf` を区別するためで、省略は handler 側で `rrf` に解決する。
+
 `rerank` パラメータで cross-encoder rerank を切り替え可能:
 
 - `true` (default) — RRF 合成後に bge-reranker-base で re-score
@@ -529,6 +531,7 @@ Returns:
 - 追加 debug フィールド: `dense_score`、`sparse_score`、`dense_rank`、`sparse_rank`、`rerank_score`（rerank 無効時または fallback 時は null）
 - 同一実体の他の行を吸収した結果には `same_entity`（Entity Aggregation 参照）。`top_k` は行数ではなく実体数で数える
 - top-level metadata: `fusion`、`dense_candidates`、`sparse_candidates`、`rerank_requested`、`rerank_applied`、`filters_unmatched`
+- `hint`（search mode で、`fusion` 省略かつ literal トークン1個の query のときだけ）— 切替オプションの「literal query の案内」参照
 
 **フィルタ不成立（`filters_unmatched`）.** `repo` はフルスラッグ（`owner/repo`）の完全一致である——dense 側は Vectorize metadata の `$eq`、sparse 側は `d.repo = ?`。`path_prefix` は repository-relative path が指定 directory prefix で始まる doc 行を選ぶ。短いリポジトリ名や、doc 行を1件も選ばない path prefix を渡すと、返るレスポンスは「本当にヒットが無かった」場合と同じ形になる。`filters_unmatched` がこの2つを分ける: search / scan mode では常に存在し、`[]` は確認できた不一致がないことを意味し（プローブ失敗は一致の証明ではない）、名前が載っていればそのフィルタの母集合が空、すなわち誤っているのはクエリではなくフィルタの値である。
 

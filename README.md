@@ -140,7 +140,7 @@ Bot-authored comments (`sender.login` ending in `[bot]`) and comments shorter th
 | `assignee` | string | Filter by assignee login. |
 | `type` | see below | Filter by type (default `all`). |
 | `top_k` | number | Max results (default 10, max 50). Counts distinct entities, not index rows — see Entity aggregation below. |
-| `fusion` | `"rrf"` \| `"dense_only"` \| `"sparse_only"` | Fusion strategy (default `rrf`). Ignored in scan mode. |
+| `fusion` | `"rrf"` \| `"dense_only"` \| `"sparse_only"` | Fusion strategy (default `rrf`). Use `sparse_only` to find an exact string (`#N`, a number, a SHA fragment, an identifier). When omitted and the query is one literal token, the search-mode response carries `hint` suggesting `sparse_only`; results are unchanged. Ignored in scan mode. |
 | `rerank` | boolean | Cross-encoder rerank (default `true`). Ignored in scan mode. |
 | `sort` | `"relevance"` \| `"updated_desc"` \| `"created_desc"` | Result ordering. Default `relevance` with a query, `updated_desc` without. Time sorts override ranker score. |
 | `since` | ISO 8601 string | Keep only results with `updated_at >= since`. In scan mode, defaults to 7 days before `until` (before now when `until` is omitted). |

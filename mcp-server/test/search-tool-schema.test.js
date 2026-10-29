@@ -88,3 +88,16 @@ test("path_prefix is exposed as a doc-only directory filter", () => {
   assert.match(param.description, /64 UTF-8 bytes/);
   assert.match(param.description, /filters_unmatched/);
 });
+
+// gh#251: an exact-string lookup under default rrf mixes in dense-side
+// neighbours, so the schema a client reads states the use -> parameter mapping
+// and the hint that a default literal-token call receives.
+test("fusion guidance names sparse_only for exact strings and the literal-query hint", () => {
+  const fusion = search?.inputSchema?.properties?.fusion;
+  assert.ok(fusion, "fusion param is present in the mirrored schema");
+  assert.equal(fusion.default, undefined, "omitted fusion must stay distinguishable from explicit rrf");
+  assert.match(fusion.description, /sparse_only[^.]*exact string/);
+  assert.match(fusion.description, /hint/);
+  assert.match(search.description, /exact string[^.]*fusion: "sparse_only"/);
+  assert.ok(search.outputSchema.properties.hint, "hint is declared in the output schema");
+});

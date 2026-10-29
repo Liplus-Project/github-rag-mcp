@@ -486,6 +486,8 @@ Cross-repo duplication (the same Li+ source file copied into every user repo's `
 - `dense_only` — query Vectorize only (debugging, semantic-heavy queries).
 - `sparse_only` — query D1 FTS5 BM25 only (debugging, exact-term / identifier queries).
 
+**Literal-query hint (`hint`, issue #251).** When `fusion` is omitted and the trimmed search-mode query is one literal token, the response carries `hint: { reason: "literal_query", suggest: { fusion: "sparse_only" }, message }`. A literal token is exactly one of: `#N` (`#` followed by ASCII digits), ASCII digits only, or a 7-40 character hex string (case-insensitive) containing at least one digit. Anything else — several tokens, a token with surrounding words, a hex-letters-only word such as `defaced` — gets no hint. An explicit `fusion` (including `rrf`), scan mode and stored-content fetch never carry it. The field is guidance only: result count, order, scores and the default fusion are the same as an explicit `fusion: "rrf"` call. The default rrf call is the worst presentation for a literal query: the exact match can sit at sparse rank 1 while dense-side neighbours that do not contain the token share the result set, so a caller reads past it; `sparse_only` on the same query separates the match from the rest by orders of magnitude. The tool description carries the matching use-to-parameter line (exact string -> `fusion: "sparse_only"`). The `fusion` input schema declares no `default` so that an omitted value stays distinguishable from an explicit `rrf`; the handler resolves omission to `rrf`.
+
 `search` also accepts a `rerank` parameter:
 
 - `true` (default) — re-score the RRF-fused candidates with bge-reranker-base.
@@ -534,6 +536,7 @@ Returns:
 - additional debug fields per result: `dense_score`, `sparse_score`, `dense_rank`, `sparse_rank`, `rerank_score` (null when rerank disabled or when graceful fallback engaged)
 - `same_entity` on results that absorbed other rows of the same entity (see Entity Aggregation); `top_k` counts entities, not rows
 - top-level metadata: `fusion`, `dense_candidates`, `sparse_candidates`, `rerank_requested`, `rerank_applied`, `filters_unmatched`
+- `hint` (search mode, only for a literal-token query with `fusion` omitted) — see Literal-query hint under Fusion mode toggle
 
 **Unmatched filters (`filters_unmatched`).** `repo` takes the full slug (`owner/repo`) and matches exactly — on the dense side as a Vectorize metadata `$eq`, on the sparse side as `d.repo = ?`. `path_prefix` selects doc rows whose repository-relative path begins with the named directory prefix. A bare repository name or a path prefix that selects no doc row therefore produces a response shaped exactly like a genuine zero-hit search. `filters_unmatched` separates the two: it is always present in search and scan modes, `[]` means no mismatch was confirmed (probe failure does not prove a match), and a listed name means that filter's population is empty — the value is wrong, not the query. The tool description tells the caller when to pass `repo`: whenever the question is about a known repository, since without it a near-duplicate from another repository can rank first, and to leave it unset only when the question spans repositories. The default stays unfiltered so cross-repository questions keep working.
 
