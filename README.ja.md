@@ -140,7 +140,7 @@ bot (`sender.login` が `[bot]` で終わる) と trim 後 10 文字未満の bo
 | `assignee` | string | assignee login で絞り込み。 |
 | `type` | 下記参照 | type で絞り込み (既定 `all`)。 |
 | `top_k` | number | 最大件数 (既定 10、上限 50)。索引の行数ではなく実体の数で数えます。下記「実体単位の集約」参照。 |
-| `fusion` | `"rrf"` / `"dense_only"` / `"sparse_only"` | fusion 戦略 (既定 `rrf`)。scan モードでは無視。 |
+| `fusion` | `"rrf"` / `"dense_only"` / `"sparse_only"` | fusion 戦略 (既定 `rrf`)。exact な文字列 (`#N`、数字、SHA 断片、識別子) を探すときは `sparse_only`。省略時に query が literal トークン1個なら、search モードの応答に `sparse_only` を案内する `hint` が付きます (結果は変わりません)。scan モードでは無視。 |
 | `rerank` | boolean | cross-encoder rerank (既定 `true`)。scan モードでは無視。 |
 | `sort` | `"relevance"` / `"updated_desc"` / `"created_desc"` | 並び順。query ありの既定は `relevance`、query なしの既定は `updated_desc`。時系列指定は ranker score を上書きします。 |
 | `since` | ISO 8601 文字列 | `updated_at >= since` の結果だけを残します。scan モードの既定は `until` の 7 日前 (`until` 省略時は現在の 7 日前)。 |

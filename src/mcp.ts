@@ -36,6 +36,7 @@ import { registerMemoryTools, rememberResult, memoryCall, hashReturnedContent, M
 import { getMcpAuthContext } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/server";
 import { searchInputSchema, searchOutputSchema, INCLUDE_CONTENT_MAX_DOCS } from "./search-contract.js";
+import { literalQueryHint } from "./literal-query.js";
 import type {
   Env,
   IssueRecord,
@@ -337,6 +338,9 @@ export function createRagMcpServer(env: Env): McpServer {
         "and non-.md files that are not present in the live document index. " +
         "Use type: \"issue_comment\" / \"pr_review\" / \"pr_review_comment\" to retrieve comment-level judgment history " +
         "(Master's feedback, AI responses, self-review now/later/accepted classifications).\n" +
+        "To find an exact string (#N, a number, a SHA fragment, an identifier), pass fusion: \"sparse_only\" — default rrf also " +
+        "ranks dense-side neighbours that do not contain it; when fusion is omitted and the query is one literal token, " +
+        "a search-mode response carries hint suggesting that retry.\n" +
         "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
         "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
         "and a result that absorbed others carries same_entity { count, others[] } with links to them. " +
@@ -379,7 +383,10 @@ export function createRagMcpServer(env: Env): McpServer {
       graph_hops,
       use_memory,
     }) => {
-      const memoryRequest = { query, repo, path_prefix, state, labels, milestone, assignee, type, top_k, fusion, rerank, ...(doc_context === 'matched' ? { doc_context } : {}), sort, since, until, include_content, vector_ids, graph_expand, graph_hops, use_memory };
+      // Omitted fusion resolves to rrf everywhere below; only the literal-query
+      // hint reads whether it was named (issue #251).
+      const fusionExplicit = fusion !== undefined;
+      const memoryRequest = { query, repo, path_prefix, state, labels, milestone, assignee, type, top_k, fusion: fusion ?? "rrf", rerank, ...(doc_context === 'matched' ? { doc_context } : {}), sort, since, until, include_content, vector_ids, graph_expand, graph_hops, use_memory };
       const remember = (payload: unknown) => rememberResult(env, payload, memoryRequest);
       const matched = doc_context === 'matched';
       if (matched && (!(query ?? '').trim() || vector_ids !== undefined || (type !== 'doc' && type !== 'wiki_doc'))) {
@@ -1185,6 +1192,7 @@ export function createRagMcpServer(env: Env): McpServer {
         }
       }
 
+      const hint = literalQueryHint(trimmedQuery, fusionExplicit);
       return {
         content: [
           {
@@ -1198,6 +1206,9 @@ export function createRagMcpServer(env: Env): McpServer {
                 count: items.length,
                 mode: "search",
                 fusion: fusionMode,
+                // Literal-token query under an omitted fusion (issue #251):
+                // guidance only, results / ranks / scores are untouched.
+                ...(hint ? { hint } : {}),
                 sort: effectiveSort,
                 dense_candidates: denseResult.hits.length,
                 sparse_candidates: sparseHits.length,

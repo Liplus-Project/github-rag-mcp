@@ -35,6 +35,9 @@ export const TOOLS = [
       "filters_unmatched: any filter listed there matched no row in the mode's source population; " +
       "[] means no mismatch was confirmed, including when a probe fails. " +
       "Scan probes repo only, across all structured source tables without time or other filters. " +
+      "To find an exact string (#N, a number, a SHA fragment, an identifier), pass fusion: \"sparse_only\" — default rrf also " +
+      "ranks dense-side neighbours that do not contain it; when fusion is omitted and the query is one literal token, " +
+      "a search-mode response carries hint suggesting that retry. " +
       "Results are aggregated per underlying entity: a file's doc row and its commit diffs are one result, " +
       "an issue or PR and its comments / reviews are one result. top_k therefore counts distinct entities, " +
       "and a result that absorbed others carries same_entity { count, others[] } with links to them. " +

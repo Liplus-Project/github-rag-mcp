@@ -57,7 +57,7 @@ issue / pull request / release / repository documentation / GitHub Wiki / commit
 - `repo` / `state` / `labels` / `milestone` / `assignee` / `top_k` — 絞り込みと件数。`repo` は `owner/repo` の完全一致
 - `type` — `issue` / `pull_request` / `release` / `doc` / `wiki_doc` / `diff` / `issue_comment` / `pr_review` / `pr_review_comment` / `all`（既定）
 - `path_prefix` — `type: "doc"` 用の repository-relative directory prefix（末尾 `/` が必須）
-- `fusion` — `rrf`（既定）/ `dense_only` / `sparse_only`
+- `fusion` — `rrf`（既定）/ `dense_only` / `sparse_only`。exact な文字列（`#N`、数字、SHA 断片）を探すときは `sparse_only`。省略時に literal トークン1個の query には応答の `hint` がそれを案内する
 - `rerank` — `true`（既定）/ `false`
 - `sort` — `relevance` / `updated_desc` / `created_desc`（既定は search で `relevance`、scan で `updated_desc`）
 - `since` / `until` — 半開区間 `[since, until)` の時間窓

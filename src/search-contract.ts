@@ -80,14 +80,17 @@ export const searchInputSchema = z.object({
           .optional()
           .default(10)
           .describe("Max results (default: 10, max: 50)"),
+        // No .default(): an omitted fusion must stay distinguishable from an
+        // explicit "rrf" so the literal-query hint fires only on the former
+        // (issue #251). The handler resolves omission to rrf.
         fusion: z
           .enum(["rrf", "dense_only", "sparse_only"])
           .optional()
-          .default("rrf")
           .describe(
             "Fusion strategy. Default: rrf (Reciprocal Rank Fusion over dense + sparse). " +
-              "dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only. " +
-              "Use rrf unless debugging a specific ranker. Ignored in metadata-only scan mode (empty query).",
+              "dense_only = Vectorize only. sparse_only = D1 FTS5 BM25 only — the sharp choice for an exact string " +
+              "(#N, a number, a SHA fragment, an identifier). When fusion is omitted and a search-mode query is a single " +
+              "literal token, the response carries hint suggesting sparse_only. Ignored in metadata-only scan mode (empty query).",
           ),
         rerank: z
           .boolean()
@@ -180,5 +183,6 @@ export const searchInputSchema = z.object({
           ),
       });
 const exclusion = z.object({ location: z.string(), reason: z.string() });
-export const searchOutputSchema = z.object({ count: z.number().int().nonnegative(), mode: z.enum(['search','scan','fetch']), results: z.array(z.record(z.string(), z.unknown())).max(50), graph_results: z.array(z.record(z.string(), z.unknown())).max(30).optional(), trace_id: z.string().optional(), timestamp: z.string().optional(), memory_policy: z.record(z.string(), z.unknown()).optional(), memory_unavailable: z.boolean().optional(), memory_error: z.enum(['retrieval_incomplete', 'memory_save_failed', 'all_sources_unresolved']).optional(),
+const literalQueryHint = z.object({ reason: z.literal('literal_query'), suggest: z.object({ fusion: z.literal('sparse_only') }), message: z.string() });
+export const searchOutputSchema = z.object({ count: z.number().int().nonnegative(), mode: z.enum(['search','scan','fetch']), hint: literalQueryHint.optional(), results: z.array(z.record(z.string(), z.unknown())).max(50), graph_results: z.array(z.record(z.string(), z.unknown())).max(30).optional(), trace_id: z.string().optional(), timestamp: z.string().optional(), memory_policy: z.record(z.string(), z.unknown()).optional(), memory_unavailable: z.boolean().optional(), memory_error: z.enum(['retrieval_incomplete', 'memory_save_failed', 'all_sources_unresolved']).optional(),
   memory_recording: z.object({ status: z.enum(['complete', 'partial', 'unresolved']), recorded_sources: z.number().int().nonnegative(), excluded_sources: z.number().int().nonnegative(), exclusions: z.array(exclusion), excluded_graph_paths: z.number().int().nonnegative(), graph_exclusions: z.array(exclusion) }).optional(), feedback_available: z.boolean() }).passthrough();
