@@ -669,7 +669,7 @@ Issue #259 version contract: live inline doc/wiki uses the returned-text SHA-256
 
 ## Release metadata consistency (Issue #261)
 
-Both CD packaging jobs must derive the bridge package, lock root, MCP Bundle manifest and MCP registry npm versions from the same validated release tag and assert agreement before packing or publishing. Preserve dependency versions, schemas, runtime constraints and Worker behavior. [Versioning and published artifacts](installation.md#versioning-and-published-artifacts) owns the affected fields and validation command. Committed versions remain placeholders; trusted publishing is a separate change.
+Both CD packaging jobs must derive the bridge package, lock root, MCP Bundle manifest and MCP registry npm versions from the same validated release tag and assert agreement before packing or publishing. Preserve dependency versions, schemas, runtime constraints and Worker behavior. [Versioning and published artifacts](installation.md#versioning-and-published-artifacts) owns the affected fields and validation command. Committed versions remain placeholders. The npm publishing job uses Trusted Publishing (OIDC) with job-scoped `contents: read` / `id-token: write`, a compatible pinned npm CLI, and no npm token publishing path. [Publishing authentication](installation.md#npm-publishing-authentication) defines the publisher identity and verification boundary.
 
 The source `docs/_Sidebar.md` must link the existing Feedback Memory EN/JA pages so release wiki navigation includes them.
 

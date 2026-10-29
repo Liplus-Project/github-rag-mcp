@@ -479,11 +479,19 @@ The script validates the entire tag and all four metadata files before writing. 
 | `mcp-server/manifest.json` | `version` |
 | `mcp-server/server.json` | `version` and every `registryType: "npm"` package entry's `version` |
 
-Dependency versions, schema identifiers, Node requirements and non-npm registry entries are preserved. The private root package's Worker version is outside this contract. Invalid tags, unreadable/malformed metadata, missing version fields or mismatched on-disk output fail the job before its pack/publish step. Existing npm authentication and release asset upload remain unchanged.
+Dependency versions, schema identifiers, Node requirements and non-npm registry entries are preserved. The private root package's Worker version is outside this contract. Invalid tags, unreadable/malformed metadata, missing version fields or mismatched on-disk output fail the job before its pack/publish step. Release asset upload remains unchanged; npm authentication follows the contract below.
 
 Add `--check` to verify already-generated metadata without writing. Local fixture regression coverage runs with `node --test scripts/sync-release-version.test.mjs` and in CI; it checks multiple versions, rejection before writes, field preservation, replay and the actual CD relative command.
 
 Working-tree placeholders may lag behind a release. Metadata **inside each published artifact** must agree with the tag; updating one file alone is insufficient. To inspect the published version, use the release tag or npm registry. This synchronization does not publish, create tags or deploy the Worker.
+
+### npm publishing authentication
+
+`.github/workflows/cd.yml` publishes `github-rag-mcp` to `https://registry.npmjs.org` using [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/). Only `npm-publish` has `contents: read` and `id-token: write`; the MCP Bundle jobs retain their existing permissions. This job runs on GitHub-hosted `ubuntu-latest` with Node 24 and installs npm **11.19.1** in the ephemeral runner (the OIDC minimum is npm 11.5.1 / Node 22.14.0). It passes no `NODE_AUTH_TOKEN` or `NPM_TOKEN` to publishing.
+
+The npm package's trusted publisher must match GitHub Actions / organization `Liplus-Project` / repository `github-rag-mcp` / workflow filename `cd.yml`, with no environment name and direct `npm publish` allowed. The package repository URL is `git+https://github.com/Liplus-Project/github-rag-mcp.git`. The owner reported registering this publisher on 2026-10-30 JST; registry-side agreement remains unverified until an authorized real publish succeeds.
+
+The release `published` event, metadata synchronization, public access, prerelease tag `next` / other tag `latest`, and MCP Bundle attachment remain unchanged. Workflow validation, package dry-runs and normal CI do not verify OIDC authentication or publish a package. Issue #256 remains open (or is reopened after the implementation PR merges) until a separately authorized release verifies OIDC publication and the distributed artifacts. Only after that success, and after confirming no other use, may removal of the old repository secret be considered; this implementation does not retrieve, replace or delete it.
 
 ## Troubleshooting
 
