@@ -221,7 +221,6 @@ import type { OAuthEnv } from "./oauth.js";
  * boundary in oauth.ts without an ad-hoc cast at the wiring site.
  */
 export interface Env extends OAuthEnv {
-  MCP_OBJECT: DurableObjectNamespace;
   ISSUE_STORE: DurableObjectNamespace;
   VECTORIZE: Vectorize;
   /** D1 database for full-text search (sparse side of hybrid retrieval, BM25 via FTS5) */
