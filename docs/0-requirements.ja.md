@@ -106,9 +106,10 @@ README 注意書きで吸収する。
 - ユーザー同一性は、処理中のリクエストが持つ OAuth props から取る。インスタンスの
   フィールドではなく、ハンドラのリクエスト毎 auth context 経由で読む。
 - かつて MCP を提供していた Durable Object（`RagMcpAgent` / `RagMcpAgentV2`）は
-  経路から外れた。過去の migration が名指しするクラスはスクリプト内に存在せねば
-  ならないという Cloudflare の制約のため、退役スタブとして export だけ残す。撤去には
-  `deleted_classes` migration が要る。`IssueStore` は実データを保持し、#259 では独立 memory table を追加する。
+  経路から外れた。バインディング（`MCP_OBJECT`）とクラスは撤去し、`v3` の
+  `deleted_classes` migration（#230）でクラスを削除した。保存済みインスタンスも
+  併せて削除される。Worker が export する Durable Object クラスは実データを保持する
+  `IssueStore` だけであり、#259 では独立 memory table を追加する。
 
 この版は本 repository の 2 成果物のあいだの私的な契約である。Worker へ到達する経路は
 npx ブリッジ（`mcp-server/`）だけ——`server.json` は stdio トランスポートしか宣言

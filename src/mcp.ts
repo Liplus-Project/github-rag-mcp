@@ -28,8 +28,9 @@
  * props of the request being served, read through `getMcpAuthContext()`.
  *
  * The Durable Objects that hold real data (`IssueStore`) are untouched; only
- * the MCP-serving DO left the path. Its retired class stubs live in
- * `retired-do.ts` so this module imports nothing from `cloudflare:workers`.
+ * the MCP-serving DO left the path, and its classes were deleted by the v3
+ * `deleted_classes` migration (issue #230). This module imports nothing from
+ * `cloudflare:workers`, which keeps it loadable in the plain node test pool.
  */
 
 import { registerMemoryTools, rememberResult, memoryCall, hashReturnedContent, MEMORY_INSTRUCTIONS } from "./memory-api.js";

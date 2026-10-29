@@ -23,8 +23,6 @@
  *
  * Durable Objects:
  *   IssueStore   -- Issue/PR/wiki state store (SQLite-backed)
- *   RagMcpAgent / RagMcpAgentV2 -- retired MCP-serving classes, exported only
- *                to satisfy the past-migration constraint (see retired-do.ts)
  *
  * Cron Trigger:
  *   Hourly (fallback) -- poll GitHub API for issue/PR updates, generate embeddings, upsert vectors
@@ -65,10 +63,6 @@ import {
 
 // Durable Object: issue/PR state store (SQLite-backed)
 export { IssueStore } from "./store.js";
-
-// Durable Objects: retired MCP-serving stubs, retained for migration
-// compatibility only (see the module comment in retired-do.ts).
-export { RagMcpAgent, RagMcpAgentV2 } from "./retired-do.js";
 
 /**
  * MCP handler for the 2026-07-28 stateless core (issue #224).

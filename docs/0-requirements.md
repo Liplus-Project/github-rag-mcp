@@ -107,10 +107,11 @@ Consequences of statelessness:
   through the handler's per-request auth context rather than from an instance
   field.
 - The Durable Objects that once served MCP (`RagMcpAgent`, `RagMcpAgentV2`) are
-  out of the serving path. Their classes remain exported as retired stubs
-  because Cloudflare requires every class named in a past migration to exist in
-  the script; removing them needs a `deleted_classes` migration. `IssueStore`,
-  which holds real data, gains independent memory tables in #259.
+  out of the serving path. Their binding (`MCP_OBJECT`) and classes were removed
+  and the classes deleted by the `v3` `deleted_classes` migration (#230), which
+  also deletes their stored instances. `IssueStore`, which holds real data, is
+  the only Durable Object class the Worker exports, and gains independent memory
+  tables in #259.
 
 The revision is a private contract between this repository's two artifacts. The
 npx bridge (`mcp-server/`) is the only way to reach the Worker — `server.json`
