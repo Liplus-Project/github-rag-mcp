@@ -26,3 +26,18 @@ node --test scripts/abstention-evaluation.test.mjs
 ```
 
 `prepare` は読取を呼ばず入力packetとgold対応/freezeを決定論的に再構成する作者用処理。凍結後は`validate`だけで検証する。`freeze.json` はそのファイル自身以外の入力全inventory/hash。改変後はhash更新だけで同じholdoutに戻さず、新versionとして露出履歴を残す。reader開始前にcommit/pushと親の意味監査が必要であり、このPR内ではreaderを実行しない。
+
+## 採点前のtransport修正
+
+85KB前後の元packetは同じ文書を4caseずつ繰り返すため、明示的な30000出力budgetでも外側wrapperで切断された。親は技術pilot2batchを結果判定前に除外し、empty入力で得られた出力も未採点の技術証拠としてのみ保持した。この実装担当はpilot回答を読まない。元の `abstention-evaluation-v1/` 全bytes、問い、順、warning、指示、source metadata/原文範囲、gold、採点条件は変更しない。
+
+派生入力 `experiments/abstention-reader-transport-v1/{q7,m2,v8}.json` は一意な文書をrootの`documents`へ1回だけ置き、各caseの`document_ids`で元と同じ順に参照する。共通の`transport_instruction`は参照の読み方だけを説明する。各caseが持つ資料の内容は元と同じで、m2の辞書も参照も空。readerは派生入力1つだけを読み、元入力を追加取得しない。
+
+`scripts/abstention-reader-transport.mjs` の `expand` は元packetへ復元し、元3入力とのJSON deep equalityを検査する。`verifyAnswers(output, expand(packet))` により元の回答/引用検査をそのまま使える。`transport-manifest.json` は元freeze/hash、派生hash/bytes、amendment hashを保持する。`amendment.json` は採点前のtransport修正とpilot除外の扱い、実際の1file読取診断を記録する。toolの概算出力tokenはq7=5821、v8=6244、m2=801で、10000 budgetの完全なJSONとして取得できた。これはprovider入力token数や他surfaceの上限の証明ではない。
+
+```powershell
+node scripts/abstention-reader-transport.mjs verify
+node --test scripts/abstention-reader-transport.test.mjs
+```
+
+派生側の`prepare`も読取モデルを呼ばず、元directoryへ書き込まない。今後の採点runはこの修正後の入力を使って新しい独立contextで開始し、pilotを成績や反復数に混ぜない。
