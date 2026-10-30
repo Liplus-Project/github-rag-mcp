@@ -4,10 +4,12 @@
  *
  * The library fetches the document, caps its size and compares its client_id.
  * What it leaves open is closed here: the client_id URL shape of draft-ietf-
- * oauth-client-id-metadata-document-02 section 3, a bound on the whole fetch
- * (its timer stops at the response headers), and the document fields MCP
- * 2026-07-28 client-registration requires. See docs/0-requirements.md.
+ * oauth-client-id-metadata-document-02 section 3, a per-IP limit on the fetches an
+ * unauthenticated caller can cause, a bound on the whole fetch (its timer stops at
+ * the response headers), and the document fields MCP 2026-07-28 client-registration
+ * requires. See docs/0-requirements.md.
  */
+import { checkClientMetadataFetchRateLimit, rateLimitResponse } from "./rate-limit.js";
 
 /** Where this Worker serves the bridge's own metadata document. */
 export const CLIENT_METADATA_PATH = "/oauth/client-metadata.json";
@@ -70,6 +72,19 @@ export function isFetchableClientIdUrl(clientId: string): boolean {
   if (host.startsWith("[") || /^\d+(\.\d+){3}$/.test(host)) return false;
   if (!host.includes(".")) return false;
   return !SPECIAL_USE_SUFFIXES.some((name) => host === name || host.endsWith(`.${name}`));
+}
+
+/**
+ * What every entry that can reach the library's fetch asks first. Null lets the
+ * call through: a registered client_id, this Worker's own document, or a URL within
+ * the limit. A URL refused for its shape costs no fetch and so is not counted.
+ */
+export function clientMetadataGate(request: Request, clientId: string, status: 400 | 401): Response | null {
+  if (!isClientMetadataUrl(clientId)) return null;
+  if (!isFetchableClientIdUrl(clientId)) return clientMetadataError(status);
+  if (clientId === `${new URL(request.url).origin}${CLIENT_METADATA_PATH}`) return null;
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  return checkClientMetadataFetchRateLimit(ip) ? null : rateLimitResponse();
 }
 
 /** The document of this Worker's own bridge; `origin` is the served origin. */

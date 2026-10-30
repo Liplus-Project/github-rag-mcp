@@ -616,12 +616,15 @@ Division of responsibility on a URL-form `client_id`:
 | https, non-root path; fetch; 5 KiB cap (declared and actually read); `client_id` equals the URL; `redirect_uris` non-empty; redirect URI validation; `token_endpoint_auth_method` limited to `none` / `private_key_jwt`; no URL inside the document is fetched | library |
 | 10 s timeout up to the response headers | library |
 | Bound on the whole fetch including the body: 15 s | Worker (`withClientMetadataDeadline`), on authorize, callback and token |
-| No userinfo, fragment, dot segment (`%2e` included), whitespace, control character or backslash; at most 2048 characters; default port only; host is a DNS name, not an IP literal, a single label or a special-use name. Nothing is fetched otherwise | Worker (`isFetchableClientIdUrl`) |
+| 10 calls per minute per `CF-Connecting-IP` across authorize, callback and token, then `429` with `Retry-After: 60` (`src/rate-limit.ts`). Calls naming the Worker's own document, a registered `client_id`, or a URL refused for its shape are not counted | Worker (`clientMetadataGate`) |
+| No userinfo, fragment, dot segment (`%2e` included), whitespace, control character or backslash; at most 2048 characters; default port only; host is a DNS name, not an IP literal, a single label or a special-use name. Nothing is fetched otherwise. Also applied at the callback, whose `client_id` comes from unsigned `state` | Worker (`isFetchableClientIdUrl`) |
 | `client_name` present, `token_endpoint_auth_method` is `none`, `authorization_code` grant and `code` response type declared | Worker at authorize (`isUsableMetadataClient`) |
-| Any failure at authorize answers `400 invalid_client` with one description, at the token endpoint `401 invalid_client`, so the endpoint does not report why a URL failed | Worker |
+| Any failure at authorize or callback answers `400 invalid_client` with one description, at the token endpoint `401 invalid_client`, so the endpoint does not report why a URL failed | Worker |
 | A grant is not revoked by a later login on the same document URL, since every installation shares it (`revokeExistingGrants: false`). A registered client keeps the default | Worker |
 
-Known gaps, none closable without replacing the library's fetch:
+The limit is per isolate, so it is not consistent across Workers instances: requests spread over many IPs or isolates pass it, and a global limit needs Cloudflare Rate Limiting rules. It counts calls, not fetches (an authorize can cause two), and it cannot see `cf.cacheEverything` hits. There is no negative cache: draft section 5.2 forbids caching errors and invalid documents, and a caller choosing the URL would miss one anyway by changing the path.
+
+Known gaps in the library's fetch, none closable without replacing it:
 
 - Redirects are followed (default `fetch`), and any 2xx counts as success. draft section 5
   says MUST NOT follow and only 200. The document must still name the original URL.
@@ -633,12 +636,12 @@ Known gaps, none closable without replacing the library's fetch:
   take the cache's lifetime to be seen.
 - No Content-Type check, `client_secret` in a document is ignored rather than refused,
   and `grant_types` is not enforced at the token endpoint.
-- No rate limit on the outbound fetch: one unauthenticated request causes at most two.
 - A loopback redirect URI matches on any port (RFC 8252 section 7.3, also applied to
   `localhost`), which is looser than the exact match of draft section 4.2.
-- No consent screen shows the client's or redirect URI's host (draft section 8.5, MCP
-  security considerations). The same holds for DCR, where anyone may register a redirect
-  URI, so CIMD adds no new path.
+
+Outside the fetch, and pre-existing: no consent screen shows the client's or redirect URI's
+host (draft section 8.5, MCP security considerations), and `state` is unsigned. The same holds
+for DCR, where anyone may register a redirect URI, so CIMD adds no new path (issue #302).
 
 The bridge's document is served by the Worker at `GET /oauth/client-metadata.json`, so
 its `client_id` is `<issuer origin>/oauth/client-metadata.json`. Compared with hosting it

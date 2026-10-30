@@ -14,8 +14,8 @@
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import {
   clientMetadataError,
+  clientMetadataGate,
   isClientMetadataUrl,
-  isFetchableClientIdUrl,
   isUsableMetadataClient,
   tokenRequestClientId,
   withClientMetadataDeadline,
@@ -111,8 +111,9 @@ export async function handleAuthorize(
   // and that must not surface as an uncaught exception. Registered clients keep
   // going through the unchanged path below.
   let authRequest: Awaited<ReturnType<OAuthHelpers["parseAuthRequest"]>>;
+  const refused = clientMetadataGate(request, clientId, 400);
+  if (refused) return refused;
   if (isClientMetadataUrl(clientId)) {
-    if (!isFetchableClientIdUrl(clientId)) return clientMetadataError(400);
     try {
       authRequest = await withClientMetadataDeadline(
         (async () => {
@@ -175,6 +176,14 @@ export async function handleGitHubCallback(
     return new Response("Invalid state parameter", { status: 400 });
   }
 
+  // `state` is unsigned, so its client_id is as caller-chosen as authorize's and
+  // goes through the same gate, before the GitHub code is spent. A non-string would
+  // reach the library's URL check and fetch stringified, past this gate's reading.
+  const clientId: unknown = stateData?.oauthRequest?.clientId;
+  if (typeof clientId !== "string") return clientMetadataError(400);
+  const refused = clientMetadataGate(request, clientId, 400);
+  if (refused) return refused;
+
   // Exchange GitHub code for tokens
   const tokenRes = await fetch(GITHUB_TOKEN_URL, {
     method: "POST",
@@ -227,7 +236,7 @@ export async function handleGitHubCallback(
     githubRefreshToken: tokenData.refresh_token || "",
   };
 
-  const metadataClient = isClientMetadataUrl(stateData.oauthRequest.clientId);
+  const metadataClient = isClientMetadataUrl(clientId);
   const completion = oauthHelpers.completeAuthorization({
     request: stateData.oauthRequest,
     userId: String(user.id),
@@ -241,9 +250,14 @@ export async function handleGitHubCallback(
     // registered client_id stays per-installation and keeps the default.
     ...(metadataClient ? { revokeExistingGrants: false } : {}),
   });
-  const { redirectTo } = await (metadataClient ? withClientMetadataDeadline(completion) : completion);
-
-  return Response.redirect(redirectTo, 302);
+  if (!metadataClient) return Response.redirect((await completion).redirectTo, 302);
+  try {
+    const { redirectTo } = await withClientMetadataDeadline(completion);
+    return Response.redirect(redirectTo, 302);
+  } catch (error) {
+    console.warn("CIMD authorization refused:", error instanceof Error ? error.message : error);
+    return clientMetadataError(400);
+  }
 }
 
 /**
@@ -318,8 +332,9 @@ export function createOAuthProvider<TEnv extends OAuthEnv>(
         return forward();
       }
       const clientId = await tokenRequestClientId(request);
+      const refused = clientMetadataGate(request, clientId, 401);
+      if (refused) return refused;
       if (!isClientMetadataUrl(clientId)) return forward();
-      if (!isFetchableClientIdUrl(clientId)) return clientMetadataError(401);
       try {
         return await withClientMetadataDeadline(forward());
       } catch (error) {

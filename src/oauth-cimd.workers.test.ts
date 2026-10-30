@@ -17,10 +17,13 @@ const VERIFIER = "synthetic-verifier-synthetic-verifier-synthetic-verifier";
 let documentResponses: Map<string, () => Response>;
 let outbound: string[];
 let nextGitHubUser: number;
+let callerIp: string;
 
 async function callWorker(input: string, init?: RequestInit): Promise<Response> {
   const ctx = createExecutionContext();
-  const response = await worker.fetch(new Request(input, init), env as never, ctx);
+  const request = new Request(input, init);
+  request.headers.set("CF-Connecting-IP", callerIp);
+  const response = await worker.fetch(request, env as never, ctx);
   await waitOnExecutionContext(ctx);
   return response;
 }
@@ -29,6 +32,8 @@ beforeEach(() => {
   documentResponses = new Map();
   outbound = [];
   nextGitHubUser = Math.floor(Math.random() * 1e9) + 1;
+  // The limiter lives as long as the isolate: each test gets its own count.
+  callerIp = `2001:db8::${crypto.randomUUID().slice(0, 4)}:${crypto.randomUUID().slice(0, 4)}`;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
     const url = input instanceof Request ? input.url : String(input);
     outbound.push(url);
@@ -121,6 +126,24 @@ async function registerClient(redirectUris: string[]): Promise<string> {
   });
   expect(response.status).toBe(201);
   return ((await response.json()) as { client_id: string }).client_id;
+}
+
+/** A callback carrying a chosen client_id, as anyone can write one: state is unsigned. */
+function callbackWithState(clientId: unknown): Promise<Response> {
+  const callback = new URL(`${ORIGIN}/oauth/callback`);
+  callback.searchParams.set("code", "synthetic-github-code");
+  callback.searchParams.set("state", btoa(JSON.stringify({
+    oauthRequest: {
+      responseType: "code",
+      clientId,
+      redirectUri: "https://client.example.com/callback",
+      scope: [],
+      state: "synthetic-state",
+      codeChallenge: "synthetic-challenge",
+      codeChallengeMethod: "S256",
+    },
+  })));
+  return callWorker(callback.toString());
 }
 
 function serveDocument(url: string, fields: Record<string, unknown>, init?: ResponseInit): void {
@@ -262,6 +285,105 @@ describe("a third-party document", () => {
     const response = await refresh(THIRD_PARTY_ID, "a:b:c");
     expect(response.status).toBe(401);
     expect(((await response.json()) as { error: string }).error).toBe("invalid_client");
+  });
+});
+
+describe("a callback whose state names the client", () => {
+  const uniform = {
+    error: "invalid_client",
+    error_description: "Client ID Metadata Document could not be resolved or is invalid",
+  };
+
+  it.each([
+    "https://192.0.2.1/metadata.json",
+    "https://localhost/metadata.json",
+    "https://user@client.example.com/metadata.json",
+    "https://client.example.com:8443/metadata.json",
+    "https://client.example.com/a/../metadata.json",
+  ])("never fetches %s, and does not spend the GitHub code either", async (clientId) => {
+    const response = await callbackWithState(clientId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(uniform);
+    expect(outbound).toEqual([]);
+  });
+
+  it.each([
+    ["an array", ["https://192.0.2.1/metadata.json"]],
+    ["an object", { toString: "https://192.0.2.1/metadata.json" }],
+    ["a missing value", undefined],
+  ])("refuses %s as client_id without any fetch", async (_name, clientId) => {
+    const response = await callbackWithState(clientId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(uniform);
+    expect(outbound).toEqual([]);
+  });
+
+  it("answers uniformly when a gate-passing document cannot be resolved", async () => {
+    const response = await callbackWithState(THIRD_PARTY_ID);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(uniform);
+  });
+});
+
+describe("the limit on fetches a caller can cause", () => {
+  const redirectUri = "https://client.example.com/callback";
+
+  it("refuses the 11th authorize with 429 and Retry-After, without fetching", async () => {
+    serveDocument(THIRD_PARTY_ID, THIRD_PARTY_FIELDS);
+    for (let i = 0; i < 10; i++) expect((await authorize(THIRD_PARTY_ID, redirectUri)).status).toBe(302);
+    outbound.length = 0;
+    const limited = await authorize(THIRD_PARTY_ID, redirectUri);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBe("60");
+    expect(outbound).toEqual([]);
+  });
+
+  it("shares one count across authorize, callback and token", async () => {
+    serveDocument(THIRD_PARTY_ID, THIRD_PARTY_FIELDS);
+    for (let i = 0; i < 4; i++) await authorize(THIRD_PARTY_ID, redirectUri);
+    for (let i = 0; i < 3; i++) await callbackWithState(THIRD_PARTY_ID);
+    for (let i = 0; i < 3; i++) await refresh(THIRD_PARTY_ID, "a:b:c");
+    outbound.length = 0;
+    expect((await refresh(THIRD_PARTY_ID, "a:b:c")).status).toBe(429);
+    expect((await callbackWithState(THIRD_PARTY_ID)).status).toBe(429);
+    expect((await authorize(THIRD_PARTY_ID, redirectUri)).status).toBe(429);
+    expect(outbound).toEqual([]);
+  });
+
+  it("leaves another caller alone", async () => {
+    serveDocument(THIRD_PARTY_ID, THIRD_PARTY_FIELDS);
+    for (let i = 0; i < 11; i++) await authorize(THIRD_PARTY_ID, redirectUri);
+    callerIp = "2001:db8::beef";
+    expect((await authorize(THIRD_PARTY_ID, redirectUri)).status).toBe(302);
+  });
+
+  it("does not count the Worker's own document", async () => {
+    for (let i = 0; i < 12; i++) {
+      expect((await authorize(BRIDGE_CLIENT_ID, "http://127.0.0.1:53412/callback")).status).toBe(302);
+    }
+    expect((await refresh(BRIDGE_CLIENT_ID, "a:b:c")).status).toBe(400);
+  });
+
+  it("does not count a registered client_id", async () => {
+    const clientId = await registerClient(["http://127.0.0.1:53412/callback"]);
+    for (let i = 0; i < 12; i++) {
+      expect((await authorize(clientId, "http://127.0.0.1:53412/callback")).status).toBe(302);
+      expect((await refresh(clientId, "a:b:c")).status).toBe(400);
+    }
+  });
+
+  it("does not count a URL refused for its shape", async () => {
+    for (let i = 0; i < 12; i++) {
+      expect((await authorize("https://192.0.2.1/metadata.json", redirectUri)).status).toBe(400);
+    }
+    serveDocument(THIRD_PARTY_ID, THIRD_PARTY_FIELDS);
+    expect((await authorize(THIRD_PARTY_ID, redirectUri)).status).toBe(302);
+  });
+
+  it("remembers no failure: a corrected document works on the next try", async () => {
+    expect((await authorize(THIRD_PARTY_ID, redirectUri)).status).toBe(400);
+    serveDocument(THIRD_PARTY_ID, THIRD_PARTY_FIELDS);
+    expect((await authorize(THIRD_PARTY_ID, redirectUri)).status).toBe(302);
   });
 });
 
