@@ -1,0 +1,76 @@
+{
+  "answers": [
+    {
+      "id": "Q001",
+      "status": "insufficient",
+      "answer": "測定端末とp99値を示す固定版資料が提供されていないため、回答できません。本番p99再描画時間が10ms未満を達成済みという前提も確認できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q002",
+      "status": "insufficient",
+      "answer": "起動中の画面のlocalStorage実値を示す資料がないため、実際に保存されているterminal font sizeは確定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q003",
+      "status": "insufficient",
+      "answer": "ipMatchesCIDRsの実装資料がないため、IPv6 client IPを常にfalseにするという前提も、その分岐も確認できません。資料の不在から前提が誤りとも断定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q004",
+      "status": "insufficient",
+      "answer": "UI scaleの保存処理を示す資料がないため、参加者ごとのconfigに保存されるという前提と保存先は確認できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q005",
+      "status": "insufficient",
+      "answer": "削除順序、障害注入試験、本番の孤児率を示す資料がないため、孤児率0%を達成済みという前提も障害注入件数も確認できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q006",
+      "status": "insufficient",
+      "answer": "このデプロイのクラッシュ後の削除再試行や時間保証を示す資料がないため、保証される上限秒数は確定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q007",
+      "status": "insufficient",
+      "answer": "index entry削除、topicファイル削除、readによる復元の関係を示す資料がないため、提示された前提もreadとの関係も確認できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q008",
+      "status": "insufficient",
+      "answer": "deleteの処理を示す固定版資料がないため、添付ファイル削除とtopic log削除のどちらが先かは確定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q009",
+      "status": "insufficient",
+      "answer": "GitHub hook CIDR cacheのTTL定数を示す資料がないため、秒数は確定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q010",
+      "status": "insufficient",
+      "answer": "未選択画面のterminal fontの既定値を示す資料がないため、値と単位は確定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q011",
+      "status": "insufficient",
+      "answer": "このデプロイの全isolateを横断する更新保証を示す資料がないため、GitHub hook CIDR更新遅延の最大秒数は確定できません。",
+      "quotes": []
+    },
+    {
+      "id": "Q012",
+      "status": "insufficient",
+      "answer": "CIDR cacheの本番API失敗率への効果や測定結果を示す資料がないため、1%未満にしたと確認済みという前提、測定期間、失敗件数はいずれも確認できません。",
+      "quotes": []
+    }
+  ]
+}
