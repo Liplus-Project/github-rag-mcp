@@ -19,10 +19,14 @@ async function harness(t, options = {}) {
   let refreshes = 0;
   let exchanges = 0;
   const metadata = {
+    issuer: "https://oauth.test",
     authorization_endpoint: "https://oauth.test/authorize",
     token_endpoint: "https://oauth.test/token",
     registration_endpoint: "https://oauth.test/register",
+    ...options.metadata,
   };
+  let registrations = 0;
+  const probes = [];
   const provider = createOAuthProvider({
     workerUrl: "https://oauth.test", tokenDir,
     initialWaitMs: 5, pendingWaitMs: 5, callbackTimeoutMs: 2000,
@@ -33,7 +37,12 @@ async function harness(t, options = {}) {
     fetch: async (url, init) => {
       if (options.remote && (url instanceof Request ? url.url : String(url)).endsWith("/mcp")) return options.remote(url, init);
       if (url.endsWith("/.well-known/oauth-authorization-server")) return Response.json(metadata);
+      if (url.startsWith(metadata.authorization_endpoint)) {
+        probes.push({ url: new URL(url), init });
+        return options.probe ? await options.probe() : new Response(null, { status: 302, headers: { Location: "https://github.test/" } });
+      }
       if (url === metadata.registration_endpoint) {
+        registrations++;
         if (options.registrationFails) return new Response("sensitive registration detail", { status: 400 });
         return Response.json({ client_id: "synthetic-client", redirect_uris: JSON.parse(init.body).redirect_uris });
       }
@@ -65,7 +74,7 @@ async function harness(t, options = {}) {
     return await fetch(url);
   }
   return { provider, browsers, servers, tokenDir, tokenFile, save, callback,
-    counts: () => ({ refreshes, exchanges }) };
+    probes, counts: () => ({ refreshes, exchanges }), registrations: () => registrations };
 }
 
 test("failed refresh followed by delayed authorization uses saved token on the next call", async t => {
@@ -297,4 +306,114 @@ test("listener startup failure rejects promptly without an unhandled server erro
     return server;
   } } });
   await assert.rejects(h.provider.token(), { message: "OAuth authorization setup failed" });
+});
+
+const METADATA_CLIENT_ID = "https://oauth.test/oauth/client-metadata.json";
+const ADVERTISED = { client_id_metadata_document_supported: true };
+
+test("an advertised document is used in place of registration, and refresh keeps that client id", async t => {
+  let refreshedAs;
+  const h = await harness(t, { metadata: ADVERTISED, refresh: init => {
+    refreshedAs = init.body.get("client_id");
+    return Response.json({ access_token: "synthetic-refreshed", expires_in: 3600 });
+  } });
+  await assert.rejects(h.provider.token(), OAuthPendingError);
+  assert.equal(h.registrations(), 0);
+  const browser = h.browsers[0];
+  assert.equal(browser.searchParams.get("client_id"), METADATA_CLIENT_ID);
+  assert.match(browser.searchParams.get("redirect_uri"), /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+  assert.equal((await h.callback()).status, 200);
+  assert.equal(await h.provider.token(), "synthetic-new");
+  const saved = JSON.parse(await readFile(h.tokenFile));
+  assert.equal(saved.client_id, METADATA_CLIENT_ID);
+  await assert.rejects(readFile(join(h.tokenDir, "oauth-client.json")), { code: "ENOENT" });
+
+  await h.save({ ...saved, expires_at: 1 });
+  assert.equal(await h.provider.token(), "synthetic-refreshed");
+  assert.equal(refreshedAs, METADATA_CLIENT_ID);
+});
+
+test("the probe asks the real authorization request without following its redirect", async t => {
+  const h = await harness(t, { metadata: ADVERTISED });
+  await assert.rejects(h.provider.token(), OAuthPendingError);
+  assert.equal(h.probes.length, 1);
+  assert.equal(h.probes[0].init.redirect, "manual");
+  assert.ok(h.probes[0].init.signal instanceof AbortSignal);
+  assert.equal(h.probes[0].url.toString(), h.browsers[0].toString());
+});
+
+for (const [name, probe] of [
+  ["refuses the document", () => new Response(null, { status: 400 })],
+  ["fails on the server side", () => new Response(null, { status: 500 })],
+  ["answers without a redirect", () => new Response(null, { status: 200 })],
+  ["cannot be reached", () => { throw new Error("synthetic network failure"); }],
+]) {
+  test(`registration takes over when an advertising server ${name}`, async t => {
+    const h = await harness(t, { metadata: ADVERTISED, probe });
+    await assert.rejects(h.provider.token(), OAuthPendingError);
+    assert.equal(h.registrations(), 1);
+    assert.equal(h.browsers[0].searchParams.get("client_id"), "synthetic-client");
+    await h.callback();
+    assert.equal(await h.provider.token(), "synthetic-new");
+    assert.equal(JSON.parse(await readFile(h.tokenFile)).client_id, "synthetic-client");
+  });
+}
+
+for (const [name, metadata] of [
+  ["no advertisement", {}],
+  ["an advertisement of false", { client_id_metadata_document_supported: false }],
+  ["a truthy non-boolean advertisement", { client_id_metadata_document_supported: "true" }],
+  ["an http issuer", { ...ADVERTISED, issuer: "http://127.0.0.1:8787" }],
+  ["no issuer", { ...ADVERTISED, issuer: undefined }],
+]) {
+  test(`${name} goes straight to registration without a probe`, async t => {
+    const h = await harness(t, { metadata });
+    await assert.rejects(h.provider.token(), OAuthPendingError);
+    assert.equal(h.probes.length, 0);
+    assert.equal(h.registrations(), 1);
+    assert.equal(h.browsers[0].searchParams.get("client_id"), "synthetic-client");
+  });
+}
+
+test("an advertising server leaves an existing registered token on its issuing client", async t => {
+  let refreshedAs;
+  const h = await harness(t, { metadata: ADVERTISED, refresh: init => {
+    refreshedAs = init.body.get("client_id");
+    return Response.json({ access_token: "synthetic-refreshed", expires_in: 3600 });
+  } });
+  await h.save({ access_token: "synthetic-expired", refresh_token: "synthetic-refresh", client_id: "synthetic-issuing-client", expires_at: 1 });
+  assert.equal(await h.provider.token(), "synthetic-refreshed");
+  assert.equal(refreshedAs, "synthetic-issuing-client");
+  assert.equal(JSON.parse(await readFile(h.tokenFile)).client_id, "synthetic-issuing-client");
+  assert.equal(h.probes.length, 0);
+  assert.equal(h.browsers.length, 0);
+});
+
+test("an advertising server leaves a record without a client id on the shared registration", async t => {
+  let refreshedAs;
+  const h = await harness(t, { metadata: ADVERTISED, refresh: init => {
+    refreshedAs = init.body.get("client_id");
+    return Response.json({ access_token: "synthetic-refreshed", expires_in: 3600 });
+  } });
+  await h.save({ access_token: "synthetic-expired", refresh_token: "synthetic-refresh", expires_at: 1 });
+  await writeFile(join(h.tokenDir, "oauth-client.json"), JSON.stringify({ client_id: "synthetic-shared-client" }));
+  assert.equal(await h.provider.token(), "synthetic-refreshed");
+  assert.equal(refreshedAs, "synthetic-shared-client");
+  assert.equal(h.probes.length, 0);
+});
+
+test("a registered token that can no longer refresh moves to the document on its next authorization", async t => {
+  const h = await harness(t, { metadata: ADVERTISED });
+  await h.save({ access_token: "synthetic-expired", refresh_token: "synthetic-refresh", client_id: "synthetic-issuing-client", expires_at: 1 });
+  await assert.rejects(h.provider.token(), OAuthPendingError);
+  assert.equal(h.browsers[0].searchParams.get("client_id"), METADATA_CLIENT_ID);
+});
+
+test("a document token refused after the server stopped advertising falls back to registration", async t => {
+  const h = await harness(t);
+  await h.save({ access_token: "synthetic-expired", refresh_token: "synthetic-refresh", client_id: METADATA_CLIENT_ID, expires_at: 1 });
+  await assert.rejects(h.provider.token(), OAuthPendingError);
+  assert.equal(h.counts().refreshes, 1);
+  assert.equal(h.registrations(), 1);
+  assert.equal(h.browsers[0].searchParams.get("client_id"), "synthetic-client");
 });

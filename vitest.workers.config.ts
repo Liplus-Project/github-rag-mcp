@@ -22,7 +22,9 @@ export default defineConfig(async () => {
     isolatedStorage: false,
     miniflare: {
       compatibilityDate: "2025-03-26",
-      compatibilityFlags: ["nodejs_compat"],
+      // Mirrors wrangler.toml: the OAuth library reads these flags at runtime.
+      compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"],
+      kvNamespaces: ["OAUTH_KV"],
       d1Databases: {
         DB_FTS: "test-fts",
         DB_FTS_MIGRATION: "test-fts-migration",
@@ -31,7 +33,11 @@ export default defineConfig(async () => {
       durableObjects: {
         ISSUE_STORE: { className: "IssueStore", useSQLite: true },
       },
-      bindings: { TEST_MIGRATIONS: migrations },
+      bindings: {
+        TEST_MIGRATIONS: migrations,
+        GITHUB_CLIENT_ID: "test-github-client",
+        GITHUB_CLIENT_SECRET: "test-github-secret",
+      },
     },
   };
   return {

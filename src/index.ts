@@ -13,6 +13,7 @@
  *   POST /webhooks/github -- GitHub webhook receiver (IP allowlist + signature verification)
  *   GET /oauth/authorize  -- Start GitHub OAuth flow
  *   GET /oauth/callback   -- GitHub OAuth callback
+ *   GET /oauth/client-metadata.json -- Client ID Metadata Document of the bridge
  *   POST /admin/reset-hashes?repo=owner/repo  -- Reset hashes and watermarks to trigger full re-embedding (requires GITHUB_TOKEN header)
  *   POST /admin/diff-watermark?repo=owner/repo&since=ISO8601[&phase=forward|backfill] -- Rewind the commit-diff poller watermark (requires GITHUB_TOKEN header)
  *   POST /admin/backfill-fts-segments[?repo=owner/repo][&cursor=N][&limit=N] -- Re-segment one batch of natural-language FTS rows (requires GITHUB_TOKEN header)
@@ -39,6 +40,7 @@ import {
   readOAuthHelpers,
   writeMcpProps,
 } from "./oauth.js";
+import { CLIENT_METADATA_PATH, handleClientMetadata } from "./client-metadata.js";
 import { handleScheduled, pollWiki } from "./poller.js";
 import { handleWebhook } from "./webhook.js";
 import { createMcpHandler, type StatelessMcpHandler } from "agents/mcp/server";
@@ -632,6 +634,11 @@ const innerHandler: ExportedHandler<Env> = {
     // -- OAuth callback (GitHub redirects back here) --
     if (url.pathname === "/oauth/callback") {
       return handleGitHubCallback(request, env, readOAuthHelpers(env));
+    }
+
+    // -- Client ID Metadata Document of the bridge (public, no token required) --
+    if (url.pathname === CLIENT_METADATA_PATH && request.method === "GET") {
+      return handleClientMetadata(request);
     }
 
     return new Response("Not found", { status: 404 });

@@ -593,6 +593,79 @@ New token records retain their issuing client ID for refresh even when another
 process replaces shared client registration; legacy records use that registration
 as a fallback. Token and registration writes replace complete files atomically.
 
+### Client ID Metadata Documents (issue #299)
+
+The Worker accepts a URL-form `client_id` as a Client ID Metadata Document (CIMD,
+draft-ietf-oauth-client-id-metadata-document-02; MCP 2026-07-28 client-registration)
+through `clientIdMetadataDocumentEnabled` of `@cloudflare/workers-oauth-provider`,
+and advertises `client_id_metadata_document_supported: true`. Dynamic Client
+Registration stays: `registration_endpoint`, `/oauth/register`, a registered
+client's lookup and its grants do not change, and removing DCR is out of scope.
+
+The library requires the `global_fetch_strictly_public` compatibility flag and
+without it neither advertises nor accepts CIMD. The flag applies to every global
+`fetch()` of the Worker: a request to the Worker's own zone goes through Cloudflare's
+front door instead of straight to the origin. All other outbound hosts are GitHub's
+(`api.github.com`, `github.com`, `raw.githubusercontent.com`), and a test fails when
+a new host appears in `src/`.
+
+Division of responsibility on a URL-form `client_id`:
+
+| Check | Done by |
+|---|---|
+| https, non-root path; fetch; 5 KiB cap (declared and actually read); `client_id` equals the URL; `redirect_uris` non-empty; redirect URI validation; `token_endpoint_auth_method` limited to `none` / `private_key_jwt`; no URL inside the document is fetched | library |
+| 10 s timeout up to the response headers | library |
+| Bound on the whole fetch including the body: 15 s | Worker (`withClientMetadataDeadline`), on authorize, callback and token |
+| No userinfo, fragment, dot segment (`%2e` included), whitespace, control character or backslash; at most 2048 characters; default port only; host is a DNS name, not an IP literal, a single label or a special-use name. Nothing is fetched otherwise | Worker (`isFetchableClientIdUrl`) |
+| `client_name` present, `token_endpoint_auth_method` is `none`, `authorization_code` grant and `code` response type declared | Worker at authorize (`isUsableMetadataClient`) |
+| Any failure at authorize answers `400 invalid_client` with one description, at the token endpoint `401 invalid_client`, so the endpoint does not report why a URL failed | Worker |
+| A grant is not revoked by a later login on the same document URL, since every installation shares it (`revokeExistingGrants: false`). A registered client keeps the default | Worker |
+
+Known gaps, none closable without replacing the library's fetch:
+
+- Redirects are followed (default `fetch`), and any 2xx counts as success. draft section 5
+  says MUST NOT follow and only 200. The document must still name the original URL.
+- No check that the address is not special-use (draft section 8.6). The Worker relies on
+  the flag and on the absence of any private network behind it; a DNS name resolving to
+  a special-use address is not rejected by this code.
+- Caching is `cf.cacheEverything`, which is not limited to valid documents (draft
+  section 5.2 forbids caching errors and invalid documents). A corrected document may
+  take the cache's lifetime to be seen.
+- No Content-Type check, `client_secret` in a document is ignored rather than refused,
+  and `grant_types` is not enforced at the token endpoint.
+- No rate limit on the outbound fetch: one unauthenticated request causes at most two.
+- A loopback redirect URI matches on any port (RFC 8252 section 7.3, also applied to
+  `localhost`), which is looser than the exact match of draft section 4.2.
+- No consent screen shows the client's or redirect URI's host (draft section 8.5, MCP
+  security considerations). The same holds for DCR, where anyone may register a redirect
+  URI, so CIMD adds no new path.
+
+The bridge's document is served by the Worker at `GET /oauth/client-metadata.json`, so
+its `client_id` is `<issuer origin>/oauth/client-metadata.json`. Compared with hosting it
+on the repository or GitHub Pages, it needs no external setup or host in the login and
+refresh path, follows the Worker's own version, and works on a self-hosted Worker. The
+library has no hook for local resolution, so the Worker fetches its own URL through the
+front door, once per authorize-side lookup and per token request.
+
+`redirect_uris` is `["http://127.0.0.1/callback"]`: the bridge's listener binds
+`127.0.0.1` on an ephemeral port, which a static document cannot enumerate, and the
+`localhost` form is never sent, so it is not declared. This depends on RFC 8252 port
+handling and would not satisfy an authorization server applying draft section 4.2
+literally. The bridge only uses this document against the Worker that serves it.
+
+The bridge selects a client as follows:
+
+1. When metadata advertises `client_id_metadata_document_supported: true` and `issuer` is
+   https, it sends that authorization request once with `redirect: "manual"` before opening
+   the browser, because a browser flow cannot observe a refusal. A 302 selects the document.
+2. Otherwise, or on any other answer or error, it falls back to DCR and `oauth-client.json`.
+3. The token record stores the issuing `client_id` and refresh sends that one, so a
+   registered record keeps refreshing with its registered client and a record without
+   `client_id` uses `oauth-client.json`. Using the document does not touch that file.
+
+A failed document fetch during refresh answers `invalid_client`, which the bridge handles
+as any failed refresh: a new browser flow, on which step 1 runs again.
+
 ## Storage Rules
 
 ### Canonical memory surfaces

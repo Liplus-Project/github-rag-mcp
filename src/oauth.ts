@@ -4,6 +4,7 @@
  * Integrates @cloudflare/workers-oauth-provider to handle:
  * - RFC 8414 metadata discovery (/.well-known/oauth-authorization-server)
  * - RFC 7591 dynamic client registration (/oauth/register)
+ * - Client ID Metadata Documents (URL-form client_id, see ./client-metadata.ts)
  * - Authorization code flow with PKCE (S256)
  * - Token issuance and refresh (/oauth/token)
  * - GitHub App OAuth as upstream identity provider
@@ -11,6 +12,14 @@
  * Pattern ported from github-webhook-mcp/worker/src/oauth.ts
  */
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import {
+  clientMetadataError,
+  isClientMetadataUrl,
+  isFetchableClientIdUrl,
+  isUsableMetadataClient,
+  tokenRequestClientId,
+  withClientMetadataDeadline,
+} from "./client-metadata.js";
 
 /** GitHub OAuth endpoints */
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -97,7 +106,29 @@ export async function handleAuthorize(
   env: OAuthEnv,
   oauthHelpers: OAuthHelpers,
 ): Promise<Response> {
-  const authRequest = await oauthHelpers.parseAuthRequest(request);
+  const clientId = new URL(request.url).searchParams.get("client_id") ?? "";
+  // A URL-form client_id is answered here: the library throws on a bad document,
+  // and that must not surface as an uncaught exception. Registered clients keep
+  // going through the unchanged path below.
+  let authRequest: Awaited<ReturnType<OAuthHelpers["parseAuthRequest"]>>;
+  if (isClientMetadataUrl(clientId)) {
+    if (!isFetchableClientIdUrl(clientId)) return clientMetadataError(400);
+    try {
+      authRequest = await withClientMetadataDeadline(
+        (async () => {
+          const parsed = await oauthHelpers.parseAuthRequest(request);
+          const client = await oauthHelpers.lookupClient(clientId);
+          if (!isUsableMetadataClient(client)) throw new Error("Document lacks a required field");
+          return parsed;
+        })(),
+      );
+    } catch (error) {
+      console.warn("CIMD authorization refused:", error instanceof Error ? error.message : error);
+      return clientMetadataError(400);
+    }
+  } else {
+    authRequest = await oauthHelpers.parseAuthRequest(request);
+  }
 
   // Encode original OAuth request in state for the GitHub callback
   const statePayload = JSON.stringify({
@@ -196,7 +227,8 @@ export async function handleGitHubCallback(
     githubRefreshToken: tokenData.refresh_token || "",
   };
 
-  const { redirectTo } = await oauthHelpers.completeAuthorization({
+  const metadataClient = isClientMetadataUrl(stateData.oauthRequest.clientId);
+  const completion = oauthHelpers.completeAuthorization({
     request: stateData.oauthRequest,
     userId: String(user.id),
     metadata: {
@@ -204,7 +236,12 @@ export async function handleGitHubCallback(
     },
     scope: stateData.oauthRequest.scope,
     props,
+    // One document URL is shared by every installation of a client, so revoking
+    // "this user's grants for this client" would sign the user out elsewhere. A
+    // registered client_id stays per-installation and keeps the default.
+    ...(metadataClient ? { revokeExistingGrants: false } : {}),
   });
+  const { redirectTo } = await (metadataClient ? withClientMetadataDeadline(completion) : completion);
 
   return Response.redirect(redirectTo, 302);
 }
@@ -252,6 +289,10 @@ export function createOAuthProvider<TEnv extends OAuthEnv>(
     tokenEndpoint: "/oauth/token",
     clientRegistrationEndpoint: "/oauth/register",
 
+    // Accept URL-form client_ids. Takes effect, and is advertised in the server
+    // metadata, only with the global_fetch_strictly_public compatibility flag.
+    clientIdMetadataDocumentEnabled: true,
+
     // Token TTLs matching GitHub App token lifetimes
     // Access token: 1 hour (GitHub's ghu_ is 8h, but shorter is safer)
     accessTokenTTL: 3600,
@@ -271,7 +312,20 @@ export function createOAuthProvider<TEnv extends OAuthEnv>(
   });
 
   return {
-    fetch: (request, env, ctx) =>
-      provider.fetch(request, env as unknown as LibEnv, ctx),
+    fetch: async (request, env, ctx) => {
+      const forward = () => provider.fetch(request, env as unknown as LibEnv, ctx);
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/oauth/token") {
+        return forward();
+      }
+      const clientId = await tokenRequestClientId(request);
+      if (!isClientMetadataUrl(clientId)) return forward();
+      if (!isFetchableClientIdUrl(clientId)) return clientMetadataError(401);
+      try {
+        return await withClientMetadataDeadline(forward());
+      } catch (error) {
+        console.warn("CIMD token request refused:", error instanceof Error ? error.message : error);
+        return clientMetadataError(401);
+      }
+    },
   };
 }
