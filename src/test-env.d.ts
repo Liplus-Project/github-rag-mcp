@@ -19,6 +19,8 @@ declare module "cloudflare:test" {
     ISSUE_STORE: DurableObjectNamespace<import("./store.js").IssueStore>;
   }
   export const env: ProvidedEnv;
+  export function createExecutionContext(): ExecutionContext;
+  export function waitOnExecutionContext(ctx: ExecutionContext): Promise<void>;
   export function applyD1Migrations(
     db: D1Database,
     migrations: TestD1Migration[],
@@ -28,4 +30,14 @@ declare module "cloudflare:test" {
     stub: DurableObjectStub<O>,
     callback: (instance: O, state: DurableObjectState) => R | Promise<R>,
   ): Promise<R>;
+}
+
+// Vite transforms these two in the node test project, which has no node typings.
+declare module "*?raw" {
+  const content: string;
+  export default content;
+}
+
+interface ImportMeta {
+  glob(pattern: string[], options: { query: string; import: string; eager: true }): Record<string, string>;
 }

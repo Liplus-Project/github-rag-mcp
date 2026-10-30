@@ -1,7 +1,12 @@
 name = "github-rag-mcp"
 main = "src/index.ts"
 compatibility_date = "2025-03-26"
-compatibility_flags = ["nodejs_compat"]
+# global_fetch_strictly_public: required by the OAuth library for Client ID Metadata
+# Documents (issue #299). It changes the routing of every global fetch(): a request
+# to this Worker's own zone goes through Cloudflare's front door instead of straight
+# to the origin. The Worker's other outbound hosts are all GitHub's, outside that
+# zone; src/client-metadata.test.ts fails when a new host appears.
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
 [durable_objects]
 bindings = [

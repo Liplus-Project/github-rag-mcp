@@ -588,6 +588,70 @@ MCP protocol と検索の意味は変更しない。
 registration を置き換えてもその ID で refresh する。旧 record は共有 registration
 を fallback として使う。token と registration は完成したファイルを atomic に置換する。
 
+### Client ID Metadata Documents（issue #299）
+
+Worker は URL 形式の `client_id` を Client ID Metadata Document（CIMD、
+draft-ietf-oauth-client-id-metadata-document-02、MCP 2026-07-28 client-registration）
+として受け付ける。`@cloudflare/workers-oauth-provider` の
+`clientIdMetadataDocumentEnabled` を使い、`client_id_metadata_document_supported: true`
+を広告する。Dynamic Client Registration は残す。`registration_endpoint`、
+`/oauth/register`、登録済み client の解決とその grant は変わらない。DCR の撤去は範囲外。
+
+ライブラリは `global_fetch_strictly_public` compatibility flag を要求し、これが無いと
+CIMD を広告も受け付けもしない。この flag は Worker のすべての global `fetch()` に効く。
+Worker 自身の zone への要求は、origin へ直行せず Cloudflare の front door を通る。
+それ以外の外向き host はすべて GitHub のもの（`api.github.com`、`github.com`、
+`raw.githubusercontent.com`）で、`src/` に新しい host が現れるとテストが落ちる。
+
+URL 形式の `client_id` に対する担当の分担:
+
+| 確認 | 担当 |
+|---|---|
+| https で root 以外の path を持つこと、取得、5 KiB 上限（宣言値と実際の読み取り量）、`client_id` と URL の一致、`redirect_uris` が空でないこと、redirect URI の検証、`token_endpoint_auth_method` を `none` / `private_key_jwt` に限定、文書内の URL を取得しないこと | ライブラリ |
+| 応答ヘッダーまでの 10 秒 timeout | ライブラリ |
+| 本文を含む取得全体の上限 15 秒 | Worker（`withClientMetadataDeadline`）。authorize、callback、token |
+| authorize、callback、token を合わせて `CF-Connecting-IP` ごとに 1 分 10 回。超えると `429` と `Retry-After: 60`（`src/rate-limit.ts`）。Worker 自身の文書、登録済み `client_id`、形式で拒否した URL は数えない | Worker（`clientMetadataGate`） |
+| userinfo、fragment、dot segment（`%2e` を含む）、空白、制御文字、バックスラッシュを含まないこと。2048 文字以下。既定 port のみ。host は DNS 名で、IP literal、単一ラベル、特殊用途名ではないこと。満たさなければ取得しない。`client_id` を署名なしの `state` から得る callback にも適用する | Worker（`isFetchableClientIdUrl`） |
+| `client_name` があること、`token_endpoint_auth_method` が `none`、`authorization_code` と `code` を宣言していること | authorize で Worker（`isUsableMetadataClient`） |
+| 失敗は理由によらず authorize と callback で `400 invalid_client`、token で `401 invalid_client`、説明文は一律。URL が失敗した理由を返さない | Worker |
+| 同じ文書 URL への後からのログインで既存 grant を取り消さない。全インストールが同じ URL を共有するため（`revokeExistingGrants: false`）。登録済み client は既定のまま | Worker |
+
+この上限は isolate ごとで、Workers インスタンス全体では一貫しない。多数の IP や isolate に分散した要求は通るので、全体の上限には Cloudflare の Rate Limiting rule が要る。数えるのは呼び出しで取得回数ではなく（authorize 1 回で 2 回取得しうる）、`cf.cacheEverything` の命中も区別できない。negative cache は入れない。draft §5.2 がエラーと不正な文書の cache を禁じており、URL を選ぶ側は path を変えるだけで外せるので抑止にもならない。
+
+ライブラリの取得に残る差分。いずれも置き換えない限り塞げない:
+
+- redirect を追い（`fetch` の既定）、2xx を成功として扱う。draft §5 は追跡の禁止と 200 のみを定める。文書が元の URL を名乗る必要は残る。
+- 特殊用途アドレスでないことの確認が無い（draft §8.6）。flag と、背後に private network が無いことに依存する。特殊用途アドレスへ解決される DNS 名を、このコードは拒否しない。
+- cache は `cf.cacheEverything` で、有効な文書に限らない（draft §5.2 はエラーと不正な文書の cache を禁じる）。修正した文書の反映が cache の寿命まで遅れることがある。
+- Content-Type を確認しない。文書の `client_secret` は拒否せず無視する。`grant_types` は token endpoint で強制しない。
+- loopback の redirect URI は任意の port で一致する（RFC 8252 §7.3、`localhost` にも適用）。draft §4.2 の完全一致より緩い。
+
+取得の外にある既存の問題: client や redirect URI の host を見せる同意画面が無く（draft §8.5、MCP security considerations）、`state` に署名が無い。誰でも redirect URI を登録できる DCR も同じなので、CIMD で新しい経路は増えない（issue #302）。
+
+ブリッジ用の文書は Worker 自身が `GET /oauth/client-metadata.json` で配信し、`client_id` は
+`<issuer の origin>/oauth/client-metadata.json` になる。リポジトリや GitHub Pages に置く案と
+比べて、外部の設定も、ログインと refresh の経路に入る外部 host も要らず、文書が Worker と同じ版で
+更新され、self-host の Worker でも動く。ライブラリにローカル解決の hook が無いので、Worker は
+front door 経由で自分の URL を取得する。回数は authorize 側の解決ごとと token 要求ごとに 1 回。
+
+`redirect_uris` は `["http://127.0.0.1/callback"]` とする。ブリッジの listener は `127.0.0.1` の
+ephemeral port で待つので静的な文書には列挙できず、`localhost` 形式は送らないので宣言しない。
+これは RFC 8252 の port の扱いに依存し、draft §4.2 を文字どおり適用する認可サーバーでは通らない。
+ブリッジがこの文書を使う相手は、それを配信している Worker だけである。
+
+ブリッジの client の選び方:
+
+1. メタデータが `client_id_metadata_document_supported: true` を示し、`issuer` が https なら、
+   browser を開く前にその認可要求を `redirect: "manual"` で 1 回送る。browser flow では拒否を
+   観測できないため。302 なら文書を使う。
+2. それ以外、または他の応答やエラーなら、DCR と `oauth-client.json` に戻る。
+3. token record は発行時の `client_id` を保存し、refresh はそれを送る。登録済み record は登録済み
+   client のまま refresh し、`client_id` の無い record は `oauth-client.json` を使う。文書を使っても
+   このファイルは書き換えない。
+
+refresh 中に文書の取得に失敗すると `invalid_client` が返り、ブリッジは他の refresh 失敗と同じく
+新しい browser flow に進む。そこで手順 1 がもう一度走る。
+
 ## Storage Rules
 
 ### Canonical memory surfaces
