@@ -41,3 +41,17 @@ node --test scripts/abstention-reader-transport.test.mjs
 ```
 
 派生側の`prepare`も読取モデルを呼ばず、元directoryへ書き込まない。今後の採点runはこの修正後の入力を使って新しい独立contextで開始し、pilotを成績や反復数に混ぜない。
+
+## 読取rawの保存とblind採点入力
+
+`experiments/abstention-reader-results-v1/` は凍結入力とは別の結果directory。指定された有効trial21/22/23、31/32/33、41/42/43だけを読取り、元入力に対する`verifyAnswers`成功後、raw bytesをそのまま保存する。prefix2/3/4は反復1/2/3、suffix1/2/3はq7/m2/v8。この対応は親側manifestだけにあり、judgeへ渡さない。run-lock原文、元freeze/inputhash、transport amendmentも保存する。provider tokenとbackend実版・各callのelapsedは未取得で、時刻差や0を代入しない。pilot02/12の回答は読取/import/採点しない。
+
+`scripts/abstention-judge-inputs.mjs` はF02/F06/F08別にgold4問・必要事実・固定原文と36匿名responseをまとめる。全108行の対応は `judge-parent-mapping.json` に隔離し、各responseのanswer/status/quotesを元rawから変更しない。seedで混合した中立row IDを付け、arm/trial/反復/原artifact pathはjudgeから除く。judgeへは `judge-inputs/f02.json`、`f06.json`、`f08.json` だけを渡す。
+
+judgeは共通gold/sourceに対する正誤・支持/訂正の損失・根拠なし前提否定を判定する。各readerの実入力に根拠があったかはblind資料から分からないため、親がunblind後の別軸で確認する。gold上の正解とempty入力のgrounding違反を混同しない。statusの自己申告だけで加点しない。ここでは意味採点/集計/採用判断を行わない。
+
+```powershell
+node scripts/abstention-reader-results.mjs verify
+node scripts/abstention-judge-inputs.mjs verify
+node --test scripts/abstention-reader-results.test.mjs
+```

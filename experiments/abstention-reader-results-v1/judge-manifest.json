@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "results_manifest_sha256": "ec55948a24dbfec6f94d07194bd234815126072c2b6f4a78d3a52cd03a696812",
+  "rows": 108,
+  "parent_mapping_file": "judge-parent-mapping.json",
+  "parent_mapping_sha256": "90ec0f446e56d5baf2c548a2e8274eade371d775ddcb39ae1668505707a22304",
+  "inputs": {
+    "f02": {
+      "file": "judge-inputs/f02.json",
+      "bytes": 28283,
+      "sha256": "b92d4728bdb99b8bf68f5aabe6e5c016ce869512e66f0761dc09a3a932457239",
+      "questions": 4,
+      "rows": 36
+    },
+    "f06": {
+      "file": "judge-inputs/f06.json",
+      "bytes": 27836,
+      "sha256": "e2798180102ddad5edf5e20c516f8f1d9b59f369ef60c354293bb098757f899e",
+      "questions": 4,
+      "rows": 36
+    },
+    "f08": {
+      "file": "judge-inputs/f08.json",
+      "bytes": 25026,
+      "sha256": "675f1a0ae1998ad15feaae65babd96a3a20e3c107926dd4445ec568adc6081f9",
+      "questions": 4,
+      "rows": 36
+    }
+  },
+  "semantic_scoring": "not performed"
+}
