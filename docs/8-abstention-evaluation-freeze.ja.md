@@ -6,7 +6,7 @@
 
 `exclusions.json` は既存development artifact8件のhash、旧issue15系列・文書11系列と保守的な除外範囲を記録する。旧RAG全体/NGR全体（#298/#299含む）・webhook requirements/retentionなどを除く。新しいtopic log管理はイベント保持日数、per-isolate limiterはAI usage windowとは別の判断系列。同じpathの版・コピー・派生した同じ判断は同一familyに置く。import依存だけで同じ主張系列とはしない。無関係な過去履歴全てを未観測と証明するものではない。
 
-`intents.json` と `gold.json` は分離する。支持/明示的前提訂正/未裏付け前提/その他コーパス外を各9意図。支持・訂正にはtarget版の実際の引用とUTF8 byte範囲が必要。未裏付け前提の真偽は未確定で、測定ログの欠如から否定しない。コーパス外は同じ領域の別機能・条件の問いで、固定された11 source snapshot内の根拠不足に限定する。世界全体・現在のrepo・productionの情報不存在とは言わない。表現の等価性は作者が事前確認済みで、独立した意味監査はreader開始前の親の審査で行う。
+`intents.json` と `gold.json` は分離する。支持/明示的前提訂正/未裏付け前提/その他コーパス外を各9意図。支持・訂正にはtarget版の実際の引用とUTF8 byte範囲が必要。未裏付け前提の真偽は未確定で、測定ログの欠如から否定しない。コーパス外は同じ領域の別機能・条件の問いで、固定された11 source snapshot内の根拠不足に限定する。世界全体・現在のrepo・productionの情報不存在とは言わない。108表現の等価性は作者が事前確認した。親がreader開始前に監査したのは初回12JAのsource/gold適用性であり、残りの問いとEN/shortの独立した等価性監査は未実施。
 
 `split.json` は意図・資料系列を結ぶ9 group。development3系列=12意図36問、holdout6系列=24意図72問。各splitの各categoryは3/6意図、両splitに2repoを含む。全3表現・全版は系列と一緒に移動する。validatorはID/同path/hashコピー/対象資料/引用範囲/カテゴリ件数/系列交差0を確認する。**意味的に同じ判断の別pathコピーは人による系列監査も必要**で、自動検査だけで未知の漏洩を証明しない。
 
@@ -25,7 +25,7 @@ node scripts/abstention-evaluation.mjs validate
 node --test scripts/abstention-evaluation.test.mjs
 ```
 
-`prepare` は読取を呼ばず入力packetとgold対応/freezeを決定論的に再構成する作者用処理。凍結後は`validate`だけで検証する。`freeze.json` はそのファイル自身以外の入力全inventory/hash。改変後はhash更新だけで同じholdoutに戻さず、新versionとして露出履歴を残す。reader開始前にcommit/pushと親の意味監査が必要であり、このPR内ではreaderを実行しない。
+`prepare` は読取を呼ばず入力packetとgold対応/freezeを決定論的に再構成する作者用処理。凍結後は`validate`だけで検証する。`freeze.json` はそのファイル自身以外の入力全inventory/hash。改変後はhash更新だけで同じholdoutに戻さず、新versionとして露出履歴を残す。凍結段階ではreaderを起動せず、commit/pushと初回12JAの親監査後に別のfresh contextで実行した。原入力を変更せず、結果は別directoryへ保存する。
 
 ## 採点前のtransport修正
 
@@ -48,7 +48,7 @@ node --test scripts/abstention-reader-transport.test.mjs
 
 `scripts/abstention-judge-inputs.mjs` はF02/F06/F08別にgold4問・必要事実・固定原文と36匿名responseをまとめる。全108行の対応は `judge-parent-mapping.json` に隔離し、各responseのanswer/status/quotesを元rawから変更しない。seedで混合した中立row IDを付け、arm/trial/反復/原artifact pathはjudgeから除く。judgeへは `judge-inputs/f02.json`、`f06.json`、`f08.json` だけを渡す。
 
-judgeは共通gold/sourceに対する正誤・支持/訂正の損失・根拠なし前提否定を判定する。各readerの実入力に根拠があったかはblind資料から分からないため、親がunblind後の別軸で確認する。gold上の正解とempty入力のgrounding違反を混同しない。statusの自己申告だけで加点しない。ここでは意味採点/集計/採用判断を行わない。
+judgeは共通gold/sourceに対する正誤・支持/訂正の損失・根拠なし前提否定を判定する。各readerの実入力に根拠があったかはblind資料から分からないため、unblind後の別軸で確認する。gold上の正解とempty入力のgrounding違反を混同しない。statusの自己申告だけで加点しない。回収済み原judge/実入力監査/集計と限定的判断は [初回読取結果](9-abstention-reader-results.ja.md) に記録する。
 
 ```powershell
 node scripts/abstention-reader-results.mjs verify

@@ -19,6 +19,7 @@ jobs:
       - run: node --test scripts/abstention-evaluation.test.mjs
       - run: node --test scripts/abstention-reader-transport.test.mjs
       - run: node --test scripts/abstention-reader-results.test.mjs
+      - run: node --test scripts/abstention-reader-aggregate.test.mjs
       - run: node --experimental-strip-types --test scripts/document-tail.test.mjs
       - uses: actions/setup-python@v5
         with:
