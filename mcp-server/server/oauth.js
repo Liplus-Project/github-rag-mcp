@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { exec } from "node:child_process";
-import { supportsRedirectUris } from "./oauth-client-registration.js";
+import { metadataDocumentClientId, supportsRedirectUris } from "./oauth-client-registration.js";
 
 export class OAuthPendingError extends Error {
   constructor() {
@@ -30,6 +30,7 @@ export function createOAuthProvider({
   callbackTimeoutMs = 5 * 60 * 1000,
   initialWaitMs = 3000,
   pendingWaitMs = 2000,
+  metadataProbeTimeoutMs = 15000,
 }) {
   const tokenFile = join(tokenDir, "oauth-tokens.json");
   const clientFile = join(tokenDir, "oauth-client.json");
@@ -91,6 +92,17 @@ export function createOAuthProvider({
     return registration;
   }
 
+  // A browser flow cannot observe a refused authorization, so whether the server
+  // really resolves the document is asked once, before the browser opens. Its 302
+  // only names the next step: nothing is granted or stored by this request.
+  async function acceptsMetadataDocument(url) {
+    try {
+      const res = await request(url.toString(), { redirect: "manual", signal: AbortSignal.timeout(metadataProbeTimeoutMs) });
+      await res.body?.cancel();
+      return res.status === 302;
+    } catch { return false; }
+  }
+
   function tokensFrom(data, refreshToken, clientId) {
     if (typeof data.access_token !== "string" || !data.access_token) {
       throw new Error("OAuth token response has no access token");
@@ -113,15 +125,22 @@ export function createOAuthProvider({
       });
       const port = server.address().port;
       const redirectUri = `http://127.0.0.1:${port}/callback`;
-      const client = await register(metadata, [redirectUri, `http://localhost:${port}/callback`]);
       const verifier = randomBytes(32).toString("base64url");
       const state = randomBytes(16).toString("hex");
-      const authUrl = new URL(metadata.authorization_endpoint);
-      for (const [key, value] of Object.entries({
-        response_type: "code", client_id: client.client_id, redirect_uri: redirectUri,
-        state, code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-        code_challenge_method: "S256",
-      })) authUrl.searchParams.set(key, value);
+      function authorizationUrl(clientId) {
+        const url = new URL(metadata.authorization_endpoint);
+        for (const [key, value] of Object.entries({
+          response_type: "code", client_id: clientId, redirect_uri: redirectUri,
+          state, code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+          code_challenge_method: "S256",
+        })) url.searchParams.set(key, value);
+        return url;
+      }
+      let clientId = metadataDocumentClientId(metadata);
+      if (!clientId || !await acceptsMetadataDocument(authorizationUrl(clientId))) {
+        clientId = (await register(metadata, [redirectUri, `http://localhost:${port}/callback`])).client_id;
+      }
+      const authUrl = authorizationUrl(clientId);
 
       let settle;
       const flow = { result: null, promise: new Promise(resolve => { settle = resolve; }) };
@@ -171,11 +190,11 @@ export function createOAuthProvider({
             const tokenRes = await request(metadata.token_endpoint, {
               method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({ grant_type: "authorization_code", code,
-                redirect_uri: redirectUri, client_id: client.client_id, code_verifier: verifier }),
+                redirect_uri: redirectUri, client_id: clientId, code_verifier: verifier }),
               signal: controller.signal,
             });
             if (!tokenRes.ok) throw new Error();
-            tokens = tokensFrom(await tokenRes.json(), undefined, client.client_id);
+            tokens = tokensFrom(await tokenRes.json(), undefined, clientId);
           } catch { throw new Error("OAuth token exchange failed"); }
           if (flow.result) return;
           await saveJson(tokenFile, tokens);

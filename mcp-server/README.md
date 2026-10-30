@@ -91,7 +91,7 @@ To target a self-hosted Worker, set the `RAG_WORKER_URL` environment variable:
 
 OAuth client registration and tokens are stored in:
 
-- `~/.github-rag-mcp/oauth-client.json` (dynamic client registration)
+- `~/.github-rag-mcp/oauth-client.json` (dynamic client registration, when one is used)
 - `~/.github-rag-mcp/oauth-tokens.json` (access + refresh tokens)
 
 The proxy reuses a cached client registration only when it includes every
@@ -116,9 +116,12 @@ The `type` filter accepts: `issue`, `pull_request`, `release`, `doc`, `wiki_doc`
 ## Authentication flow
 
 1. On first tool call, the proxy discovers OAuth metadata at `${RAG_WORKER_URL}/.well-known/oauth-authorization-server`.
-2. It performs Dynamic Client Registration (RFC 7591) if no compatible client
-   is cached for the current localhost callback URIs.
-3. It starts a one-shot localhost HTTP listener on a random port and opens the browser to the Worker's authorization endpoint.
+2. It starts a one-shot localhost HTTP listener on a random port.
+3. When the Worker advertises Client ID Metadata Document support and confirms it for this
+   request, the proxy uses `<issuer origin>/oauth/client-metadata.json` as its client ID.
+   Otherwise it performs Dynamic Client Registration (RFC 7591) if no compatible client
+   is cached for the current localhost callback URIs. It then opens the browser to the
+   Worker's authorization endpoint.
 4. After you approve, the Worker redirects to `http://127.0.0.1:<port>/callback` with an authorization code.
 5. The proxy exchanges the code for tokens (PKCE S256) and saves them before the
    browser shows success. Exchange or storage failures show an authorization failure.
