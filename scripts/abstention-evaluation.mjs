@@ -126,12 +126,17 @@ export function checkFreeze(root = ROOT) {
   assert(JSON.stringify(actual) === JSON.stringify(expected), 'Frozen bytes/file inventory changed'); return sha256(readFileSync(join(root, 'freeze.json')));
 }
 export function verifyAnswers(output, input) {
+  assert(Object.keys(output).sort().join(',') === 'answers', 'Unknown output fields');
   assert(Array.isArray(output.answers) && output.answers.length === input.cases.length, 'Incomplete answer set');
   unique(output.answers.map(x => x.id), 'answer');
   for (const a of output.answers) {
     const c = input.cases.find(x => x.id === a.id);
-    assert(c && ['answered', 'premise_corrected', 'insufficient', 'partial'].includes(a.status) && typeof a.answer === 'string' && [...a.answer].length <= 600 && Array.isArray(a.quotes) && a.quotes.length <= 2, 'Invalid answer contract');
-    for (const q of a.quotes) assert(q.text && c.documents.some(d => d.source_id === q.source_id && d.excerpts.some(e => e.text.includes(q.text))), 'Unsupported quote');
+    assert(Object.keys(a).sort().join(',') === 'answer,id,quotes,status', 'Unknown answer fields');
+    assert(c && ['answered', 'premise_corrected', 'insufficient', 'partial'].includes(a.status) && typeof a.answer === 'string' && a.answer.trim() && [...a.answer].length <= 600 && Array.isArray(a.quotes) && a.quotes.length <= 2, 'Invalid answer contract');
+    for (const q of a.quotes) {
+      assert(Object.keys(q).sort().join(',') === 'source_id,text', 'Unknown quote fields');
+      assert(q.text && c.documents.some(d => d.source_id === q.source_id && d.excerpts.some(e => e.text.includes(q.text))), 'Unsupported quote');
+    }
   }
   return { quotations_checked: true, semantic_scoring: 'Manual blinded adjudication required; no automatic efficacy score' };
 }

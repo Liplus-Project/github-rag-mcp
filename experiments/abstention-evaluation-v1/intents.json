@@ -86,17 +86,17 @@
         {
           "id": "F01-out_of_corpus-ja",
           "language": "ja",
-          "text": "accountNameと同じ呼称を音声で読む際の、日本語読み仮名辞書の更新間隔は何日ですか？"
+          "text": "同じaccountのnicknameを別PCで同時変更した場合、どちらを呼称にするかの同期競合の確定規則は何ですか？"
         },
         {
           "id": "F01-out_of_corpus-en",
           "language": "en",
-          "text": "How many days separate updates of the Japanese pronunciation dictionary used to speak the accountName label?"
+          "text": "If the same account nickname is changed simultaneously on different PCs, what synchronization-conflict rule determines the addressing name?"
         },
         {
           "id": "F01-out_of_corpus-short",
           "language": "short",
-          "text": "accountName 音声用日本語読み辞書 更新間隔は何日？"
+          "text": "account nickname 別PC同時変更 呼称の同期競合確定規則は？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -186,17 +186,17 @@
         {
           "id": "F02-out_of_corpus-ja",
           "language": "ja",
-          "text": "terminal fontの日本語グリフを欠く場合、フォント配布CDNからの再取得は何回再試行しますか？"
+          "text": "現在起動中の画面のlocalStorageに実際保存されているterminal font sizeは何pxですか？"
         },
         {
           "id": "F02-out_of_corpus-en",
           "language": "en",
-          "text": "When a terminal font lacks Japanese glyphs, how many retries are made to fetch the font from its distribution CDN?"
+          "text": "What terminal font size in pixels is actually stored in localStorage on the currently running screen?"
         },
         {
           "id": "F02-out_of_corpus-short",
           "language": "short",
-          "text": "terminal font 日本語グリフ欠落 CDN再取得retry回数は？"
+          "text": "現在起動画面 localStorage実保存terminal font size何px？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -286,17 +286,17 @@
         {
           "id": "F03-out_of_corpus-ja",
           "language": "ja",
-          "text": "composerのコードブロックをPDF出力するとき、埋め込みフォントのsubset生成上限は何KBですか？"
+          "text": "言語未指定で5000文字以内のTypeScriptコードを渡すとき、言語推定の実測正解率と試験データ件数はいくつですか？"
         },
         {
           "id": "F03-out_of_corpus-en",
           "language": "en",
-          "text": "When exporting composer code blocks to PDF, what KB limit applies to embedded-font subset generation?"
+          "text": "For unnamed TypeScript code of at most 5000 characters, what measured language-detection accuracy and test-set size are available?"
         },
         {
           "id": "F03-out_of_corpus-short",
           "language": "short",
-          "text": "composer code block PDF 埋め込みfont subset上限KBは？"
+          "text": "言語未指定TypeScript 5000文字以内 言語推定実測正解率/試験件数は？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -386,17 +386,17 @@
         {
           "id": "F04-out_of_corpus-ja",
           "language": "ja",
-          "text": "seat-statusの制限表示を腕時計へ通知する際、Bluetooth再接続のbackoff秒数はいくつですか？"
+          "text": "provider側の制限解除からseat-statusが解除を表示するまで、このデプロイで保証される最大遅延は何秒ですか？"
         },
         {
           "id": "F04-out_of_corpus-en",
           "language": "en",
-          "text": "When seat-status limit notices are sent to a watch, what backoff in seconds is used for Bluetooth reconnection?"
+          "text": "What maximum delay in seconds is guaranteed in this deployment between provider-side limit removal and seat-status displaying that removal?"
         },
         {
           "id": "F04-out_of_corpus-short",
           "language": "short",
-          "text": "seat-status 制限表示 腕時計Bluetooth再接続backoff秒は？"
+          "text": "provider制限解除→seat-status解除表示 このdeployment最大保証遅延秒は？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -486,17 +486,17 @@
         {
           "id": "F05-out_of_corpus-ja",
           "language": "ja",
-          "text": "checked_urlが開いたページのHTTPS証明書を失効確認するOCSPキャッシュTTLは何秒ですか？"
+          "text": "このコードを実行しているPCで、通常の.mdファイルを開く既定アプリの実行ファイルpathは何ですか？"
         },
         {
           "id": "F05-out_of_corpus-en",
           "language": "en",
-          "text": "What is the OCSP cache TTL in seconds for certificate-revocation checks on pages opened through checked_url?"
+          "text": "On the PC running this code, what is the executable path of the default application for opening an ordinary .md file?"
         },
         {
           "id": "F05-out_of_corpus-short",
           "language": "short",
-          "text": "checked_url HTTPS証明書失効 OCSP cache TTL秒は？"
+          "text": "この実行PC 通常.mdを開く既定app実行ファイルpathは？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -586,17 +586,17 @@
         {
           "id": "F06-out_of_corpus-ja",
           "language": "ja",
-          "text": "topic-indexのJSONLを別PCへ双方向同期する際、競合する同一message_idの採用規則は何ですか？"
+          "text": "topic log削除後、添付削除前にクラッシュした場合、このデプロイで添付の削除再試行まで保証される上限は何秒ですか？"
         },
         {
           "id": "F06-out_of_corpus-en",
           "language": "en",
-          "text": "When topic-index JSONL is synchronized bidirectionally across PCs, what rule resolves conflicting identical message_id values?"
+          "text": "After a crash between topic-log deletion and attachment deletion, what upper bound in seconds is guaranteed for retrying attachment deletion in this deployment?"
         },
         {
           "id": "F06-out_of_corpus-short",
           "language": "short",
-          "text": "topic-index JSONL 別PC双方向同期 同一message_id競合規則は？"
+          "text": "topic log削除後/添付削除前crash 添付削除retry最大保証秒は？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -686,17 +686,17 @@
         {
           "id": "F07-out_of_corpus-ja",
           "language": "ja",
-          "text": "rate-limitのカウンタを地域別ダッシュボードへ配信する際の地理IPデータベース更新周期は何日ですか？"
+          "text": "現在稼働している全Workers isolateを合計した、このIPのwebhook窓内request countはいくつですか？"
         },
         {
           "id": "F07-out_of_corpus-en",
           "language": "en",
-          "text": "What is the GeoIP database update interval in days when rate-limit counters are sent to a regional dashboard?"
+          "text": "What is the current webhook-window request count for this IP summed across all running Workers isolates?"
         },
         {
           "id": "F07-out_of_corpus-short",
           "language": "short",
-          "text": "rate-limit 地域別dashboard GeoIP DB更新周期は何日？"
+          "text": "現在全Workers isolate合計 このIP webhook窓内request countは？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -786,17 +786,17 @@
         {
           "id": "F08-out_of_corpus-ja",
           "language": "ja",
-          "text": "GitHub hook CIDR allowlistで許可したアクセスの国別課金単価は何円ですか？"
+          "text": "このデプロイで全isolateを横断して保証されるGitHub hook CIDR更新遅延の最大値は何秒ですか？"
         },
         {
           "id": "F08-out_of_corpus-en",
           "language": "en",
-          "text": "What is the per-country billing price in yen for accesses allowed by the GitHub hook CIDR allowlist?"
+          "text": "What maximum GitHub hook CIDR update lag in seconds is guaranteed across all isolates in this deployment?"
         },
         {
           "id": "F08-out_of_corpus-short",
           "language": "short",
-          "text": "GitHub hook CIDR allowlist 許可access 国別単価円は？"
+          "text": "このdeployment 全isolate横断GitHub hook CIDR更新遅延 最大保証秒は？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
@@ -886,17 +886,17 @@
         {
           "id": "F09-out_of_corpus-ja",
           "language": "ja",
-          "text": "webhook署名secretの定期rotationを毎週行う場合、旧新鍵を同時受理する猶予時間は何時間ですか？"
+          "text": "現在配備されているwebhook署名secretが最後にrotationされた日時はいつですか？"
         },
         {
           "id": "F09-out_of_corpus-en",
           "language": "en",
-          "text": "For weekly webhook-signature secret rotation, how many hours are old and new keys accepted simultaneously?"
+          "text": "When was the currently deployed webhook-signature secret last rotated?"
         },
         {
           "id": "F09-out_of_corpus-short",
           "language": "short",
-          "text": "webhook署名secret 毎週rotation 旧新鍵同時受理猶予は何時間？"
+          "text": "現在配備webhook署名secret 最終rotation日時は？"
         }
       ],
       "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"

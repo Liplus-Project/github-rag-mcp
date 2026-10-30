@@ -40,16 +40,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F01-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "accountNameは渡されたaccountの名前選択を定義するが、別PC同時変更の同期競合解決はこの固定資料から確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: accountNameは渡されたaccountの名前選択を定義するが、別PC同時変更の同期競合解決はこの固定資料から確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F02-support",
@@ -102,16 +102,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F02-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "既定値13pxや保存keyの定義はあるが、現在起動中の画面のlocalStorage内容は与えられていないため、実保存値は確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 既定値13pxや保存keyの定義はあるが、現在起動中の画面のlocalStorage内容は与えられていないため、実保存値は確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F03-support",
@@ -170,16 +170,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F03-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "制限と推定呼出しは定義されるが、TypeScript入力の正解ラベル付きbenchmarkや測定結果は固定資料にない。正解率/試験件数は確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 制限と推定呼出しは定義されるが、TypeScript入力の正解ラベル付きbenchmarkや測定結果は固定資料にない。正解率/試験件数は確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F04-support",
@@ -226,16 +226,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F04-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "最後のreportに基づく判定は読めるが、このデプロイのreport配信遅延やprovider側解除時刻の観測・保証はない。最大遅延秒は確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 最後のreportに基づく判定は読めるが、このデプロイのreport配信遅延やprovider側解除時刻の観測・保証はない。最大遅延秒は確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F05-support",
@@ -294,16 +294,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F05-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "OpenFile等のaction選択は定義されるが、実行PCのOSファイル関連付け/アプリ登録の実データはない。実行ファイルpathは確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: OpenFile等のaction選択は定義されるが、実行PCのOSファイル関連付け/アプリ登録の実データはない。実行ファイルpathは確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F06-support",
@@ -362,16 +362,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F06-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "削除順と次のdeleteで扱えるという説明はあるが、このデプロイで再試行がいつ起きるかの時間保証はない。上限秒は確定できず、未削除添付が存在しないとも断言しない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 削除順と次のdeleteで扱えるという説明はあるが、このデプロイで再試行がいつ起きるかの時間保証はない。上限秒は確定できず、未削除添付が存在しないとも断言しない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F07-support",
@@ -424,16 +424,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F07-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "per-isolate counterと定数は定義されるが、全稼働isolate数や各counterの実状態はない。IPごとの全体countは確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: per-isolate counterと定数は定義されるが、全稼働isolate数や各counterの実状態はない。IPごとの全体countは確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F08-support",
@@ -486,16 +486,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F08-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "3600秒TTLは局所定数で、API失敗時のfallbackもある。デプロイ全isolateを横断する更新遅延保証は資料から確定できず、TTLをそのまま最大保証秒に転用しない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 3600秒TTLは局所定数で、API失敗時のfallbackもある。デプロイ全isolateを横断する更新遅延保証は資料から確定できず、TTLをそのまま最大保証秒に転用しない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     },
     {
       "intent_id": "F09-support",
@@ -548,16 +548,16 @@
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": "not established",
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
     },
     {
       "intent_id": "F09-out_of_corpus",
       "expected": "insufficient",
-      "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+      "answer": "verify関数は渡されたsecretで検証するが、現在配備の鍵のrotation履歴は固定コーパスにない。日時は確定できない。",
       "evidence": [],
       "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
       "truth_of_unsupported_premise": null,
-      "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: verify関数は渡されたsecretで検証するが、現在配備の鍵のrotation履歴は固定コーパスにない。日時は確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
     }
   ]
 }

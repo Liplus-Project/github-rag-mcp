@@ -2,16 +2,16 @@
   "version": 1,
   "algorithm": "sha256 over exact bytes; frozen files are -text in gitattributes",
   "files": {
-    "answer-schema.json": "3bc34abaebaa695775e963deb5b3700acfcc66cea77383b9b439e9b80a745e73",
+    "answer-schema.json": "98980a583ebcd18fe05462a0f5dfb7af165576baaf4aa4924954834d61174c92",
     "exclusions.json": "d740b7cefb58351f128ec7799ed7ee0abd51708579637b5499536dea4917a2e6",
-    "gold.json": "d2b5cb2e776ac216be4b4a47ec25143713b78f051a1b7d5f73aa6c32c16bce74",
-    "intents.json": "b26b5e729a4ce175a95cb6c47590a481b21cd2300e783f60510d229d6a72a20a",
-    "preregistration.json": "be6d202dae63d40e7bbf7d60040daea103a92d2ed3520860fa702631e45f3dd1",
+    "gold.json": "6fff623f312da95188487904d127ecc57cb0de9a465daf48e91a693598441950",
+    "intents.json": "c02a5bf537cb9e03c521ab205eaafbc006515fc80bb6f990f345f9ebbe671846",
+    "preregistration.json": "8b3357429d1869cd30d1e8e7893caf06bdab98547bfbf62c4c1875ded0f9c06e",
     "provenance.json": "15bdeb4d4c4abb4aa44891a3b0598522e4dafdf723f2c19198cae47f5bb4b1fe",
-    "reader-gold.json": "b32fc9760f5bf3e406ddaa6112e31d4d84d5d58fa3fcb9ae8d7d594f6f8c4c52",
-    "reader-inputs/m2.json": "2d9b0424a336f344d76193c3b4c6c717e2e60b1eb81ef6fbe8fec06a9ed40649",
-    "reader-inputs/q7.json": "30352df736210ca3cdd214a3470b978c22af3b9e3929ba537c75168a4a4a261b",
-    "reader-inputs/v8.json": "7b8ca637fd04da08465a3910089f704a691d966142aea368b048b90d14c3daf5",
+    "reader-gold.json": "e098743ea7a5bbab126b8fbee50a8e60ef30be5eb2f6d3642ab4e74361785fe4",
+    "reader-inputs/m2.json": "cc513f58b81732fc8665695f49e063c51c62008c8b12b2f24d3d75e9f4bd2c85",
+    "reader-inputs/q7.json": "6d08686fca4a9b462e77e472c1a48c94ec04eb9203c17bca97c59f75d83efe7c",
+    "reader-inputs/v8.json": "d4809869d582e89acb0c9a7fecc86a1f90072998055543b694ce9cdebd859383",
     "sources/F01-target.txt": "477a1b731abdea767cd7c80ae7f3bfd2739b5ba0bc6ae62d621130fd17ebde62",
     "sources/F02-target.txt": "49ae12dea47c6e4385f824fef5889c8e35303ef4950044b5e6c54acb032facb2",
     "sources/F03-historical.txt": "0d9cdcc3390ac530ddea8755ade506397f124022ed259a4189448cd3afd3efbf",
@@ -25,6 +25,7 @@
     "sources/F09-target.txt": "fe4fba3cd0200948df8fd44e264032f300164c2be31aef2aa1a9034ecabc6903",
     "sources/LICENSE-github-webhook-mcp.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
     "sources/LICENSE-pullcept.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "sources/NOTICE-github-webhook-mcp.txt": "b778ed400042ae0420580a7661537ca6fd9a0bf40b7326026d60e879b9406a8d",
     "split.json": "9f25491b840164190a86ab8c15e7a388bb063b8d0cb172008a347b80587d3f39"
   }
 }

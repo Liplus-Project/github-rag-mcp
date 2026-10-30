@@ -35,7 +35,8 @@
           },
           "answer": {
             "type": "string",
-            "maxLength": 600
+            "maxLength": 600,
+            "minLength": 1
           },
           "quotes": {
             "type": "array",

@@ -10,3 +10,4 @@
 - Offline Document Tail Replay: [[JA|5-document-tail-replay.ja]]
 - Full Sparse Sources: [[JA|6-full-sparse-sources.ja]]
 - Matched Document Context: [[JA|7-matched-context.ja]]
+- Abstention Evaluation Freeze: [[JA|8-abstention-evaluation-freeze.ja]]
