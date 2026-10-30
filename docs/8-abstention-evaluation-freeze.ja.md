@@ -14,7 +14,7 @@
 
 `preregistration.json` に対象、反復、指示、予算、採点、停止条件を固定する。全readerは要求launch model `gpt-6.1-sol` / medium / fresh contextを共通とし、親が最初の起動前にrun-lockへ記録する。これは要求識別子で、非公開のbackend実版を確認した意味ではない。各回答600文字/最大2引用という同じ出力予算を使い、provider token使用量が取得できなければunavailableと記録し、0を代入しない。原文にはコードが含まれるがデータとしてのみ扱い、実行/検索/追加context取得をしない。狭いI/O例外として、inline packetの代わりに指定されたblind入力1ファイルだけの読取と、回答確定後の一意なoutput pathへの書込を許す。他のファイル・gold・protocol・他arm出力は読まない。出力とrun-lockは凍結directoryの外へ保存する。経過時間は時計で確認し、未測定の価格/時間を見積り値として出さない。
 
-`reader-gold.json` は匿名caseとgoldの評価側対応。`verifyAnswers` はoutputのID/status/600文字/最大2引用と引用原文一致を検査するだけ。事実のcoverage・無根拠断定・根拠なし前提否定・支持/明示訂正の損失・適切な根拠不足をarm名から隔離した採点者が別々に判定する。statusラベルだけで正誤を決めない。12問の結果を残りholdout72問や全108問に拡張せず、意図/系列依存とreader反復のばらつきを報告する。
+`reader-gold.json` は匿名caseとgoldの評価側対応。`verifyAnswers` はoutputのID/status/600文字/最大2引用と引用原文一致を検査するだけ。事実のcoverage・無根拠断定・根拠なし前提否定・支持/明示訂正の損失・適切な根拠不足をarm名から隔離した採点者が別々に判定する。statusラベルだけで正誤を決めない。12問の結果を元holdout72表現や全108表現に拡張しない。未実行60表現のうち24は露出済み系列のEN/short変種、group未露出は3系列/12意図/36表現と区別し、意図/系列依存とreader反復のばらつきを報告する。
 
 未裏付け前提9問には未測定の本番成功率を問う定型がある。人工的な診断データであり、実際の誤前提/無関係検索分布を代表しない。neutralなコーパス外9問は同じmoduleの現在値・全体保証・別条件の詳細を問う。遠い別分野の問いとはせず、既定値や局所定数を現在値/全isolate保証へ転用しないことを要求する。これは新資料を作者が選んだcurated難易度である。
 
@@ -40,7 +40,7 @@ node scripts/abstention-reader-transport.mjs verify
 node --test scripts/abstention-reader-transport.test.mjs
 ```
 
-派生側の`prepare`も読取モデルを呼ばず、元directoryへ書き込まない。今後の採点runはこの修正後の入力を使って新しい独立contextで開始し、pilotを成績や反復数に混ぜない。
+派生側の`prepare`も読取モデルを呼ばず、元directoryへ書き込まない。有効9readerは修正後の入力を新しい独立contextで読み、pilotを成績や反復数に混ぜずに実行した。
 
 ## 読取rawの保存とblind採点入力
 
