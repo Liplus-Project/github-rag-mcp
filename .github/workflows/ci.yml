@@ -16,6 +16,7 @@ jobs:
           node-version: "22"
       - run: node --test scripts/sync-release-version.test.mjs
       - run: node --test scripts/abstention-replay.test.mjs
+      - run: node --test scripts/abstention-evaluation.test.mjs
       - run: node --experimental-strip-types --test scripts/document-tail.test.mjs
       - uses: actions/setup-python@v5
         with:

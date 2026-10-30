@@ -1,0 +1,257 @@
+{
+  "instruction": "Evaluator only. Never pass this file, gold, protocol arm mapping or other answers to readers.",
+  "cases": [
+    {
+      "id": "Q001",
+      "question_id": "F02-unsupported_premise-ja",
+      "intent_id": "F02-unsupported_premise",
+      "gold": {
+        "intent_id": "F02-unsupported_premise",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": "not established",
+        "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      }
+    },
+    {
+      "id": "Q002",
+      "question_id": "F02-out_of_corpus-ja",
+      "intent_id": "F02-out_of_corpus",
+      "gold": {
+        "intent_id": "F02-out_of_corpus",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      }
+    },
+    {
+      "id": "Q003",
+      "question_id": "F08-premise_correction-ja",
+      "intent_id": "F08-premise_correction",
+      "gold": {
+        "intent_id": "F08-premise_correction",
+        "expected": "premise_corrected",
+        "answer": "IPv4としてparseできないIPはtrueで通過する。この分岐にはIPv6だけでなくunparseable IPも含まれる。",
+        "evidence": [
+          {
+            "source_id": "F08-target",
+            "quote": "if (ipInt === null) {",
+            "start_utf8": 2133,
+            "end_utf8": 2154
+          },
+          {
+            "source_id": "F08-target",
+            "quote": "For now, allow IPv6 through",
+            "start_utf8": 2223,
+            "end_utf8": 2250
+          },
+          {
+            "source_id": "F08-target",
+            "quote": "return true;",
+            "start_utf8": 2295,
+            "end_utf8": 2307
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q004",
+      "question_id": "F02-premise_correction-ja",
+      "intent_id": "F02-premise_correction",
+      "gold": {
+        "intent_id": "F02-premise_correction",
+        "expected": "premise_corrected",
+        "answer": "参加者別configではなく画面のlocalStorageにpullcept.ui-scaleとして保存する。",
+        "evidence": [
+          {
+            "source_id": "F02-target",
+            "quote": "`localStorage`, for #60's reason: a property of the screen being read from.",
+            "start_utf8": 5585,
+            "end_utf8": 5660
+          },
+          {
+            "source_id": "F02-target",
+            "quote": "const UI_SCALE_KEY = \"pullcept.ui-scale\";",
+            "start_utf8": 5669,
+            "end_utf8": 5710
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q005",
+      "question_id": "F06-unsupported_premise-ja",
+      "intent_id": "F06-unsupported_premise",
+      "gold": {
+        "intent_id": "F06-unsupported_premise",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": "not established",
+        "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      }
+    },
+    {
+      "id": "Q006",
+      "question_id": "F06-out_of_corpus-ja",
+      "intent_id": "F06-out_of_corpus",
+      "gold": {
+        "intent_id": "F06-out_of_corpus",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      }
+    },
+    {
+      "id": "Q007",
+      "question_id": "F06-premise_correction-ja",
+      "intent_id": "F06-premise_correction",
+      "gold": {
+        "intent_id": "F06-premise_correction",
+        "expected": "premise_corrected",
+        "answer": "indexは注釈。entryだけ消してもファイルは残り、次のreadで再採用される。topic削除にはファイル削除が必要。",
+        "evidence": [
+          {
+            "source_id": "F06-target",
+            "quote": "removing it removes an annotation: the file is still there, and the next",
+            "start_utf8": 966,
+            "end_utf8": 1038
+          },
+          {
+            "source_id": "F06-target",
+            "quote": "read adopts it back under a rebuilt entry. A topic is deleted by deleting",
+            "start_utf8": 1043,
+            "end_utf8": 1116
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q008",
+      "question_id": "F06-support-ja",
+      "intent_id": "F06-support",
+      "gold": {
+        "intent_id": "F06-support",
+        "expected": "answered",
+        "answer": "topic logを先にremove_fileし、その後にattachmentsをremove_dir_allする。NotFoundは許容するが他のlog削除errorではそこで戻る。",
+        "evidence": [
+          {
+            "source_id": "F06-target",
+            "quote": "match std::fs::remove_file(topic_path(dir, topic_id)) {",
+            "start_utf8": 28793,
+            "end_utf8": 28848
+          },
+          {
+            "source_id": "F06-target",
+            "quote": "Err(e) => return Err(format!(\"Failed to delete the topic's log: {e}\")),",
+            "start_utf8": 28943,
+            "end_utf8": 29014
+          },
+          {
+            "source_id": "F06-target",
+            "quote": "match std::fs::remove_dir_all(attachments_path(dir, topic_id)) {",
+            "start_utf8": 29324,
+            "end_utf8": 29388
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q009",
+      "question_id": "F08-support-ja",
+      "intent_id": "F08-support",
+      "gold": {
+        "intent_id": "F08-support",
+        "expected": "answered",
+        "answer": "CACHE_TTL_SECONDSは3600秒。これは当該固定コードの定数で、実際の稼働cache鮮度の測定ではない。",
+        "evidence": [
+          {
+            "source_id": "F08-target",
+            "quote": "const CACHE_TTL_SECONDS = 3600;",
+            "start_utf8": 539,
+            "end_utf8": 570
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q010",
+      "question_id": "F02-support-ja",
+      "intent_id": "F02-support",
+      "gold": {
+        "intent_id": "F02-support",
+        "expected": "answered",
+        "answer": "DEFAULT_TERMINAL_FONT_SIZEは13で、単位はpx。",
+        "evidence": [
+          {
+            "source_id": "F02-target",
+            "quote": "const DEFAULT_TERMINAL_FONT_SIZE = 13;",
+            "start_utf8": 4730,
+            "end_utf8": 4768
+          },
+          {
+            "source_id": "F02-target",
+            "quote": "The sizes a terminal can be set to, in `px`.",
+            "start_utf8": 3510,
+            "end_utf8": 3554
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q011",
+      "question_id": "F08-out_of_corpus-ja",
+      "intent_id": "F08-out_of_corpus",
+      "gold": {
+        "intent_id": "F08-out_of_corpus",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      }
+    },
+    {
+      "id": "Q012",
+      "question_id": "F08-unsupported_premise-ja",
+      "intent_id": "F08-unsupported_premise",
+      "gold": {
+        "intent_id": "F08-unsupported_premise",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": "not established",
+        "corpus_audit": "All frozen modules concern naming, display, code fences, seat state, path opening, topic files, per-isolate limits, CIDR and HMAC verification. No runtime measurement logs, voice dictionary/CDN/PDF/watch/OCSP/sync/GeoIP/billing/key-rotation policy sources are included."
+      }
+    }
+  ]
+}

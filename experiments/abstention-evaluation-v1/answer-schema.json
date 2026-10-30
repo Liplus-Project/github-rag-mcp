@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Frozen packet reader answer contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "answers"
+  ],
+  "properties": {
+    "answers": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "answer",
+          "quotes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^Q[0-9]{3}$"
+          },
+          "status": {
+            "enum": [
+              "answered",
+              "premise_corrected",
+              "insufficient",
+              "partial"
+            ]
+          },
+          "answer": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "quotes": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_id",
+                "text"
+              ],
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
