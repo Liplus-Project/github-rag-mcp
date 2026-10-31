@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": "Original recovered judgment files, unchanged raw bytes; no override or inferred scores",
+  "rows": 108,
+  "judge_runtime_metadata": "not present in raw judgment artifacts; no inferred backend/token/elapsed values",
+  "judge_manifest_sha256": "e55d9ce8efab5f7def2b56cb27fd8ca2f9136e448d0f9c14d8369dbb92972a79",
+  "files": {
+    "f02": {
+      "file": "judgments/judgments-f02.json",
+      "sha256": "5f4e9c4130ff8e2996f932563c505d63291c56725a765cd3b6d3ae4c1617306f",
+      "bytes": 14011,
+      "rows": 36,
+      "judge_input_sha256": "b92d4728bdb99b8bf68f5aabe6e5c016ce869512e66f0761dc09a3a932457239"
+    },
+    "f06": {
+      "file": "judgments/judgments-f06.json",
+      "sha256": "5d824cec41a2c186b607e5333458c095fc38883183e3ef693d517f8c855f2ce1",
+      "bytes": 14757,
+      "rows": 36,
+      "judge_input_sha256": "e2798180102ddad5edf5e20c516f8f1d9b59f369ef60c354293bb098757f899e"
+    },
+    "f08": {
+      "file": "judgments/judgments-f08.json",
+      "sha256": "db9b790bf8c56e693a81a380081bc4eee0585f2031dac67f4ea340382191e2e9",
+      "bytes": 14460,
+      "rows": 36,
+      "judge_input_sha256": "675f1a0ae1998ad15feaae65babd96a3a20e3c107926dd4445ec568adc6081f9"
+    }
+  }
+}

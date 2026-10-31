@@ -1,0 +1,153 @@
+{
+  "version": 1,
+  "scope": "Valid reader raw outputs only; no semantic scoring or adoption verdict",
+  "frozen_commit": "49a82484aa4f8fc5f72ca18db57ffd7a9b246827",
+  "original_freeze_sha256": "e4962e8e62ef2aa7584982ccda63ed9b34c173beea2fbadeeac740e3cd5bf321",
+  "requested_model": "gpt-6.1-sol",
+  "effort": "medium",
+  "fork_turns": "none",
+  "resolved_backend_model": "unobservable",
+  "provider_token_counts": "unavailable",
+  "elapsed_time": "unavailable; run-lock creation time is not a per-call duration",
+  "excluded_pilots": {
+    "trials": [
+      "01",
+      "02",
+      "03",
+      "11",
+      "12",
+      "13"
+    ],
+    "disposition": "Both technical pilot batches excluded before parent outcome inspection; no pilot response imported/read/scored",
+    "existing_unscored_outputs": [
+      "02",
+      "12"
+    ]
+  },
+  "files": {
+    "run-lock-original.json": "2989c2716e75d67b1e685437507e65a23fd246b4ae668a3a66a03e08b5cfd68f",
+    "transport-amendment.json": "4a1e084fff18913ea02bf02a849b0bf1c3b747eb3b2c64dcfc7f8ab7064267de",
+    "transport-manifest.json": "f03fa37a7206ecc0ec3e0b395b9b93f3f1ac1fec3609823afc15be75754837bc"
+  },
+  "trial_count": 9,
+  "answer_count": 108,
+  "records": [
+    {
+      "trial": "21",
+      "arm": "q7",
+      "repetition": 1,
+      "file": "raw/trial21.json",
+      "sha256": "7c294cf828adf0970f35e885a35361f45d397ed9a44c9582fe1d0e57dce1049e",
+      "bytes": 5602,
+      "answers": 12,
+      "original_input_sha256": "6d08686fca4a9b462e77e472c1a48c94ec04eb9203c17bca97c59f75d83efe7c",
+      "transport_input_sha256": "20e1116d492ae7cb8dd2dc36b3b4fb8b6d6cf37f3a536bed7e1694cb8ea50deb",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "22",
+      "arm": "m2",
+      "repetition": 1,
+      "file": "raw/trial22.json",
+      "sha256": "b00c7c1853a974a70529832f3dc3961f8639f93cef5882e51245641c84a6da86",
+      "bytes": 2864,
+      "answers": 12,
+      "original_input_sha256": "cc513f58b81732fc8665695f49e063c51c62008c8b12b2f24d3d75e9f4bd2c85",
+      "transport_input_sha256": "34b473b11f511b3499000216cf8199ebf4261fc0961613b006ef5ea28494cf3f",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "23",
+      "arm": "v8",
+      "repetition": 1,
+      "file": "raw/trial23.json",
+      "sha256": "fb53e3ea69168a30ddea33f9fedd69611bfb49e12ad1f974e6cdd3be7a9689dc",
+      "bytes": 5050,
+      "answers": 12,
+      "original_input_sha256": "d4809869d582e89acb0c9a7fecc86a1f90072998055543b694ce9cdebd859383",
+      "transport_input_sha256": "733c0fa2e2e32d86776df25088a2c614914689e1dca2bb53e1fe9df52ac7f6f4",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "31",
+      "arm": "q7",
+      "repetition": 2,
+      "file": "raw/trial31.json",
+      "sha256": "798f66cbb34129fd693d560766d7ab16133fcc721681e4fb5de45f8cb0f79097",
+      "bytes": 5523,
+      "answers": 12,
+      "original_input_sha256": "6d08686fca4a9b462e77e472c1a48c94ec04eb9203c17bca97c59f75d83efe7c",
+      "transport_input_sha256": "20e1116d492ae7cb8dd2dc36b3b4fb8b6d6cf37f3a536bed7e1694cb8ea50deb",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "32",
+      "arm": "m2",
+      "repetition": 2,
+      "file": "raw/trial32.json",
+      "sha256": "6219099f109ccf74e22df18bc90fe6995c0f725dde58157c24a3c4b46447a3ea",
+      "bytes": 3093,
+      "answers": 12,
+      "original_input_sha256": "cc513f58b81732fc8665695f49e063c51c62008c8b12b2f24d3d75e9f4bd2c85",
+      "transport_input_sha256": "34b473b11f511b3499000216cf8199ebf4261fc0961613b006ef5ea28494cf3f",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "33",
+      "arm": "v8",
+      "repetition": 2,
+      "file": "raw/trial33.json",
+      "sha256": "445591143dbe03c7926c93ddf7ced49dbb1bfe1aff8b6a9de8e47aebef77d1b2",
+      "bytes": 5168,
+      "answers": 12,
+      "original_input_sha256": "d4809869d582e89acb0c9a7fecc86a1f90072998055543b694ce9cdebd859383",
+      "transport_input_sha256": "733c0fa2e2e32d86776df25088a2c614914689e1dca2bb53e1fe9df52ac7f6f4",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "41",
+      "arm": "q7",
+      "repetition": 3,
+      "file": "raw/trial41.json",
+      "sha256": "ca57d1c0aa81a8d5ca3719fa2921c8317a68e3324e9db178f734b4fbcc03f9f6",
+      "bytes": 4525,
+      "answers": 12,
+      "original_input_sha256": "6d08686fca4a9b462e77e472c1a48c94ec04eb9203c17bca97c59f75d83efe7c",
+      "transport_input_sha256": "20e1116d492ae7cb8dd2dc36b3b4fb8b6d6cf37f3a536bed7e1694cb8ea50deb",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "42",
+      "arm": "m2",
+      "repetition": 3,
+      "file": "raw/trial42.json",
+      "sha256": "0ae390d716154942e2d9fb2e3ef643d8140c13beda78c1bd1dce6a45682da6b1",
+      "bytes": 3216,
+      "answers": 12,
+      "original_input_sha256": "cc513f58b81732fc8665695f49e063c51c62008c8b12b2f24d3d75e9f4bd2c85",
+      "transport_input_sha256": "34b473b11f511b3499000216cf8199ebf4261fc0961613b006ef5ea28494cf3f",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    },
+    {
+      "trial": "43",
+      "arm": "v8",
+      "repetition": 3,
+      "file": "raw/trial43.json",
+      "sha256": "9adf7c959e2a5d583cb1096f898795a325ce03366e54dc001ea9d21910cc1945",
+      "bytes": 5060,
+      "answers": 12,
+      "original_input_sha256": "d4809869d582e89acb0c9a7fecc86a1f90072998055543b694ce9cdebd859383",
+      "transport_input_sha256": "733c0fa2e2e32d86776df25088a2c614914689e1dca2bb53e1fe9df52ac7f6f4",
+      "quotation_contract": "passed",
+      "semantic_scoring": "not performed"
+    }
+  ]
+}

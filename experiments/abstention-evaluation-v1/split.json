@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "unit": "connected intent and source-family group; all versions and three expressions stay together",
+  "groups": [
+    {
+      "id": "G01",
+      "families": [
+        "F01"
+      ],
+      "intent_ids": [
+        "F01-support",
+        "F01-premise_correction",
+        "F01-unsupported_premise",
+        "F01-out_of_corpus"
+      ],
+      "source_ids": [
+        "F01-target"
+      ],
+      "split": "development"
+    },
+    {
+      "id": "G02",
+      "families": [
+        "F02"
+      ],
+      "intent_ids": [
+        "F02-support",
+        "F02-premise_correction",
+        "F02-unsupported_premise",
+        "F02-out_of_corpus"
+      ],
+      "source_ids": [
+        "F02-target"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "G03",
+      "families": [
+        "F03"
+      ],
+      "intent_ids": [
+        "F03-support",
+        "F03-premise_correction",
+        "F03-unsupported_premise",
+        "F03-out_of_corpus"
+      ],
+      "source_ids": [
+        "F03-target",
+        "F03-historical"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "G04",
+      "families": [
+        "F04"
+      ],
+      "intent_ids": [
+        "F04-support",
+        "F04-premise_correction",
+        "F04-unsupported_premise",
+        "F04-out_of_corpus"
+      ],
+      "source_ids": [
+        "F04-target"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "G05",
+      "families": [
+        "F05"
+      ],
+      "intent_ids": [
+        "F05-support",
+        "F05-premise_correction",
+        "F05-unsupported_premise",
+        "F05-out_of_corpus"
+      ],
+      "source_ids": [
+        "F05-target"
+      ],
+      "split": "development"
+    },
+    {
+      "id": "G06",
+      "families": [
+        "F06"
+      ],
+      "intent_ids": [
+        "F06-support",
+        "F06-premise_correction",
+        "F06-unsupported_premise",
+        "F06-out_of_corpus"
+      ],
+      "source_ids": [
+        "F06-target"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "G07",
+      "families": [
+        "F07"
+      ],
+      "intent_ids": [
+        "F07-support",
+        "F07-premise_correction",
+        "F07-unsupported_premise",
+        "F07-out_of_corpus"
+      ],
+      "source_ids": [
+        "F07-target"
+      ],
+      "split": "development"
+    },
+    {
+      "id": "G08",
+      "families": [
+        "F08"
+      ],
+      "intent_ids": [
+        "F08-support",
+        "F08-premise_correction",
+        "F08-unsupported_premise",
+        "F08-out_of_corpus"
+      ],
+      "source_ids": [
+        "F08-target"
+      ],
+      "split": "holdout"
+    },
+    {
+      "id": "G09",
+      "families": [
+        "F09"
+      ],
+      "intent_ids": [
+        "F09-support",
+        "F09-premise_correction",
+        "F09-unsupported_premise",
+        "F09-out_of_corpus"
+      ],
+      "source_ids": [
+        "F09-target",
+        "F09-historical"
+      ],
+      "split": "holdout"
+    }
+  ]
+}

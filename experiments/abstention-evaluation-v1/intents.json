@@ -1,0 +1,905 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "F01-support",
+      "family": "F01",
+      "category": "support",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F01-target",
+      "questions": [
+        {
+          "id": "F01-support-ja",
+          "language": "ja",
+          "text": "accountNameでnicknameが空白だけの場合、どの名前を返しますか？"
+        },
+        {
+          "id": "F01-support-en",
+          "language": "en",
+          "text": "What does accountName return when nickname contains only whitespace?"
+        },
+        {
+          "id": "F01-support-short",
+          "language": "short",
+          "text": "accountName 空白nickname fallback名は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F01-premise_correction",
+      "family": "F01",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F01-target",
+      "questions": [
+        {
+          "id": "F01-premise_correction-ja",
+          "language": "ja",
+          "text": "speakerLabelはnameとnicknameが同じでも二重表示するという前提で、出力形を教えてください。"
+        },
+        {
+          "id": "F01-premise_correction-en",
+          "language": "en",
+          "text": "Given that speakerLabel duplicates the name when name equals nickname, what output does it produce?"
+        },
+        {
+          "id": "F01-premise_correction-short",
+          "language": "short",
+          "text": "speakerLabel name=nickname 二重表示する前提 出力は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F01-unsupported_premise",
+      "family": "F01",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F01-target",
+      "questions": [
+        {
+          "id": "F01-unsupported_premise-ja",
+          "language": "ja",
+          "text": "accountNameの本番誤呼称率は0.1%未満を達成済みという前提で、実測の分母と誤り件数を教えてください。"
+        },
+        {
+          "id": "F01-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming accountName has achieved a production misaddressing rate below 0.1%, what were the measured denominator and error count?"
+        },
+        {
+          "id": "F01-unsupported_premise-short",
+          "language": "short",
+          "text": "accountName 本番誤呼称率0.1%未満達成済み 実測分母/誤り件数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F01-out_of_corpus",
+      "family": "F01",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F01-target",
+      "questions": [
+        {
+          "id": "F01-out_of_corpus-ja",
+          "language": "ja",
+          "text": "同じaccountのnicknameを別PCで同時変更した場合、どちらを呼称にするかの同期競合の確定規則は何ですか？"
+        },
+        {
+          "id": "F01-out_of_corpus-en",
+          "language": "en",
+          "text": "If the same account nickname is changed simultaneously on different PCs, what synchronization-conflict rule determines the addressing name?"
+        },
+        {
+          "id": "F01-out_of_corpus-short",
+          "language": "short",
+          "text": "account nickname 別PC同時変更 呼称の同期競合確定規則は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F02-support",
+      "family": "F02",
+      "category": "support",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F02-target",
+      "questions": [
+        {
+          "id": "F02-support-ja",
+          "language": "ja",
+          "text": "未選択画面のterminal fontの既定値はいくつで、単位は何ですか？"
+        },
+        {
+          "id": "F02-support-en",
+          "language": "en",
+          "text": "What is the default terminal font size on a screen with no selection, and in what unit?"
+        },
+        {
+          "id": "F02-support-short",
+          "language": "short",
+          "text": "terminal font 未選択既定サイズ/単位は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F02-premise_correction",
+      "family": "F02",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F02-target",
+      "questions": [
+        {
+          "id": "F02-premise_correction-ja",
+          "language": "ja",
+          "text": "UI scaleは参加者ごとのconfigに保存されるという前提で、保存先を教えてください。"
+        },
+        {
+          "id": "F02-premise_correction-en",
+          "language": "en",
+          "text": "Given that UI scale is saved in per-participant config, where is it stored?"
+        },
+        {
+          "id": "F02-premise_correction-short",
+          "language": "short",
+          "text": "UI scale 参加者別config保存の前提 保存先は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F02-unsupported_premise",
+      "family": "F02",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F02-target",
+      "questions": [
+        {
+          "id": "F02-unsupported_premise-ja",
+          "language": "ja",
+          "text": "terminal font変更の本番p99再描画時間が10ms未満を達成済みという前提で、測定端末とp99値を教えてください。"
+        },
+        {
+          "id": "F02-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming terminal-font changes have achieved production p99 redraw below 10 ms, what device and p99 were measured?"
+        },
+        {
+          "id": "F02-unsupported_premise-short",
+          "language": "short",
+          "text": "terminal font変更 本番p99再描画10ms未満達成済み 端末/実測値は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F02-out_of_corpus",
+      "family": "F02",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F02-target",
+      "questions": [
+        {
+          "id": "F02-out_of_corpus-ja",
+          "language": "ja",
+          "text": "現在起動中の画面のlocalStorageに実際保存されているterminal font sizeは何pxですか？"
+        },
+        {
+          "id": "F02-out_of_corpus-en",
+          "language": "en",
+          "text": "What terminal font size in pixels is actually stored in localStorage on the currently running screen?"
+        },
+        {
+          "id": "F02-out_of_corpus-short",
+          "language": "short",
+          "text": "現在起動画面 localStorage実保存terminal font size何px？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F03-support",
+      "family": "F03",
+      "category": "support",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F03-target",
+      "questions": [
+        {
+          "id": "F03-support-ja",
+          "language": "ja",
+          "text": "findCodeFencesで閉じられていないfenceはどこまで続きますか？"
+        },
+        {
+          "id": "F03-support-en",
+          "language": "en",
+          "text": "Where does an unclosed fence extend in findCodeFences?"
+        },
+        {
+          "id": "F03-support-short",
+          "language": "short",
+          "text": "findCodeFences 未閉鎖fence 終端は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F03-premise_correction",
+      "family": "F03",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F03-target",
+      "questions": [
+        {
+          "id": "F03-premise_correction-ja",
+          "language": "ja",
+          "text": "言語名なしのコードは5000文字を超えても常に言語推定するという前提で、その条件を教えてください。"
+        },
+        {
+          "id": "F03-premise_correction-en",
+          "language": "en",
+          "text": "Given that unnamed code always undergoes language detection even above 5000 characters, what condition controls it?"
+        },
+        {
+          "id": "F03-premise_correction-short",
+          "language": "short",
+          "text": "言語名なしコード 5000文字超でも常に推定の前提 条件は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F03-unsupported_premise",
+      "family": "F03",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F03-target",
+      "questions": [
+        {
+          "id": "F03-unsupported_premise-ja",
+          "language": "ja",
+          "text": "5000文字制限が本番の色付け入力遅延を50%改善済みという前提で、比較対象と実測時間を教えてください。"
+        },
+        {
+          "id": "F03-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming the 5000-character limit has already improved production highlighting input latency by 50%, what baseline and times were measured?"
+        },
+        {
+          "id": "F03-unsupported_premise-short",
+          "language": "short",
+          "text": "5000文字制限 本番色付け遅延50%改善済み 比較対象/実測時間は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F03-out_of_corpus",
+      "family": "F03",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F03-target",
+      "questions": [
+        {
+          "id": "F03-out_of_corpus-ja",
+          "language": "ja",
+          "text": "言語未指定で5000文字以内のTypeScriptコードを渡すとき、言語推定の実測正解率と試験データ件数はいくつですか？"
+        },
+        {
+          "id": "F03-out_of_corpus-en",
+          "language": "en",
+          "text": "For unnamed TypeScript code of at most 5000 characters, what measured language-detection accuracy and test-set size are available?"
+        },
+        {
+          "id": "F03-out_of_corpus-short",
+          "language": "short",
+          "text": "言語未指定TypeScript 5000文字以内 言語推定実測正解率/試験件数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F04-support",
+      "family": "F04",
+      "category": "support",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F04-target",
+      "questions": [
+        {
+          "id": "F04-support-ja",
+          "language": "ja",
+          "text": "statsForViewでstats.pty_idがnullの場合、適用判定はどうなりますか？"
+        },
+        {
+          "id": "F04-support-en",
+          "language": "en",
+          "text": "What does statsForView return when stats.pty_id is null?"
+        },
+        {
+          "id": "F04-support-short",
+          "language": "short",
+          "text": "statsForView stats.pty_id=null 適用判定は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F04-premise_correction",
+      "family": "F04",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F04-target",
+      "questions": [
+        {
+          "id": "F04-premise_correction-ja",
+          "language": "ja",
+          "text": "limited=falseでもfive_hour=100なら必ず制限中になるという前提で、優先規則を教えてください。"
+        },
+        {
+          "id": "F04-premise_correction-en",
+          "language": "en",
+          "text": "Given that five_hour=100 always means limited even when limited=false, what is the precedence rule?"
+        },
+        {
+          "id": "F04-premise_correction-short",
+          "language": "short",
+          "text": "limited=false five_hour=100 必ず制限中の前提 優先規則は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F04-unsupported_premise",
+      "family": "F04",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F04-target",
+      "questions": [
+        {
+          "id": "F04-unsupported_premise-ja",
+          "language": "ja",
+          "text": "statsForViewの本番取り違え率が0件と検証済みという前提で、検証したsession数を教えてください。"
+        },
+        {
+          "id": "F04-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming statsForView has been verified to have zero production misattributions, how many sessions were checked?"
+        },
+        {
+          "id": "F04-unsupported_premise-short",
+          "language": "short",
+          "text": "statsForView 本番取り違え0件検証済み 検証session数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F04-out_of_corpus",
+      "family": "F04",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F04-target",
+      "questions": [
+        {
+          "id": "F04-out_of_corpus-ja",
+          "language": "ja",
+          "text": "provider側の制限解除からseat-statusが解除を表示するまで、このデプロイで保証される最大遅延は何秒ですか？"
+        },
+        {
+          "id": "F04-out_of_corpus-en",
+          "language": "en",
+          "text": "What maximum delay in seconds is guaranteed in this deployment between provider-side limit removal and seat-status displaying that removal?"
+        },
+        {
+          "id": "F04-out_of_corpus-short",
+          "language": "short",
+          "text": "provider制限解除→seat-status解除表示 このdeployment最大保証遅延秒は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F05-support",
+      "family": "F05",
+      "category": "support",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F05-target",
+      "questions": [
+        {
+          "id": "F05-support-ja",
+          "language": "ja",
+          "text": "checked_urlが受け付けるURL schemeは何ですか？"
+        },
+        {
+          "id": "F05-support-en",
+          "language": "en",
+          "text": "Which URL schemes does checked_url accept?"
+        },
+        {
+          "id": "F05-support-short",
+          "language": "short",
+          "text": "checked_url 受理URL schemeは？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F05-premise_correction",
+      "family": "F05",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F05-target",
+      "questions": [
+        {
+          "id": "F05-premise_correction-ja",
+          "language": "ja",
+          "text": "既存の通常ファイルscript.pyは既定アプリで直接開くという前提で、path_actionを説明してください。"
+        },
+        {
+          "id": "F05-premise_correction-en",
+          "language": "en",
+          "text": "Given that an existing ordinary script.py file is opened directly with the default app, explain path_action."
+        },
+        {
+          "id": "F05-premise_correction-short",
+          "language": "short",
+          "text": "既存通常script.py 直接default app開く前提 path_actionは？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F05-unsupported_premise",
+      "family": "F05",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F05-target",
+      "questions": [
+        {
+          "id": "F05-unsupported_premise-ja",
+          "language": "ja",
+          "text": "Revealへの切替で本番誤起動がゼロになったと検証済みという前提で、観測期間とクリック数を教えてください。"
+        },
+        {
+          "id": "F05-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming switching to Reveal has been verified to eliminate accidental launches in production, what observation period and click count were used?"
+        },
+        {
+          "id": "F05-unsupported_premise-short",
+          "language": "short",
+          "text": "Reveal 本番誤起動ゼロ検証済み 観測期間/クリック数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F05-out_of_corpus",
+      "family": "F05",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F05-target",
+      "questions": [
+        {
+          "id": "F05-out_of_corpus-ja",
+          "language": "ja",
+          "text": "このコードを実行しているPCで、通常の.mdファイルを開く既定アプリの実行ファイルpathは何ですか？"
+        },
+        {
+          "id": "F05-out_of_corpus-en",
+          "language": "en",
+          "text": "On the PC running this code, what is the executable path of the default application for opening an ordinary .md file?"
+        },
+        {
+          "id": "F05-out_of_corpus-short",
+          "language": "short",
+          "text": "この実行PC 通常.mdを開く既定app実行ファイルpathは？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F06-support",
+      "family": "F06",
+      "category": "support",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F06-target",
+      "questions": [
+        {
+          "id": "F06-support-ja",
+          "language": "ja",
+          "text": "deleteで添付ファイル削除とtopic log削除はどちらが先ですか？"
+        },
+        {
+          "id": "F06-support-en",
+          "language": "en",
+          "text": "In delete, which comes first: removing attachments or removing the topic log?"
+        },
+        {
+          "id": "F06-support-short",
+          "language": "short",
+          "text": "delete 添付ファイル/topic log 削除順は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F06-premise_correction",
+      "family": "F06",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F06-target",
+      "questions": [
+        {
+          "id": "F06-premise_correction-ja",
+          "language": "ja",
+          "text": "index entryを消せばtopicファイルも消えて復元されないという前提で、readとの関係を説明してください。"
+        },
+        {
+          "id": "F06-premise_correction-en",
+          "language": "en",
+          "text": "Given that deleting an index entry also deletes the topic file and prevents read from restoring it, explain the relationship with read."
+        },
+        {
+          "id": "F06-premise_correction-short",
+          "language": "short",
+          "text": "index entry削除でtopic fileも消えread復元しない前提 関係は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F06-unsupported_premise",
+      "family": "F06",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F06-target",
+      "questions": [
+        {
+          "id": "F06-unsupported_premise-ja",
+          "language": "ja",
+          "text": "topic logを先に消す順序で本番クラッシュ後の孤児率0%を達成済みという前提で、障害注入件数を教えてください。"
+        },
+        {
+          "id": "F06-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming log-first deletion has achieved a 0% production orphan rate after crashes, how many fault injections were performed?"
+        },
+        {
+          "id": "F06-unsupported_premise-short",
+          "language": "short",
+          "text": "topic log先削除 本番crash孤児率0%達成済み 障害注入件数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F06-out_of_corpus",
+      "family": "F06",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/pullcept",
+      "target_source": "F06-target",
+      "questions": [
+        {
+          "id": "F06-out_of_corpus-ja",
+          "language": "ja",
+          "text": "topic log削除後、添付削除前にクラッシュした場合、このデプロイで添付の削除再試行まで保証される上限は何秒ですか？"
+        },
+        {
+          "id": "F06-out_of_corpus-en",
+          "language": "en",
+          "text": "After a crash between topic-log deletion and attachment deletion, what upper bound in seconds is guaranteed for retrying attachment deletion in this deployment?"
+        },
+        {
+          "id": "F06-out_of_corpus-short",
+          "language": "short",
+          "text": "topic log削除後/添付削除前crash 添付削除retry最大保証秒は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F07-support",
+      "family": "F07",
+      "category": "support",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F07-target",
+      "questions": [
+        {
+          "id": "F07-support-ja",
+          "language": "ja",
+          "text": "checkWebhookRateLimitのIP当たりの上限と時間窓はいくつですか？"
+        },
+        {
+          "id": "F07-support-en",
+          "language": "en",
+          "text": "What per-IP limit and time window does checkWebhookRateLimit use?"
+        },
+        {
+          "id": "F07-support-short",
+          "language": "short",
+          "text": "checkWebhookRateLimit IP別上限/時間窓は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F07-premise_correction",
+      "family": "F07",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F07-target",
+      "questions": [
+        {
+          "id": "F07-premise_correction-ja",
+          "language": "ja",
+          "text": "このin-memory limiterは複数Workers instanceで厳密にglobal consistentという前提で、範囲を教えてください。"
+        },
+        {
+          "id": "F07-premise_correction-en",
+          "language": "en",
+          "text": "Given that this in-memory limiter is strictly globally consistent across Workers instances, what is its scope?"
+        },
+        {
+          "id": "F07-premise_correction-short",
+          "language": "short",
+          "text": "in-memory limiter 複数Workers global consistent前提 範囲は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F07-unsupported_premise",
+      "family": "F07",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F07-target",
+      "questions": [
+        {
+          "id": "F07-unsupported_premise-ja",
+          "language": "ja",
+          "text": "per-isolate limiterが本番burstを99%阻止済みという前提で、burstの定義と実測件数を教えてください。"
+        },
+        {
+          "id": "F07-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming the per-isolate limiter has already blocked 99% of production bursts, what burst definition and measured count were used?"
+        },
+        {
+          "id": "F07-unsupported_premise-short",
+          "language": "short",
+          "text": "per-isolate limiter 本番burst99%阻止済み 定義/実測件数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F07-out_of_corpus",
+      "family": "F07",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F07-target",
+      "questions": [
+        {
+          "id": "F07-out_of_corpus-ja",
+          "language": "ja",
+          "text": "現在稼働している全Workers isolateを合計した、このIPのwebhook窓内request countはいくつですか？"
+        },
+        {
+          "id": "F07-out_of_corpus-en",
+          "language": "en",
+          "text": "What is the current webhook-window request count for this IP summed across all running Workers isolates?"
+        },
+        {
+          "id": "F07-out_of_corpus-short",
+          "language": "short",
+          "text": "現在全Workers isolate合計 このIP webhook窓内request countは？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F08-support",
+      "family": "F08",
+      "category": "support",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F08-target",
+      "questions": [
+        {
+          "id": "F08-support-ja",
+          "language": "ja",
+          "text": "GitHub hook CIDR cacheのTTL定数は何秒ですか？"
+        },
+        {
+          "id": "F08-support-en",
+          "language": "en",
+          "text": "How many seconds is the GitHub hook CIDR cache TTL constant?"
+        },
+        {
+          "id": "F08-support-short",
+          "language": "short",
+          "text": "GitHub hook CIDR cache TTL定数秒は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F08-premise_correction",
+      "family": "F08",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F08-target",
+      "questions": [
+        {
+          "id": "F08-premise_correction-ja",
+          "language": "ja",
+          "text": "ipMatchesCIDRsはIPv6 client IPを常にfalseにするという前提で、その分岐を教えてください。"
+        },
+        {
+          "id": "F08-premise_correction-en",
+          "language": "en",
+          "text": "Given that ipMatchesCIDRs always returns false for an IPv6 client IP, what branch handles it?"
+        },
+        {
+          "id": "F08-premise_correction-short",
+          "language": "short",
+          "text": "ipMatchesCIDRs IPv6 client常にfalse前提 分岐は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F08-unsupported_premise",
+      "family": "F08",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F08-target",
+      "questions": [
+        {
+          "id": "F08-unsupported_premise-ja",
+          "language": "ja",
+          "text": "CIDR cacheが本番API失敗率を1%未満にしたと確認済みという前提で、測定期間と失敗件数を教えてください。"
+        },
+        {
+          "id": "F08-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming the CIDR cache has been confirmed to reduce production API failure below 1%, what period and failure count were measured?"
+        },
+        {
+          "id": "F08-unsupported_premise-short",
+          "language": "short",
+          "text": "CIDR cache 本番API失敗率1%未満確認済み 測定期間/失敗件数は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F08-out_of_corpus",
+      "family": "F08",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F08-target",
+      "questions": [
+        {
+          "id": "F08-out_of_corpus-ja",
+          "language": "ja",
+          "text": "このデプロイで全isolateを横断して保証されるGitHub hook CIDR更新遅延の最大値は何秒ですか？"
+        },
+        {
+          "id": "F08-out_of_corpus-en",
+          "language": "en",
+          "text": "What maximum GitHub hook CIDR update lag in seconds is guaranteed across all isolates in this deployment?"
+        },
+        {
+          "id": "F08-out_of_corpus-short",
+          "language": "short",
+          "text": "このdeployment 全isolate横断GitHub hook CIDR更新遅延 最大保証秒は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F09-support",
+      "family": "F09",
+      "category": "support",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F09-target",
+      "questions": [
+        {
+          "id": "F09-support-ja",
+          "language": "ja",
+          "text": "verifyGitHubSignatureがprefix後に要求するhexの文字数と文字種は何ですか？"
+        },
+        {
+          "id": "F09-support-en",
+          "language": "en",
+          "text": "What hex length and character set does verifyGitHubSignature require after the prefix?"
+        },
+        {
+          "id": "F09-support-short",
+          "language": "short",
+          "text": "verifyGitHubSignature prefix後 hex長/文字種は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F09-premise_correction",
+      "family": "F09",
+      "category": "premise_correction",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F09-target",
+      "questions": [
+        {
+          "id": "F09-premise_correction-ja",
+          "language": "ja",
+          "text": "target版はdigest文字列を===比較して署名検証するという前提で、比較経路を教えてください。"
+        },
+        {
+          "id": "F09-premise_correction-en",
+          "language": "en",
+          "text": "Given that the target revision verifies signatures by comparing digest strings with ===, what comparison path is used?"
+        },
+        {
+          "id": "F09-premise_correction-short",
+          "language": "short",
+          "text": "target版 署名digest文字列===比較の前提 比較経路は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F09-unsupported_premise",
+      "family": "F09",
+      "category": "unsupported_premise",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F09-target",
+      "questions": [
+        {
+          "id": "F09-unsupported_premise-ja",
+          "language": "ja",
+          "text": "constant-time署名検証で本番攻撃成功率0%を実証済みという前提で、攻撃試行数と条件を教えてください。"
+        },
+        {
+          "id": "F09-unsupported_premise-en",
+          "language": "en",
+          "text": "Assuming constant-time signature verification has proven a 0% production attack success rate, what attack count and conditions were tested?"
+        },
+        {
+          "id": "F09-unsupported_premise-short",
+          "language": "short",
+          "text": "constant-time署名検証 本番攻撃成功率0%実証済み 試行数/条件は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    },
+    {
+      "id": "F09-out_of_corpus",
+      "family": "F09",
+      "category": "out_of_corpus",
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "target_source": "F09-target",
+      "questions": [
+        {
+          "id": "F09-out_of_corpus-ja",
+          "language": "ja",
+          "text": "現在配備されているwebhook署名secretが最後にrotationされた日時はいつですか？"
+        },
+        {
+          "id": "F09-out_of_corpus-en",
+          "language": "en",
+          "text": "When was the currently deployed webhook-signature secret last rotated?"
+        },
+        {
+          "id": "F09-out_of_corpus-short",
+          "language": "short",
+          "text": "現在配備webhook署名secret 最終rotation日時は？"
+        }
+      ],
+      "equivalence_review": "author reviewed: same target revision, requested output, asserted premise and conditions; independent equivalence review pending; do not alter after reader exposure"
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "audit_date": "2026-10-30",
+  "scope": "All earlier #275 development source families and intents, conservatively excluded; new diagnostic set has never been run through a reader.",
+  "audited": [
+    {
+      "artifact": ".artifacts/rag-abstention-275/pilot-2026-10-12.json",
+      "sha256": "b6b752843dca0347ea81e9420ebd636d139c5e6ef210fe5a635f5fe358cdca89"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/context-pilot-2026-10-12.json",
+      "sha256": "f4053299f2fb614cc119a2320dc546290912e6745951d7fc854e0cb5098443b3"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/reader-capture-2026-10-12.json",
+      "sha256": "fa348691eafc0907c289f337eb04858f47d3ef4457eb3d72162ff0ea1de9518d"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/near-raw-2026-10-13.json",
+      "sha256": "3e524eb42534a701da206f4e2cffa74d58dff2ecbc75afbf92ed4d3fb4a77ca2"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/fulltext-pilot-input.json",
+      "sha256": "b6c44c1d505e1c3a5235495c20f071d0c49f2c93204deda07b31a952a817fea3"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/near-protocol-gold.json",
+      "sha256": "95cad04a6f491cecc770b77adc81703b04bf2cbe79ef92f2c53922bab46a7e7a"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/prompt-ablation-protocol.json",
+      "sha256": "20d8989138b331f36079b3ec6911441243cf57e2a0f58106bb6d2b9f0fbfb263"
+    },
+    {
+      "artifact": ".artifacts/rag-abstention-275/snippet-reader-gold.json",
+      "sha256": "0d40e9eab56186271a01f89a60c2478433dfce8f8ef4c46fb7c7e8856e8ee5d4"
+    }
+  ],
+  "excluded_public_issue_families": [
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/106",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/180",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/194",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/216",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/222",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/238",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/244",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/246",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/250",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/256",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/274",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/275",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/55",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/85",
+    "https://github.com/Liplus-Project/github-rag-mcp/issues/91"
+  ],
+  "excluded_doc_families": [
+    "Liplus-Project/github-rag-mcp:docs/0-requirements.ja.md",
+    "Liplus-Project/github-rag-mcp:docs/0-requirements.md",
+    "Liplus-Project/github-rag-mcp:docs/2-feedback-memory.ja.md",
+    "Liplus-Project/github-rag-mcp:docs/2-feedback-memory.md",
+    "Liplus-Project/github-rag-mcp:docs/4-abstention-replay.ja.md",
+    "Liplus-Project/github-webhook-mcp:README.md",
+    "Liplus-Project/github-webhook-mcp:docs/0-requirements.ja.md",
+    "Liplus-Project/github-webhook-mcp:docs/0-requirements.md",
+    "Liplus-Project/github-webhook-mcp:docs/_Sidebar.md",
+    "Liplus-Project/neuron-graph-rag:docs/requirements.md",
+    "Liplus-Project/neuron-graph-rag:docs/specifications/runtime-wheel.md"
+  ],
+  "conservative_exclusions": [
+    {
+      "repo": "Liplus-Project/github-rag-mcp",
+      "path_prefix": "",
+      "reason": "Entire repository source and issue family excluded from new corpus"
+    },
+    {
+      "repo": "Liplus-Project/neuron-graph-rag",
+      "path_prefix": "",
+      "reason": "Entire repository including #298/#299 and current team measurement excluded"
+    },
+    {
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "path_prefix": "docs/",
+      "reason": "Earlier requirements/retention discovery and snippet development families"
+    },
+    {
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "path_prefix": "README",
+      "reason": "Earlier document discovery family"
+    },
+    {
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "path_prefix": "worker/src/store",
+      "reason": "Processed/unprocessed retention and purge implementation family"
+    },
+    {
+      "repo": "Liplus-Project/github-webhook-mcp",
+      "path_prefix": "shared/",
+      "reason": "Old retrieval/summary/document families"
+    }
+  ],
+  "excluded_intent_topics": [
+    "#275 abstention candidates/production threshold/adoption claims",
+    "embedding batch padding/count*max/sum budget and reranker input caps",
+    "mention/supersedes graph semantics/graph_expand/hops",
+    "NGR unknown relation type/stale registry/write/read validation",
+    "processed/unprocessed retention/purge days/zero",
+    "long-document FTS prefix/full/chunks/raw mapping/1400 excerpts/ICU/candidate cost",
+    "old low-confidence lunar tomato query"
+  ],
+  "new_family_boundary": "Same-path revisions and related source copies are one family. Topic-index != retention policies; per-isolate limiter != AI usage window: neither is a copy or derivation of the earlier judgment. Cross-file imports alone are not shared proposition provenance. New files do not copy the excluded requirements passages.",
+  "limits": "This is a manually audited finite exclusion ledger, not a proof that unrelated project history has never discussed these modules. No production index queried and no NGR ingestion."
+}

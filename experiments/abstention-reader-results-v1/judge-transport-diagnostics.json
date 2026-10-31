@@ -1,0 +1,28 @@
+{
+  "scope": "Transport-only metadata; not semantic scoring. Do not give to judge.",
+  "tool": "exec_command Get-Content -Raw exact designated judge input, max_output_tokens10000",
+  "provider_token_counts": "unavailable",
+  "files": [
+    {
+      "file": "judge-inputs/f02.json",
+      "sha256": "b92d4728bdb99b8bf68f5aabe6e5c016ce869512e66f0761dc09a3a932457239",
+      "tool_approx_output_tokens": 7072,
+      "complete_json": true,
+      "truncated": false
+    },
+    {
+      "file": "judge-inputs/f06.json",
+      "sha256": "e2798180102ddad5edf5e20c516f8f1d9b59f369ef60c354293bb098757f899e",
+      "tool_approx_output_tokens": 6960,
+      "complete_json": true,
+      "truncated": false
+    },
+    {
+      "file": "judge-inputs/f08.json",
+      "sha256": "675f1a0ae1998ad15feaae65babd96a3a20e3c107926dd4445ec568adc6081f9",
+      "tool_approx_output_tokens": 6257,
+      "complete_json": true,
+      "truncated": false
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "algorithm": "sha256 over exact bytes; frozen files are -text in gitattributes",
+  "files": {
+    "answer-schema.json": "98980a583ebcd18fe05462a0f5dfb7af165576baaf4aa4924954834d61174c92",
+    "exclusions.json": "d740b7cefb58351f128ec7799ed7ee0abd51708579637b5499536dea4917a2e6",
+    "gold.json": "6fff623f312da95188487904d127ecc57cb0de9a465daf48e91a693598441950",
+    "intents.json": "c02a5bf537cb9e03c521ab205eaafbc006515fc80bb6f990f345f9ebbe671846",
+    "preregistration.json": "8b3357429d1869cd30d1e8e7893caf06bdab98547bfbf62c4c1875ded0f9c06e",
+    "provenance.json": "15bdeb4d4c4abb4aa44891a3b0598522e4dafdf723f2c19198cae47f5bb4b1fe",
+    "reader-gold.json": "e098743ea7a5bbab126b8fbee50a8e60ef30be5eb2f6d3642ab4e74361785fe4",
+    "reader-inputs/m2.json": "cc513f58b81732fc8665695f49e063c51c62008c8b12b2f24d3d75e9f4bd2c85",
+    "reader-inputs/q7.json": "6d08686fca4a9b462e77e472c1a48c94ec04eb9203c17bca97c59f75d83efe7c",
+    "reader-inputs/v8.json": "d4809869d582e89acb0c9a7fecc86a1f90072998055543b694ce9cdebd859383",
+    "sources/F01-target.txt": "477a1b731abdea767cd7c80ae7f3bfd2739b5ba0bc6ae62d621130fd17ebde62",
+    "sources/F02-target.txt": "49ae12dea47c6e4385f824fef5889c8e35303ef4950044b5e6c54acb032facb2",
+    "sources/F03-historical.txt": "0d9cdcc3390ac530ddea8755ade506397f124022ed259a4189448cd3afd3efbf",
+    "sources/F03-target.txt": "2aad1967354a825aab25b6e74f7c0a9b3ccbf6a87ce60a07dc0ff054715cc07a",
+    "sources/F04-target.txt": "337714d8be49828d71f99781575ee0c7831b2abcb977545790733643c2a234ae",
+    "sources/F05-target.txt": "a38229123a19661d025e089c1bc5da3d625c636910f940724f939bfb1314b00c",
+    "sources/F06-target.txt": "826e55e56d4978f55c5640fc166fe4e019fee41bd2f43d464aa4702b1a0f8dd1",
+    "sources/F07-target.txt": "b966950795f001af7fd7631d80250b8ebf1afba9817cfc4621cccd5ce47bd99c",
+    "sources/F08-target.txt": "ee9af27b69655eaad527ef98c4e8f826728d5572b064dd0146f6983684efea93",
+    "sources/F09-historical.txt": "fb30a20cb743a6d59f1f0c0094e362a820fd4706884fea1ed2eafe0036a4a171",
+    "sources/F09-target.txt": "fe4fba3cd0200948df8fd44e264032f300164c2be31aef2aa1a9034ecabc6903",
+    "sources/LICENSE-github-webhook-mcp.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "sources/LICENSE-pullcept.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "sources/NOTICE-github-webhook-mcp.txt": "b778ed400042ae0420580a7661537ca6fd9a0bf40b7326026d60e879b9406a8d",
+    "split.json": "9f25491b840164190a86ab8c15e7a388bb063b8d0cb172008a347b80587d3f39"
+  }
+}

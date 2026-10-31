@@ -1,0 +1,21 @@
+{
+  "protocol": "rag275-reader-tranche1",
+  "frozen_commit": "49a82484aa4f8fc5f72ca18db57ffd7a9b246827",
+  "freeze_sha256": "e4962e8e62ef2aa7584982ccda63ed9b34c173beea2fbadeeac740e3cd5bf321",
+  "requested_model": "gpt-6.1-sol",
+  "resolved_backend_model": "unobservable",
+  "effort": "medium",
+  "fork_turns": "none",
+  "repetitions": 3,
+  "arms": [
+    "q7",
+    "m2",
+    "v8"
+  ],
+  "questions_per_trial": 12,
+  "total_answers": 108,
+  "provider_token_counts": "unavailable",
+  "scope": "conditional curated packet ablation only; not retrieval or threshold efficacy",
+  "created_utc": "2026-10-30T13:12:29.6122626Z",
+  "transport_pilot": "trial01 and03 stopped: functions.exec wrapper default10000 truncated inputs despite nested30000; trial02 output kept as unscored transport pilot, not inspected for outcomes. Entire pilot batch excluded before semantic scoring. Fresh contexts with explicit wrapper pragma30000 will be used."
+}

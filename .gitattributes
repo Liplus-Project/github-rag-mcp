@@ -2,3 +2,6 @@
 experiments/document-tail/fixture.json -text whitespace=cr-at-eol
 experiments/document-tail/provenance.json -text whitespace=cr-at-eol
 experiments/document-tail/source-* -text whitespace=cr-at-eol
+experiments/abstention-evaluation-v1/** -text whitespace=cr-at-eol
+experiments/abstention-reader-transport-v1/** -text whitespace=cr-at-eol
+experiments/abstention-reader-results-v1/** -text whitespace=cr-at-eol

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "phase": "pre-scoring transport amendment; no model, gold, question, arm, source or scoring change",
+  "original_freeze_sha256": "e4962e8e62ef2aa7584982ccda63ed9b34c173beea2fbadeeac740e3cd5bf321",
+  "change": "Lossless document dictionary deduplication. Every original instruction/question/diagnostic note/source metadata/excerpt string preserved; cases keep original order and reference identical documents. Neutral common transport instruction only explains references.",
+  "pilot_disposition": {
+    "reported_by": "parent agent before this correction",
+    "batches": 2,
+    "status": "technical pilots excluded before parent outcome inspection/adjudication",
+    "failure": "retain/warning original85KB inputs truncated despite explicit30000 wrapper pragma; same failing transport must not repeat",
+    "empty_outputs": "trial02/12 empty outputs unscored, retained only as technical evidence; implementation delegate did not read any pilot output",
+    "scope": "No scored reader trial has started. Technical exposure is recorded, not erased or called unseen. Future scoring uses fresh contexts and excludes every pilot response."
+  },
+  "read_diagnostic": {
+    "tool": "exec_command Get-Content -Raw of exactly one designated derivedpacket, max_output_tokens=10000",
+    "source": "live local transport-only reads; no reader/model calls",
+    "results": [
+      {
+        "arm": "q7",
+        "tool_approx_output_tokens": 5821,
+        "complete_json": true,
+        "truncated": false
+      },
+      {
+        "arm": "v8",
+        "tool_approx_output_tokens": 6244,
+        "complete_json": true,
+        "truncated": false
+      },
+      {
+        "arm": "m2",
+        "tool_approx_output_tokens": 801,
+        "complete_json": true,
+        "truncated": false
+      }
+    ],
+    "limit": "This observed wrapper fits below10000 for these exact files. No claim of universal tool cap or provider token accounting."
+  },
+  "unchanged_controls": "Same requested launcher model gpt-6.1-sol, medium effort, isolated context, three repeats per arm, same12cases and answer schema/gold. Narrow one designated input read and final output write only.",
+  "scoring": "Do not read amendment/manifest/gold/other outputs into a reader context. Read only its designated compact blindpacket. Parent retains all semantic scoring; partial technical responses have no answer outcomes.",
+  "reproducibility": "Original files are immutable. expand(compact(original)) must be JSON deep-equal, and all derived bytes match manifest. A partial transport read blocks answering rather than scoring a partial packet."
+}

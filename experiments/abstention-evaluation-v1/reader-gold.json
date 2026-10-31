@@ -1,0 +1,257 @@
+{
+  "instruction": "Evaluator only. Never pass this file, gold, protocol arm mapping or other answers to readers.",
+  "cases": [
+    {
+      "id": "Q001",
+      "question_id": "F02-unsupported_premise-ja",
+      "intent_id": "F02-unsupported_premise",
+      "gold": {
+        "intent_id": "F02-unsupported_premise",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": "not established",
+        "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
+      }
+    },
+    {
+      "id": "Q002",
+      "question_id": "F02-out_of_corpus-ja",
+      "intent_id": "F02-out_of_corpus",
+      "gold": {
+        "intent_id": "F02-out_of_corpus",
+        "expected": "insufficient",
+        "answer": "既定値13pxや保存keyの定義はあるが、現在起動中の画面のlocalStorage内容は与えられていないため、実保存値は確定できない。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 既定値13pxや保存keyの定義はあるが、現在起動中の画面のlocalStorage内容は与えられていないため、実保存値は確定できない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
+      }
+    },
+    {
+      "id": "Q003",
+      "question_id": "F08-premise_correction-ja",
+      "intent_id": "F08-premise_correction",
+      "gold": {
+        "intent_id": "F08-premise_correction",
+        "expected": "premise_corrected",
+        "answer": "IPv4としてparseできないIPはtrueで通過する。この分岐にはIPv6だけでなくunparseable IPも含まれる。",
+        "evidence": [
+          {
+            "source_id": "F08-target",
+            "quote": "if (ipInt === null) {",
+            "start_utf8": 2133,
+            "end_utf8": 2154
+          },
+          {
+            "source_id": "F08-target",
+            "quote": "For now, allow IPv6 through",
+            "start_utf8": 2223,
+            "end_utf8": 2250
+          },
+          {
+            "source_id": "F08-target",
+            "quote": "return true;",
+            "start_utf8": 2295,
+            "end_utf8": 2307
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q004",
+      "question_id": "F02-premise_correction-ja",
+      "intent_id": "F02-premise_correction",
+      "gold": {
+        "intent_id": "F02-premise_correction",
+        "expected": "premise_corrected",
+        "answer": "参加者別configではなく画面のlocalStorageにpullcept.ui-scaleとして保存する。",
+        "evidence": [
+          {
+            "source_id": "F02-target",
+            "quote": "`localStorage`, for #60's reason: a property of the screen being read from.",
+            "start_utf8": 5585,
+            "end_utf8": 5660
+          },
+          {
+            "source_id": "F02-target",
+            "quote": "const UI_SCALE_KEY = \"pullcept.ui-scale\";",
+            "start_utf8": 5669,
+            "end_utf8": 5710
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q005",
+      "question_id": "F06-unsupported_premise-ja",
+      "intent_id": "F06-unsupported_premise",
+      "gold": {
+        "intent_id": "F06-unsupported_premise",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": "not established",
+        "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
+      }
+    },
+    {
+      "id": "Q006",
+      "question_id": "F06-out_of_corpus-ja",
+      "intent_id": "F06-out_of_corpus",
+      "gold": {
+        "intent_id": "F06-out_of_corpus",
+        "expected": "insufficient",
+        "answer": "削除順と次のdeleteで扱えるという説明はあるが、このデプロイで再試行がいつ起きるかの時間保証はない。上限秒は確定できず、未削除添付が存在しないとも断言しない。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 削除順と次のdeleteで扱えるという説明はあるが、このデプロイで再試行がいつ起きるかの時間保証はない。上限秒は確定できず、未削除添付が存在しないとも断言しない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
+      }
+    },
+    {
+      "id": "Q007",
+      "question_id": "F06-premise_correction-ja",
+      "intent_id": "F06-premise_correction",
+      "gold": {
+        "intent_id": "F06-premise_correction",
+        "expected": "premise_corrected",
+        "answer": "indexは注釈。entryだけ消してもファイルは残り、次のreadで再採用される。topic削除にはファイル削除が必要。",
+        "evidence": [
+          {
+            "source_id": "F06-target",
+            "quote": "removing it removes an annotation: the file is still there, and the next",
+            "start_utf8": 966,
+            "end_utf8": 1038
+          },
+          {
+            "source_id": "F06-target",
+            "quote": "read adopts it back under a rebuilt entry. A topic is deleted by deleting",
+            "start_utf8": 1043,
+            "end_utf8": 1116
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q008",
+      "question_id": "F06-support-ja",
+      "intent_id": "F06-support",
+      "gold": {
+        "intent_id": "F06-support",
+        "expected": "answered",
+        "answer": "topic logを先にremove_fileし、その後にattachmentsをremove_dir_allする。NotFoundは許容するが他のlog削除errorではそこで戻る。",
+        "evidence": [
+          {
+            "source_id": "F06-target",
+            "quote": "match std::fs::remove_file(topic_path(dir, topic_id)) {",
+            "start_utf8": 28793,
+            "end_utf8": 28848
+          },
+          {
+            "source_id": "F06-target",
+            "quote": "Err(e) => return Err(format!(\"Failed to delete the topic's log: {e}\")),",
+            "start_utf8": 28943,
+            "end_utf8": 29014
+          },
+          {
+            "source_id": "F06-target",
+            "quote": "match std::fs::remove_dir_all(attachments_path(dir, topic_id)) {",
+            "start_utf8": 29324,
+            "end_utf8": 29388
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q009",
+      "question_id": "F08-support-ja",
+      "intent_id": "F08-support",
+      "gold": {
+        "intent_id": "F08-support",
+        "expected": "answered",
+        "answer": "CACHE_TTL_SECONDSは3600秒。これは当該固定コードの定数で、実際の稼働cache鮮度の測定ではない。",
+        "evidence": [
+          {
+            "source_id": "F08-target",
+            "quote": "const CACHE_TTL_SECONDS = 3600;",
+            "start_utf8": 539,
+            "end_utf8": 570
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q010",
+      "question_id": "F02-support-ja",
+      "intent_id": "F02-support",
+      "gold": {
+        "intent_id": "F02-support",
+        "expected": "answered",
+        "answer": "DEFAULT_TERMINAL_FONT_SIZEは13で、単位はpx。",
+        "evidence": [
+          {
+            "source_id": "F02-target",
+            "quote": "const DEFAULT_TERMINAL_FONT_SIZE = 13;",
+            "start_utf8": 4730,
+            "end_utf8": 4768
+          },
+          {
+            "source_id": "F02-target",
+            "quote": "The sizes a terminal can be set to, in `px`.",
+            "start_utf8": 3510,
+            "end_utf8": 3554
+          }
+        ],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": null
+      }
+    },
+    {
+      "id": "Q011",
+      "question_id": "F08-out_of_corpus-ja",
+      "intent_id": "F08-out_of_corpus",
+      "gold": {
+        "intent_id": "F08-out_of_corpus",
+        "expected": "insufficient",
+        "answer": "3600秒TTLは局所定数で、API失敗時のfallbackもある。デプロイ全isolateを横断する更新遅延保証は資料から確定できず、TTLをそのまま最大保証秒に転用しない。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": null,
+        "corpus_audit": "全文11snapshotを対象とする有限コーパス監査: 3600秒TTLは局所定数で、API失敗時のfallbackもある。デプロイ全isolateを横断する更新遅延保証は資料から確定できず、TTLをそのまま最大保証秒に転用しない。 対象コードの近傍情報があっても要求した時点/条件/保証の別情報を補わない。世界全体での不存在や前提の誤りは主張しない。"
+      }
+    },
+    {
+      "id": "Q012",
+      "question_id": "F08-unsupported_premise-ja",
+      "intent_id": "F08-unsupported_premise",
+      "gold": {
+        "intent_id": "F08-unsupported_premise",
+        "expected": "insufficient",
+        "answer": "提供された固定コーパスには要求された測定/規則を確定する根拠がない。質問の前提を肯定も否定もせず、根拠不足と答える。",
+        "evidence": [],
+        "scope": "Only the frozen source corpus and specified target revision; no production, world-wide absence, or current deployment inference",
+        "truth_of_unsupported_premise": "not established",
+        "corpus_audit": "全文11snapshotは実装コード/その説明/単体controlであり、本番の成功率・比較時間・攻撃試行・障害注入件数の実測ログや保証の証明資料を含まない。ソース上の単体testや定数から本番の定量達成を推論しない。前提の真偽は未確定。"
+      }
+    }
+  ]
+}
